@@ -281,6 +281,22 @@ def test_card_lifecycle_via_mcp(harness, monkeypatch):
     assert call(harness, "get_card", card_id=card["id"])["isError"] is True
 
 
+def test_failure_reason_is_in_the_mcp_card_payload(harness):
+    """The MCP's get_card / list_cards carry the classifier's verdict, so a
+    model reading the board sees why a card failed without the log."""
+    card = call(harness, "create_card", title="Broken", body="x")["payload"]
+    harness.store.set_status(card["id"], "running")
+    harness.store.set_status(card["id"], "failed",
+                             session_patch={"exit_code": 1, "verified": None})
+
+    got = call(harness, "get_card", card_id=card["id"])["payload"]
+    assert got["session"]["failure"]["kind"] == "crashed"
+    assert "1" in got["session"]["failure"]["detail"]
+
+    listed = {n["id"]: n for n in call(harness, "list_cards")["payload"]}
+    assert listed[card["id"]]["session"]["failure"]["kind"] == "crashed"
+
+
 def test_run_then_stop_via_mcp(harness):
     harness.config.vibe_bin = str(harness.tmp_path / "slow.sh")
     (harness.tmp_path / "slow.sh").write_text(FAKE_VIBE_SLOW)

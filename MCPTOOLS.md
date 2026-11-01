@@ -27,8 +27,8 @@ stays the single writer of cards and sessions. Injected through
 | Tool | What it does | Args |
 |---|---|---|
 | `current_card` | The card this session is implementing (id, title, status, project, workdir), or null outside a card session. The "ground yourself first" call. | — |
-| `list_cards` | Cards on the board, newest first, each with `depends_on`. | `status` (one of draft/running/reviewing/done/failed/stopped/accepted), `project` |
-| `get_card` | One card in full: body, session record, review, git info. | `card_id` |
+| `list_cards` | Cards on the board, newest first, each with `depends_on` and — for a card that failed — `session.failure` (`{kind, detail}`: why it failed, in one line). | `status` (one of draft/running/reviewing/done/failed/stopped/accepted), `project` |
+| `get_card` | One card in full: body, session record, review, git info, and `session.failure` when it failed. | `card_id` |
 | `card_log` | Tail of the card's current session log. | `card_id`, `tail` (1–5000, default 200) |
 | `list_templates` | Card templates usable with `create_card`. | — |
 | `stats` | Counts by status, total tokens, total/avg runtime. | `project` (optional) |

@@ -154,7 +154,10 @@ TOOLS: list[dict] = [
     },
     {
         "name": "list_cards",
-        "description": "List cards on the board, newest first. Optional filters: status, project. Each card includes depends_on (ids of cards it runs after). " + _COMMON,
+        "description": "List cards on the board, newest first. Optional filters: "
+            "status, project. Each card includes depends_on (ids of cards it runs "
+            "after) and, when it failed, session.failure ({kind, detail}) — why it "
+            "failed, in one line. " + _COMMON,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -165,7 +168,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "get_card",
-        "description": "Get one card (full body, session record, review, git info) by id. " + _COMMON,
+        "description": "Get one card (full body, session record, review, git info, "
+            "and session.failure when it failed) by id. " + _COMMON,
         "inputSchema": {
             "type": "object",
             "properties": {"card_id": {"type": "string"}},

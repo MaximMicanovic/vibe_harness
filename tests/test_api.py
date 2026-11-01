@@ -127,18 +127,21 @@ exit 0
 
 
 def make_env(tmp_path: Path, script: str = FAKE_VIBE, archives=None,
-             **config_kwargs) -> SimpleNamespace:
+             settings=None, **config_kwargs) -> SimpleNamespace:
     cards_dir = tmp_path / "cards"
     sessions_dir = tmp_path / "sessions"
     store = CardStore(cards_dir)
     fake = tmp_path / "fake_vibe.sh"
     fake.write_text(script)
     fake.chmod(0o755)
-    config = Config(vibe_bin=str(fake), time_limit_seconds=30, **config_kwargs)
+    config_kwargs.setdefault("time_limit_seconds", 30)
+    config = Config(vibe_bin=str(fake), **config_kwargs)
     projects = ProjectStore(tmp_path / "projects.json")
     # A per-test settings store: PUT /api/settings must never write the real
-    # settings.json of the harness this suite runs in.
-    settings = SettingsStore(tmp_path / "settings.json")
+    # settings.json of the harness this suite runs in. A test that needs a
+    # specific stored setting passes its own.
+    if settings is None:
+        settings = SettingsStore(tmp_path / "settings.json")
     runner = SessionRunner(store, config, sessions_dir=sessions_dir, projects=projects,
                            settings=settings)
     app = create_app(config=config, store=store, runner=runner, projects=projects,

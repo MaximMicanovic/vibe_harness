@@ -56,7 +56,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app import gitops, liveusage, mailbox, praccept
+from app import failures, gitops, liveusage, mailbox, praccept
 from app.backends import Backend, get_backend
 from app.config import BASE_DIR, SESSIONS_DIR, Config, resolve_path
 from app.gitops import GitBusyError, GitError, GitMergeConflict
@@ -1776,6 +1776,10 @@ class SessionRunner:
                 outcome["token_breakdown"] = token_breakdown
             if worker_session_id:
                 outcome["worker_session_id"] = worker_session_id
+            if entry.get("timed_out"):
+                # The harness watchdog killed it (a backend without a native
+                # time limit): a timeout, not the user pressing Stop.
+                outcome["timed_out"] = True
             if entry["stop_requested"]:
                 self.store.set_status(card_id, "stopped", session_patch=outcome)
             elif exit_code != 0:
@@ -1860,6 +1864,11 @@ class SessionRunner:
                 "export_dir": str(rdir / "export"),
                 "via": via,
             }
+            if verdict is None:
+                # No verdict channel answered: recorded explicitly so the
+                # failure classifier can tell "the reviewer said no" from "the
+                # reviewer said nothing" without parsing the reason text.
+                review_record["no_verdict"] = True
             if token_breakdown is not None:
                 review_record["token_breakdown"] = token_breakdown
             # Supervision bookkeeping: which commit this review covered (the
@@ -1878,10 +1887,13 @@ class SessionRunner:
             if self.config.mailbox and mdir.is_dir():
                 review_record["messages"] = len(mailbox.list_messages(mdir))
             if entry["stop_requested"]:
-                self.store.set_status(card_id, "stopped", session_patch={
+                stopped_patch = {
                     "finished_at": now_iso(),
                     "exit_code": exit_code,
-                })
+                }
+                if entry.get("timed_out"):
+                    stopped_patch["timed_out"] = True
+                self.store.set_status(card_id, "stopped", session_patch=stopped_patch)
             elif approved:
                 # Loop step 2a: approved -> done, then auto-accept if asked.
                 done = self.store.set_status(card_id, "done", session_patch={
@@ -2039,7 +2051,12 @@ class SessionRunner:
                 "breakdown": entry.get("live_breakdown")}
 
     def annotate_card(self, card: dict) -> dict:
-        """Return the card for API responses, with live token usage attached.
+        """Return the card for API responses, with the derived fields attached.
+
+        `session.failure` is the classifier's `{kind, detail}` for a card that
+        failed (None/absent for one that did not) — the board's badge and the
+        MCP's get_card/list_cards both read it from here, so the reason is
+        computed once, in one place.
 
         While a session is live, `session.live_tokens` is the per-card token
         total shown on the card and summed into /api/stats: the live counter
@@ -2049,10 +2066,20 @@ class SessionRunner:
         input) shown on hover. The store's card is never mutated — the session
         dict is copied.
         """
+        out = dict(card)
+        session = card.get("session")
+        if isinstance(session, dict):
+            new_session = dict(session)
+            failure = failures.classify(card)
+            if failure is None:
+                new_session.pop("failure", None)
+            else:
+                new_session["failure"] = failure
+            out["session"] = new_session
         live = self.live_usage(card["id"])
         if live is None:
-            return card
-        session = card.get("session") or {}
+            return out
+        session = out.get("session") or {}
         recorded = session.get("tokens") or 0
         if live["cumulative"]:
             value = max(live["tokens"], recorded)
@@ -2063,7 +2090,6 @@ class SessionRunner:
                                           live.get("breakdown"), live["cumulative"])
         if breakdown is not None:
             new_session["live_token_breakdown"] = breakdown
-        out = dict(card)
         out["session"] = new_session
         return out
 
