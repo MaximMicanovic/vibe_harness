@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+dist/
+build/
+*.egg-info/
+sessions/
+cards/
+notes/
+archives/
+stacks.json
+models.json
+projects.json
+
+# Working notes: the harness agents' decision log, which quotes the specs and
+# prompts this board was driven with. Local only — never published.
+NOTES.md

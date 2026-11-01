@@ -1,0 +1,769 @@
+"""FastAPI app: HTTP API + static dashboard. Run with:  uvicorn app.main:app --reload --reload-dir app --port 8734
+"""
+from __future__ import annotations
+
+import hashlib
+import subprocess
+import sys
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import FastAPI, Query, Response
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from app import fsdialog
+from app.archives import (
+    ArchiveError,
+    ArchiveExists,
+    ArchiveNotFound,
+    ArchiveStore,
+    CardInOtherArchive,
+    CardNotArchived,
+)
+from app.config import (
+    ARCHIVES_DIR,
+    BASE_DIR,
+    MODELS_FILE,
+    CARDS_DIR,
+    PROJECTS_FILE,
+    STATIC_DIR,
+    TEMPLATES_DIR,
+    Config,
+    load_config,
+)
+from app.gitops import GitError
+from app.cards import (
+    STATUSES,
+    DependencyError,
+    InvalidTransition,
+    CardNotFound,
+    CardRunning,
+    CardStore,
+)
+from app.models import ModelError, ModelSettings, describe as describe_models
+from app.projects import ProjectError, ProjectExists, ProjectNotFound, ProjectStore
+from app.questions import (
+    QuestionError,
+    QuestionNotFound,
+    QuestionNotPending,
+    QuestionStore,
+)
+from app import routemd
+from app.runner import (
+    TOKEN_BREAKDOWN_KEYS,
+    NotRunningError,
+    SessionRunner,
+    TestFailedError,
+    WorkdirNotAllowed,
+)
+from app.stacks import StackError, StackNotFound, StackStore
+
+
+class CardIn(BaseModel):
+    title: str = Field(min_length=1)
+    body: str = ""
+    template: str | None = None
+    auto_run: bool = False
+    auto_accept: bool = False
+    project: str | None = None
+    workdir: str | None = None
+    parent_id: str | None = None
+
+
+class CardUpdate(BaseModel):
+    title: str | None = None
+    body: str | None = None
+    auto_run: bool | None = None
+    auto_accept: bool | None = None
+    project: str | None = None
+    workdir: str | None = None
+    parent_id: str | None = None
+
+
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+
+
+class ArchiveIn(BaseModel):
+    name: str = Field(min_length=1)
+    type: str = "cards"
+    description: str = ""
+    # Which project the archive belongs to ("" = not tied to one). The board
+    # groups the archive browser by it.
+    project: str = ""
+
+
+class ArchivePatchIn(BaseModel):
+    project: str | None = None
+
+
+class ArchiveNotesIn(BaseModel):
+    card_ids: list[str] = Field(min_length=1)
+
+
+class StackIn(BaseModel):
+    """Create a deck: a header plus the cards it holds (same column)."""
+    card_ids: list[str] = Field(min_length=2)
+    title: str = ""
+    col: str | None = None
+
+
+class StackPatchIn(BaseModel):
+    title: str | None = None
+    card_ids: list[str] | None = None
+    col: str | None = None
+
+
+class StackCardsIn(BaseModel):
+    card_ids: list[str] = Field(min_length=1)
+
+
+class ModelsIn(BaseModel):
+    """Per-role model choice: {role: alias}. An empty alias clears the role."""
+    models: dict[str, str] = Field(default_factory=dict)
+
+
+class QuestionIn(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    options: list[str] | None = None
+
+
+class AnswerIn(BaseModel):
+    answer: str = Field(min_length=1, max_length=8000)
+
+
+def static_version() -> str:
+    """Fingerprint of the front-end assets (name, size, mtime) served to the tab."""
+    digest = hashlib.sha256()
+    for path in sorted(STATIC_DIR.rglob("*")):
+        if path.is_file():
+            stat = path.stat()
+            digest.update(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()[:12]
+
+
+def create_app(config: Config | None = None,
+               store: CardStore | None = None,
+               runner: SessionRunner | None = None,
+               projects: ProjectStore | None = None,
+               questions: QuestionStore | None = None,
+               archives: ArchiveStore | None = None,
+               stacks: StackStore | None = None,
+               models: ModelSettings | None = None) -> FastAPI:
+    """Application factory. Tests pass temp-dir store/runner/projects + a fake vibe bin."""
+    config = config or load_config()
+    store = store or CardStore(CARDS_DIR)
+    projects = projects or ProjectStore(PROJECTS_FILE)
+    models = models or ModelSettings(MODELS_FILE)
+    runner = runner or SessionRunner(store, config, projects=projects, models=models)
+    # The stack store prunes against the card store, so it has to live beside
+    # it: falling back to the project's STACKS_FILE would let an app built
+    # with a temp card store (every test app) prune the real board against
+    # an empty card list and save it empty on the first GET /api/stacks.
+    stacks = stacks or StackStore(store.cards_dir.parent / "stacks.json", store)
+    # Archiving a deck needs the deck store (it records and dissolves the deck).
+    archives = archives or ArchiveStore(ARCHIVES_DIR, store, projects, stacks=stacks)
+    # An archive store passed in by a caller (tests, embedders) may predate the
+    # deck wiring; give it this app's stack store so /api/archives/stacks works.
+    if archives.stacks is None:
+        archives.stacks = stacks
+    # Share the runner's QuestionStore so the HTTP endpoints and the runner
+    # (which cancels pending questions when a session ends) see one state.
+    questions = questions or runner.questions
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if not config.vibe_available():
+            print(f"WARNING: vibe CLI {config.vibe_bin!r} not found on PATH — "
+                  f"runs will fail until the Vibe CLI is installed.")
+        try:
+            runner.recover_stale()
+        except Exception as exc:
+            # Startup recovery is best effort: a broken card must never keep
+            # the server from coming up (per-card isolation lives in
+            # SessionRunner.recover_stale).
+            print(f"WARNING: startup recovery failed: {exc!r}")
+        # Auto-create/auto-update the managed route.md in every project folder.
+        routemd.sync_all_projects(projects)
+        yield
+
+    app = FastAPI(title="vibe-harness", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def _revalidate_static(request, call_next):
+        """Make the browser revalidate the dashboard assets on every load.
+
+        StaticFiles sends an ETag but no Cache-Control, so a reload can be
+        answered from the browser's heuristic cache. `no-cache` keeps the
+        revalidation (cheap 304s) while guaranteeing a reload picks up a new
+        app.js/style.css.
+        """
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    # --- error mapping (spec §8) -------------------------------------------
+    @app.exception_handler(CardNotFound)
+    async def _card_not_found(request, exc):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(CardRunning)
+    async def _card_running(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidTransition)
+    async def _invalid_transition(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(DependencyError)
+    async def _dependency_error(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(NotRunningError)
+    async def _not_running(request, exc):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(WorkdirNotAllowed)
+    async def _workdir_not_allowed(request, exc):
+        return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+    @app.exception_handler(GitError)
+    async def _git_error(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(TestFailedError)
+    async def _test_failed(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(ProjectNotFound)
+    async def _project_not_found(request, exc):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(ProjectExists)
+    async def _project_exists(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(ProjectError)
+    async def _project_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(QuestionNotFound)
+    async def _question_not_found(request, exc):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(QuestionNotPending)
+    async def _question_not_pending(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(QuestionError)
+    async def _question_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(ArchiveNotFound)
+    async def _archive_not_found(request, exc):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(CardNotArchived)
+    async def _card_not_archived(request, exc):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(ArchiveExists)
+    async def _archive_exists(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(CardInOtherArchive)
+    async def _card_in_other_archive(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(ArchiveError)
+    async def _archive_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(StackNotFound)
+    async def _stack_not_found(request, exc):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(StackError)
+    async def _stack_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(ModelError)
+    async def _model_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    # --- cards ---------------------------------------------------------------
+    @app.get("/api/cards")
+    def list_cards():
+        # Attach each card's Q&A history so the cards (and the MCP) can show a
+        # pending question without an extra request per card; annotate_card
+        # attaches session.live_tokens for live sessions (zero I/O when
+        # nothing is running).
+        return [runner.annotate_card(dict(n, questions=questions.list(n["id"]))) for n in store.list()]
+
+    @app.post("/api/cards", status_code=201)
+    def create_card(payload: CardIn):
+        card = store.create(payload.title, payload.body,
+                            template=payload.template, auto_run=payload.auto_run,
+                            auto_accept=payload.auto_accept,
+                            project=payload.project, workdir=payload.workdir,
+                            parent_id=payload.parent_id)
+        if card["auto_run"] and card["status"] == "draft":
+            try:
+                runner.run(card["id"])
+            except CardRunning:
+                pass
+            card = store.get(card["id"])
+        return card
+
+    @app.get("/api/cards/{card_id}")
+    def get_card(card_id: str):
+        return runner.annotate_card(dict(store.get(card_id), questions=questions.list(card_id)))
+
+    @app.put("/api/cards/{card_id}")
+    def update_card(card_id: str, payload: CardUpdate):
+        card = store.update(card_id, title=payload.title,
+                            body=payload.body, auto_run=payload.auto_run,
+                            auto_accept=payload.auto_accept,
+                            project=payload.project, workdir=payload.workdir,
+                            parent_id=payload.parent_id)
+        if card["auto_run"] and card["status"] == "draft":
+            try:
+                runner.run(card_id)
+            except CardRunning:
+                pass
+            card = store.get(card_id)
+        return card
+
+    @app.delete("/api/cards/{card_id}", status_code=204)
+    def delete_card(card_id: str):
+        # Removes the card, its linked git worktree (if any), and its
+        # sessions/<id>/ dir (which holds questions.json too).
+        # CardRunning -> 409, CardNotFound -> 404.
+        runner.delete_card(card_id)
+        questions.drop(card_id)
+        return Response(status_code=204)
+
+    # --- dependencies ("runs after" links between cards) ----------------------
+    @app.post("/api/cards/{card_id}/depends/{dep_id}")
+    def add_dependency(card_id: str, dep_id: str):
+        # card_id will be run automatically once dep_id completes
+        # (done/accepted). 404 unknown card, 409 self-link/cycle/live card.
+        # A draft whose dependencies are already satisfied starts running
+        # right away; otherwise it is marked waiting (session.waiting_for).
+        store.add_dependency(card_id, dep_id)
+        card = runner.run_if_ready(card_id)
+        return runner.annotate_card(dict(card, questions=questions.list(card_id)))
+
+    @app.delete("/api/cards/{card_id}/depends/{dep_id}")
+    def remove_dependency(card_id: str, dep_id: str):
+        store.remove_dependency(card_id, dep_id)
+        # If the removed edge was the last unmet dependency, run the draft now.
+        card = runner.run_if_ready(card_id)
+        return runner.annotate_card(dict(card, questions=questions.list(card_id)))
+
+    @app.get("/api/cards/{card_id}/dependencies")
+    def get_dependencies(card_id: str):
+        # {depends_on, blocks, unmet} for one card (CardNotFound -> 404).
+        return store.dependencies(card_id)
+
+    # --- sessions --------------------------------------------------------------
+    @app.post("/api/cards/{card_id}/run")
+    def run_card(card_id: str):
+        return runner.run(card_id)
+
+    @app.post("/api/cards/{card_id}/stop", status_code=204)
+    def stop_card(card_id: str):
+        runner.stop(card_id)
+        return Response(status_code=204)
+
+    @app.post("/api/cards/{card_id}/accept")
+    def accept_card(card_id: str):
+        # Gate + git merge + (on conflict) resolver spawn, all inside the
+        # runner. GitError -> 409 (dirty tree, resolver already running, ...).
+        return runner.accept_card(card_id)
+
+    @app.get("/api/cards/{card_id}/log")
+    def get_log(card_id: str, tail: int = Query(200, ge=1, le=5000)):
+        return {"lines": runner.log_tail(card_id, n=tail)}
+
+    # --- questions (model asks the user on the card) ------------------
+    @app.post("/api/cards/{card_id}/questions", status_code=201)
+    def ask_question(card_id: str, payload: QuestionIn):
+        # Used by the MCP ask_user tool: register the pending question that is
+        # shown on the card. CardNotFound -> 404.
+        store.get(card_id)
+        return questions.ask(card_id, payload.question, payload.options)
+
+    @app.get("/api/cards/{card_id}/questions")
+    def list_questions(card_id: str):
+        store.get(card_id)
+        return questions.list(card_id)
+
+    @app.get("/api/cards/{card_id}/questions/{question_id}/wait")
+    def wait_question(card_id: str, question_id: str,
+                      timeout: float = Query(30.0, ge=0, le=120)):
+        # Long-poll: returns the question record once it is answered/cancelled,
+        # or the still-pending record after `timeout` seconds. Sync endpoint,
+        # so FastAPI runs it in the threadpool and the event loop stays free.
+        store.get(card_id)
+        return questions.wait(card_id, question_id, timeout)
+
+    @app.post("/api/cards/{card_id}/questions/{question_id}/answer")
+    def answer_question(card_id: str, question_id: str, payload: AnswerIn):
+        # The user answered on the card; wakes the model's waiting ask_user.
+        store.get(card_id)
+        return questions.answer(card_id, question_id, payload.answer, by="user")
+
+    @app.post("/api/cards/{card_id}/questions/{question_id}/cancel")
+    def cancel_question(card_id: str, question_id: str):
+        # The user dismissed the question (or the runner cancelled it when the
+        # session ended); the waiting ask_user returns "cancelled".
+        store.get(card_id)
+        cancelled = questions.cancel(card_id, question_id)
+        return cancelled[0] if cancelled else questions.get(card_id, question_id)
+
+    # --- projects --------------------------------------------------------------
+    @app.get("/api/projects")
+    def list_projects():
+        return projects.list()
+
+    @app.post("/api/projects", status_code=201)
+    def create_project(payload: ProjectIn):
+        project = projects.create(payload.name, payload.path)
+        # Opening a new project always sets up its folder: git init + initial
+        # commit, managed agent.md, empty (agent-owned) route.md.
+        try:
+            setup = routemd.setup_project(Path(project["path"]), init_repo=True)
+        except Exception as exc:
+            setup = {"route_md": None, "agent_md": None, "repo": None,
+                     "setup_error": str(exc)}
+        return {**project, **setup}
+
+    @app.delete("/api/projects/{name}", status_code=204)
+    def delete_project(name: str):
+        projects.delete(name)
+        return Response(status_code=204)
+
+    # --- archives (the archive is a folder structure: archives/<slug>-<id>/) --
+    @app.get("/api/archives")
+    def list_archives():
+        return archives.list()
+
+    @app.post("/api/archives", status_code=201)
+    def create_archive(payload: ArchiveIn):
+        # A typed archive folder: archives/<slug>-<id>/{archive.md, cards/}
+        return archives.create(payload.name, type=payload.type,
+                               description=payload.description,
+                               project=payload.project)
+
+    @app.patch("/api/archives/{archive_id}")
+    def patch_archive(archive_id: str, payload: ArchivePatchIn):
+        # Move an archive under a project header ("" = no project).
+        if payload.project is None:
+            return archives.get(archive_id)
+        return archives.set_project(archive_id, payload.project)
+
+    @app.get("/api/archives/{archive_id}")
+    def get_archive(archive_id: str):
+        # manifest + the archived cards (items)
+        return archives.get(archive_id)
+
+    @app.post("/api/archives/{archive_id}/cards/{card_id}")
+    def archive_card(archive_id: str, card_id: str):
+        # Move one card into the archive (from the board it must be accepted;
+        # from another archive it is a plain move). 404 unknown, 409 gate.
+        return archives.archive_card(card_id, archive_id)
+
+    @app.post("/api/archives/{archive_id}/cards")
+    def archive_cards(archive_id: str, payload: ArchiveNotesIn):
+        # Move a batch of cards (e.g. a whole deck/stack) into the archive.
+        return archives.archive_cards(payload.card_ids, archive_id)
+
+    @app.post("/api/archives/{archive_id}/stacks/{stack_id}")
+    def archive_stack(archive_id: str, stack_id: str):
+        # Retire a whole deck into this archive: its cards move, the deck is
+        # recorded in the manifest and dissolved. 404 unknown, 409 gate.
+        return archives.archive_stack(stack_id, archive_id)
+
+    @app.post("/api/archives/stacks/{stack_id}")
+    def archive_stack_into_new_archive(stack_id: str):
+        # Same, but the archive is created (or reused) under the deck's title —
+        # one archive per retired deck is the board's structure.
+        return archives.archive_stack(stack_id)
+
+    @app.delete("/api/archives/{archive_id}/cards/{card_id}")
+    def unarchive_card(archive_id: str, card_id: str):
+        # Restore a card from this archive back to the board.
+        return archives.restore_card(card_id, archive_id=archive_id)
+
+    @app.post("/api/cards/{card_id}/restore")
+    def restore_card(card_id: str):
+        # Restore an archived card to the board, whichever archive holds it.
+        return archives.restore_card(card_id)
+
+    # --- models (per-role) ---------------------------------------------------
+    # Which model each kind of session runs on: the worker (run-N), the
+    # reviewer (review-N) and the merge-conflict resolver (resolve-N). The
+    # runner pins the choice per spawn with VIBE_ACTIVE_MODEL, so the user's
+    # own ~/.vibe/config.toml is never rewritten.
+    @app.get("/api/models")
+    def get_models():
+        return describe_models(models)
+
+    @app.put("/api/models")
+    def put_models(payload: ModelsIn):
+        models.update(payload.models)
+        return describe_models(models)
+
+    # --- stacks (decks) ------------------------------------------------------
+    # Server state, not browser state: the MCP tools stack cards and move them
+    # between decks, so the board and an LLM must see the same piles.
+    @app.get("/api/stacks")
+    def list_stacks():
+        return stacks.list()
+
+    @app.post("/api/stacks", status_code=201)
+    def create_stack(payload: StackIn):
+        col = payload.col or stacks.column_of(payload.card_ids[0])
+        return stacks.create(col, payload.title, payload.card_ids)
+
+    @app.get("/api/stacks/{stack_id}")
+    def get_stack(stack_id: str):
+        return stacks.get(stack_id)
+
+    @app.patch("/api/stacks/{stack_id}")
+    def patch_stack(stack_id: str, payload: StackPatchIn):
+        # Rename a deck (title) and/or replace its members.
+        return stacks.update(stack_id, title=payload.title,
+                             card_ids=payload.card_ids, col=payload.col)
+
+    @app.delete("/api/stacks/{stack_id}")
+    def delete_stack(stack_id: str):
+        # Dissolve a deck; its cards stay on the board.
+        return stacks.delete(stack_id)
+
+    @app.post("/api/stacks/{stack_id}/cards")
+    def add_stack_cards(stack_id: str, payload: StackCardsIn):
+        # Add (or move) cards into this deck.
+        return stacks.add_cards(stack_id, payload.card_ids)
+
+    @app.delete("/api/stacks/{stack_id}/cards/{card_id}")
+    def remove_stack_card(stack_id: str, card_id: str):
+        # Pull one card out of a deck (dissolves a deck left with one card).
+        stacks.get(stack_id)  # 404 when the deck is gone
+        return stacks.remove_card(card_id)
+
+    @app.post("/api/cards/{card_id}/unstack")
+    def unstack_card(card_id: str):
+        # Pull a card out of whichever deck holds it.
+        return stacks.remove_card(card_id)
+
+    @app.post("/api/archives/{archive_id}/projects/{project_name}")
+    def archive_project(archive_id: str, project_name: str):
+        # Archive an entire deck (project): its non-live cards move into the
+        # archive, the deck is recorded in the manifest, the project is
+        # unregistered. 404 unknown archive/project, 409 live cards.
+        return archives.archive_project(project_name, archive_id)
+
+    # --- misc ------------------------------------------------------------------
+    @app.post("/api/fs/choose-folder")
+    def choose_folder():
+        # Sync endpoint: the native dialog blocks, FastAPI runs this in a
+        # threadpool worker so the event loop stays responsive.
+        try:
+            return {"path": fsdialog.choose_folder()}
+        except fsdialog.FolderPickerCancelled:
+            return JSONResponse(status_code=409, content={"detail": "cancelled"})
+        except fsdialog.FolderPickerUnavailable as exc:
+            return JSONResponse(status_code=501, content={"detail": str(exc)})
+
+    @app.get("/api/templates")
+    def list_templates():
+        templates = []
+        for path in sorted(TEMPLATES_DIR.glob("*.md")):
+            templates.append({"name": path.stem,
+                              "body": path.read_text(encoding="utf-8")})
+        return templates
+
+    @app.get("/api/version")
+    def version():
+        """Fingerprint of the served front-end assets.
+
+        The dashboard is a long-lived tab: without this, a browser keeps running
+        whatever app.js it loaded days ago and every front-end fix looks like it
+        did nothing. The client polls this and reloads itself when it changes.
+        """
+        return {"version": static_version()}
+
+    @app.get("/api/split-report")
+    def split_report():
+        """Do split cards cost less per accepted outcome than unsplit ones?
+
+        The only question that decides whether an orchestrator earns its place.
+        A card is "split" when it has children (a worker broke its spec into
+        sub-cards); the subtree's tokens are the parent's own plus every
+        descendant's, because that is what the split actually cost.
+        """
+        cards = store.list()
+        by_id = {n["id"]: n for n in cards}
+        children: dict[str, list[str]] = {}
+        for n in cards:
+            parent = n.get("parent_id")
+            if parent and parent in by_id:
+                children.setdefault(parent, []).append(n["id"])
+
+        def subtree_tokens(card_id: str, seen: set[str]) -> int:
+            if card_id in seen:
+                return 0
+            seen.add(card_id)
+            card = by_id.get(card_id) or {}
+            own = int(((card.get("session") or {}).get("tokens")) or 0)
+            return own + sum(subtree_tokens(k, seen) for k in children.get(card_id, []))
+
+        def bucket(rows: list[dict]) -> dict:
+            accepted = [n for n in rows if n.get("status") == "accepted"]
+            tokens = sum(subtree_tokens(n["id"], set()) for n in rows)
+            return {
+                "cards": len(rows),
+                "accepted": len(accepted),
+                "tokens": tokens,
+                "tokens_per_accepted": (round(tokens / len(accepted)) if accepted else None),
+            }
+
+        # Only top-level cards are counted as "one outcome": a child's cost is
+        # already inside its parent's subtree, so counting it again would
+        # double-count the split.
+        roots = [n for n in cards if not n.get("parent_id")]
+        split = [n for n in roots if children.get(n["id"])]
+        unsplit = [n for n in roots if not children.get(n["id"])]
+        return {
+            "split": bucket(split),
+            "unsplit": bucket(unsplit),
+            "trees": [
+                {
+                    "id": n["id"],
+                    "title": n["title"],
+                    "status": n["status"],
+                    "children": len(children.get(n["id"], [])),
+                    "tokens": subtree_tokens(n["id"], set()),
+                }
+                for n in sorted(split, key=lambda n: n.get("created_at") or "")
+            ],
+        }
+
+    @app.get("/api/stats")
+    def stats(project: str | None = Query(None)):
+        cards = [runner.annotate_card(n) for n in store.list()]
+        if project is not None:
+            cards = [n for n in cards if (n.get("project") or "") == project]
+        counts = {s: 0 for s in STATUSES}
+        total_tokens = 0
+        live_tokens = 0  # the in-flight increment over the last recorded totals
+        # Per-type token breakdown summed over the cards (cached/output/input);
+        # a type no card has ever reported stays None (unknown, not zero).
+        breakdown_seen = {k: False for k in TOKEN_BREAKDOWN_KEYS}
+        token_breakdown = {k: 0 for k in TOKEN_BREAKDOWN_KEYS}
+        total_runtime = 0.0
+        finished = 0
+        for card in cards:
+            counts[card["status"]] = counts.get(card["status"], 0) + 1
+            session = card.get("session") or {}
+            recorded = session.get("tokens")
+            if session.get("live_tokens") is not None:
+                # Live session: count the live-updating per-card total (which
+                # already includes the recorded tokens of earlier rounds).
+                total_tokens += session["live_tokens"]
+                live_tokens += max(0, session["live_tokens"] - (recorded or 0))
+                bd = session.get("live_token_breakdown")
+            elif recorded is not None:
+                total_tokens += recorded
+                bd = session.get("token_breakdown")
+            else:
+                bd = None
+            for k in TOKEN_BREAKDOWN_KEYS:
+                v = (bd or {}).get(k)
+                if v is not None:
+                    token_breakdown[k] += v
+                    breakdown_seen[k] = True
+            if session.get("started_at") and session.get("finished_at"):
+                try:
+                    start = datetime.fromisoformat(session["started_at"])
+                    end = datetime.fromisoformat(session["finished_at"])
+                    total_runtime += (end - start).total_seconds()
+                    finished += 1
+                except ValueError:
+                    pass
+        avg = total_runtime / finished if finished else 0.0
+        return {
+            "counts": counts,
+            "total_tokens": total_tokens,
+            "live_tokens": live_tokens,
+            "token_breakdown": {k: (token_breakdown[k] if breakdown_seen[k] else None)
+                                for k in TOKEN_BREAKDOWN_KEYS},
+            "total_runtime_seconds": round(total_runtime, 3),
+            "avg_runtime_seconds": round(avg, 3),
+            "project": project,
+        }
+
+    # --- server restart (top-bar button) --------------------------------------
+    @app.post("/api/server/restart")
+    def restart_server():
+        """Hard-restart the dashboard server.
+
+        Only acts when THIS process is the one serving on the configured port
+        (a live uvicorn run — never an in-process TestClient, and never a
+        different server that happens to share the port): spawns a detached
+        shell that kills the port listener (and its --reload parent), then
+        relaunches uvicorn with --reload. Returns before the old process
+        dies, so the dashboard can poll until the API is back.
+        """
+        import os
+        proc = subprocess.run(["lsof", "-ti", f"tcp:{config.port}"],
+                              capture_output=True, text=True)
+        pids = {int(p) for p in proc.stdout.split() if p.strip().isdigit()}
+        if os.getpid() not in pids:
+            return JSONResponse(status_code=409, content={
+                "detail": f"this process is not the server on {config.host}:{config.port}"})
+        script = (
+            "sleep 2; "
+            f"PID=$(lsof -ti tcp:{config.port} 2>/dev/null); "
+            "if [ -n \"$PID\" ]; then "
+            "PP=$(ps -o ppid= -p $PID 2>/dev/null | tr -d ' '); "
+            "kill $PID 2>/dev/null; "
+            "[ -n \"$PP\" ] && [ \"$PP\" != \"1\" ] && kill $PP 2>/dev/null; "
+            "fi; "
+            "sleep 1; "
+            f"cd '{BASE_DIR}' && nohup '{sys.executable}' -m uvicorn app.main:app "
+            f"--host {config.host} --port {config.port} --reload "
+            "--reload-dir app "  # never watch sessions/ — card worktrees live there
+            ">> /tmp/vibe-harness-server.log 2>&1 &"
+        )
+        subprocess.Popen(["sh", "-c", script], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"status": "restarting", "port": config.port}
+
+    # Catch-all static mount LAST so /api/* routes take precedence.
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    return app
+
+
+def __getattr__(name: str):
+    """Build the ASGI app on first access, not at import.
+
+    `app = create_app()` at module level meant that merely importing this
+    module — which every test does, for `create_app` — built a real CardStore
+    on the repo's cards/ dir, and its legacy notes/ -> cards/ migration then
+    moved tracked files in every card worktree. `uvicorn app.main:app` still
+    works: it resolves the attribute, which lands here. The result is cached
+    in the module globals so later accesses skip this hook.
+    """
+    if name != "app":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    built = create_app()
+    globals()["app"] = built
+    return built

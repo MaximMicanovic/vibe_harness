@@ -1,0 +1,1560 @@
+/* Vibe Harness — post-it board. System fonts only, no external assets. */
+
+* { box-sizing: border-box; }
+
+:root {
+  color-scheme: light;
+  --ink: #2b2b2b;
+  --paper: #f4f1ea;
+  --surface: #ffffff;
+  --surface-2: #f0f0f0;
+  --border: #c8c8c8;
+  --border-soft: #e6e6e6;
+  --muted: #777;
+  --heading-muted: #555;
+  --column-bg: rgba(0, 0, 0, 0.05);
+  --pill-bg: rgba(0, 0, 0, 0.12);
+  --chip-bg: rgba(0, 0, 0, 0.08);
+  --chip-ink: #333;
+  --chip-tokens-bg: #e8e8f5;
+  --chip-model-bg: rgba(0, 0, 0, 0.14);
+  --chip-workdir-bg: #e8f0e4;
+  --card-ink: #2b2b2b;
+  --card-muted: #444;
+  --card-meta: #777;
+  --error-bg: #fdeaea;
+  --error-border: #d64545;
+  --error-ink: #8f1f1f;
+  --danger-ink: #b02a2a;
+  --danger-border: #e0b3b3;
+  --danger-soft: #fdeaea;
+  --ok-ink: #1f7a4d;
+  --ok-border: #b3dfc8;
+  --ok-soft: #e6f6ea;
+  --hint-ink: #8a6d1f;
+  --q-bg: #fff3d6;
+  --q-border: #e0b93b;
+  --q-ink: #5c4a12;
+  --edge-draft: #e0b93b;
+  --edge-running: #3b82d6;
+  --edge-done: #3fae5a;
+  --edge-accepted: #1f8a70;
+  --edge-failed: #d64545;
+  --edge-stopped: #e07b2a;
+  --bg-draft: #fff7d6;
+  --bg-running: #e3effc;
+  --bg-done: #e6f6ea;
+  --bg-accepted: #e0f2ee;
+  --bg-failed: #fdeaea;
+  /* The archive browser's drop-down fold (keep in sync with ARCHIVE_DROP_MS
+   * in app.js). */
+  --archive-drop-ms: 180ms;
+}
+
+/* Dark mode — applied automatically by theme.js when it is dark where the
+ * user is (location known) or in Gothenburg, Sweden (the standard; see
+ * NOTES.md). The post-it cards keep their column hues, dimmed; the chrome
+ * (board, modals, inputs) goes dark. */
+html.dark {
+  color-scheme: dark;
+  --ink: #e8e6df;
+  --paper: #14161b;
+  --surface: #22252d;
+  --surface-2: #2d313b;
+  --border: #4b5058;
+  --border-soft: #383c45;
+  --muted: #9aa0ab;
+  --heading-muted: #a8aeb9;
+  --column-bg: rgba(255, 255, 255, 0.045);
+  --pill-bg: rgba(255, 255, 255, 0.14);
+  --chip-bg: rgba(255, 255, 255, 0.12);
+  --chip-ink: #d8dbe0;
+  --chip-tokens-bg: #3a4060;
+  --chip-model-bg: rgba(255, 255, 255, 0.16);
+  --chip-workdir-bg: #37422f;
+  --card-ink: #ece9df;
+  --card-muted: #c7c3b4;
+  --card-meta: #a9a596;
+  --error-bg: #4a2c2c;
+  --error-border: #a04545;
+  --error-ink: #f2b8b8;
+  --danger-ink: #e08a8a;
+  --danger-border: #7a4545;
+  --danger-soft: #4a2c2c;
+  --ok-ink: #7fd4a8;
+  --ok-border: #3f6b54;
+  --ok-soft: #24402d;
+  --q-bg: #4a4126;
+  --q-border: #8a7434;
+  --q-ink: #e8d9a8;
+  --hint-ink: #c9a94f;
+  --bg-draft: #453f22;
+  --bg-running: #26364f;
+  --bg-done: #24402d;
+  --bg-accepted: #1f3f39;
+  --bg-failed: #4a2c2c;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+/* The 2 s live poll replaces the board's card DOM (that is also what updates
+ * the token count); opt out of scroll anchoring so re-anchoring on the
+ * teardown cannot scroll the window back to the top. */
+html {
+  overflow-anchor: none;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  min-height: 100vh;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ---------------- Top bar ---------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: #2f3542;
+  color: #f1f2f6;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand {
+  font-size: 18px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.stat {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.stat b { font-weight: 700; }
+
+/* Tokens stat in the top bar: the total as plain text plus one bubble per
+ * token type (cached / input / output) rendered by renderTokenTypeBubbles(). */
+.stat-tokens {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.stat-tok-types {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.stat-tok { cursor: help; }
+
+/* Tokens stat while a session is live: the number updates on every poll. */
+.stat-live b::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--edge-running);
+  animation: stat-live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes stat-live-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.theme-indicator {
+  cursor: help;
+  user-select: none;
+}
+
+/* ---------------- Buttons ---------------- */
+
+.btn {
+  font: inherit;
+  font-size: 14px;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.btn:hover { background: var(--surface-2); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: #3b82d6; border-color: #3b82d6; color: #fff; }
+.btn-primary:hover { background: #2f6fb8; }
+.btn-danger { color: var(--danger-ink); border-color: var(--danger-border); }
+.btn-danger:hover { background: var(--danger-soft); }
+.btn-ok { color: var(--ok-ink); border-color: var(--ok-border); }
+.btn-ok:hover { background: var(--ok-soft); }
+
+.icon-btn {
+  font: inherit;
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: inherit;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.icon-btn:hover { background: rgba(128, 128, 128, 0.2); }
+
+#new-card-btn { margin-left: auto; }
+
+/* ---------------- Error banner ---------------- */
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 16px 0;
+  padding: 10px 14px;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  border-radius: 8px;
+  color: var(--error-ink);
+  font-size: 14px;
+}
+
+.error-banner[hidden] { display: none; }
+.error-banner span { flex: 1; word-break: break-word; }
+
+/* ---------------- Sidebar ---------------- */
+
+/* The shell holds the sidebar rail and the board side by side. The rail is
+ * always visible; a panel opens next to it, one at a time. */
+.shell {
+  display: flex;
+  align-items: stretch;
+  min-height: calc(100vh - 56px);
+}
+
+.sidebar {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  background: var(--column-bg);
+  border-right: 1px solid var(--border-soft);
+}
+
+.sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 6px;
+  flex: 0 0 auto;
+}
+
+.rail-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.rail-btn:hover { background: var(--pill-bg); opacity: 1; }
+
+.rail-btn[aria-expanded="true"] {
+  background: var(--pill-bg);
+  border-color: var(--border-soft);
+  opacity: 1;
+}
+
+.sidebar-panel {
+  width: 320px;
+  max-width: 80vw;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-soft);
+  min-height: 0;
+}
+
+/* `display: flex` above beats the UA's [hidden] rule, so say it explicitly:
+ * a closed panel must take no space at all. */
+.sidebar-panel[hidden] { display: none; }
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sidebar-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--heading-muted);
+}
+
+.sidebar-body {
+  padding: 12px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* --- models panel --- */
+
+.model-role {
+  margin-bottom: 14px;
+}
+
+.model-role label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--heading-muted);
+  margin-bottom: 4px;
+}
+
+.model-role select {
+  width: 100%;
+  padding: 5px 6px;
+  font: inherit;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.model-role select:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.model-role .model-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--heading-muted);
+  opacity: 0.85;
+}
+
+.model-role--off label { opacity: 0.6; }
+
+/* --- archive panel --- */
+
+/* Level 1: the project header. Level 2: the archive folder. Level 3: the
+ * stacks and cards inside it. */
+.archive-project {
+  margin-bottom: 10px;
+}
+
+.archive-project-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 6px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--heading-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.archive-project-head:hover { color: var(--ink); }
+
+.archive-project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-project-body {
+  padding: 6px 0 0 8px;
+}
+
+.archive-folder {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.archive-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--pill-bg);
+  border: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.archive-folder-head .archive-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-folder-head .archive-type {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--heading-muted);
+  background: var(--paper);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.archive-folder-body {
+  padding: 6px 9px 9px;
+  font-size: 12px;
+}
+
+/* The archive tree's third level: a project header inside an archive folder,
+ * with that project's cards nested under it. */
+.archive-project {
+  margin: 3px 0;
+  border-left: 2px solid var(--border-soft);
+  padding-left: 6px;
+}
+
+.archive-project-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 4px;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--heading-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.archive-project-head:hover { color: var(--ink); }
+
+.archive-project-head .archive-project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.archive-project-body { padding-left: 12px; }
+
+.archive-group-title {
+  margin: 6px 0 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--heading-muted);
+}
+
+.archive-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  line-height: 1.3;
+}
+
+.archive-item .archive-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-item .archive-item-id {
+  font-size: 10px;
+  color: var(--heading-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- archive drop-downs: the fold animation ---
+ * Every level of the archive browser folds out under its header. app.js pins
+ * the body's height (0 -> its natural height, and back) and the transition
+ * below animates it; the fade makes it read as a drop-down rather than a jump.
+ * The chevron turns instead of swapping glyphs. */
+.archive-chevron {
+  display: inline-block;
+  width: 10px;
+  transition: transform var(--archive-drop-ms) ease;
+}
+
+.archive-chevron--open { transform: rotate(90deg); }
+
+.archive-drop--open,
+.archive-drop--closing {
+  overflow: hidden;
+  transition: height var(--archive-drop-ms) ease,
+              padding-top var(--archive-drop-ms) ease,
+              padding-bottom var(--archive-drop-ms) ease;
+}
+
+.archive-drop--open { animation: archive-drop-fade var(--archive-drop-ms) ease-out; }
+
+.archive-drop--closing { animation: archive-drop-fade var(--archive-drop-ms) ease-in reverse; }
+
+@keyframes archive-drop-fade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Motion is a preference: fold instantly when the user asked for less. */
+@media (prefers-reduced-motion: reduce) {
+  .archive-chevron,
+  .archive-drop--open,
+  .archive-drop--closing {
+    transition: none;
+    animation: none;
+  }
+}
+
+.sidebar-empty {
+  font-size: 12px;
+  color: var(--heading-muted);
+  line-height: 1.4;
+}
+
+/* --- split panel --- */
+
+.split-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.split-row {
+  display: grid;
+  grid-template-columns: 1fr 44px 56px 84px;
+  gap: 4px;
+  align-items: baseline;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 0;
+}
+
+.split-row--head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--heading-muted);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.split-row span:not(.split-label) { text-align: right; }
+
+.split-label { font-weight: 600; }
+
+.split-tree {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.split-tree:hover { background: var(--pill-bg); }
+
+/* ---------------- Board ---------------- */
+
+.board {
+  position: relative;  /* anchor for the red-strings SVG overlay */
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px;
+  overflow-x: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Red strings between dependent cards — drawn by app.js, never interactive. */
+.strings-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 5;
+  overflow: visible;
+}
+
+.string-line {
+  fill: none;
+  stroke: #d62728;
+  stroke-width: 2.5;
+  opacity: 0.9;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+
+.string-pin {
+  fill: #d62728;
+  stroke: #fff;
+  stroke-width: 1;
+}
+
+/* Drag & drop: a draft card being dragged, and the card it can land on. */
+.card-dragging { opacity: 0.55; }
+.card-drop-target {
+  outline: 3px dashed #d62728;
+  outline-offset: 2px;
+}
+
+.column {
+  flex: 1 1 0;
+  min-width: 220px;
+  background: var(--column-bg);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.column h2 {
+  margin: 2px 4px 10px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--heading-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.count {
+  background: var(--pill-bg);
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--heading-muted);
+}
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 40px;
+}
+
+.empty-board {
+  text-align: center;
+  color: var(--muted);
+  padding: 40px 16px;
+}
+
+.empty-board[hidden] { display: none; }
+
+/* ---------------- Post-it card ---------------- */
+
+.card {
+  background: var(--bg-draft);
+  border-left: 6px solid var(--edge-draft);
+  border-radius: 4px 8px 8px 4px;
+  padding: 10px 12px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  color: var(--card-ink);
+  /* A stable per-card tilt, set from the card id when the card is built (see
+   * tiltFor in app.js). It used to come from :nth-child(odd/even), which
+   * changes whenever the sort order changes or a stack is inserted above —
+   * every card below then visibly rotated on each 2 s poll. */
+  transform: rotate(var(--tilt, 0deg));
+  transition: box-shadow 0.08s ease;
+}
+
+/* Hover must not move the card's own box. A translateY lift pulls the card out
+ * from under a cursor resting on its bottom edge, which un-hovers it, drops it
+ * back, re-hovers it — a frame-rate flicker that reads as the card shaking. */
+.card:hover {
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.22);
+}
+
+.card--draft    { background: var(--bg-draft);    border-left-color: var(--edge-draft); }
+.card--running  { background: var(--bg-running);  border-left-color: var(--edge-running); }
+.card--done     { background: var(--bg-done);     border-left-color: var(--edge-done); }
+.card--accepted { background: var(--bg-accepted); border-left-color: var(--edge-accepted); }
+.card--failed   { background: var(--bg-failed);   border-left-color: var(--edge-failed); }
+.card--stopped  { background: var(--bg-failed);   border-left-color: var(--edge-stopped); }
+
+/* ---------------- Card stack (drag a card onto another to stack them) ---------------- */
+
+/* A stack is a wrapper (.stack-wrap) holding a header row — the stack's name
+ * and its controls — above the pile itself (.stack). The wrapper is what the
+ * column lays out; the pile keeps the fan geometry. */
+.stack-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.stack-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 20px;
+  padding: 0 1px;
+}
+
+.stack-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--heading-muted);
+  border-radius: 4px;
+  padding: 1px 4px;
+  cursor: text;
+}
+
+.stack-title:hover { background: var(--pill-bg); }
+
+/* An unnamed stack still needs a click target: show a hint, not a blank gap. */
+.stack-title--empty {
+  font-weight: 500;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.stack-title--empty::before { content: 'name this stack'; }
+
+.stack-title-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--heading-muted);
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+/* Kept after the .card rules on purpose: the !important transforms below must
+ * beat .card:hover's lift, so a stacked card doesn't unstack itself on hover. */
+.stack {
+  position: relative;
+  /* collapsed: one card tall, plus the pile's stagger and the room the fan's
+     rotated corners need (--fan-pad, measured in layoutStack) */
+  height: calc(var(--card-h, 140px) + (var(--n, 1) - 1) * 2px + var(--fan-pad, 0px));
+  transition: height 0.18s ease;
+}
+
+.stack .stack-card {
+  position: absolute;
+  top: 0;
+  /* Inset by the room the fan's rotation needs sideways (--fan-pad-x, measured
+     in layoutStack): a card rotated by θ is ~h·sin θ wider than its layout box,
+     so without the inset the fanned cards are wider than the pile and paint
+     across the column's padding — their shadow then lands on the neighbouring
+     column's cards. */
+  left: var(--fan-pad-x, 0px);
+  right: var(--fan-pad-x, 0px);
+  margin: 0;
+  /* collapsed: a hand of cards — each card tilted a little more than the one
+     below it (--fan), all turning about the same centre so the pile reads as a
+     hand spread in an arc. Centre origin (not the bottom edge) keeps the
+     rotated box centred on the stack instead of pushing it 10px to one side. */
+  transform-origin: 50% 50%;
+  transform: translateY(calc(var(--fan-shift, 0px) + var(--i, 0) * 2px)) rotate(var(--fan, 0deg)) !important;
+  transition: transform 0.18s ease, box-shadow 0.08s ease;
+}
+
+/* hovered: the cards separate (fan out downward) so each is readable. The
+ * open flag lives on the wrapper, the height on the pile inside it. */
+.stack--open .stack {
+  height: calc(var(--n, 1) * (var(--card-h, 140px) + 10px) - 10px);
+}
+
+.stack--open .stack-card {
+  transform: translate(0, calc(var(--i, 0) * (var(--card-h, 140px) + 10px))) !important;
+}
+
+.stack-count {
+  flex: 0 0 auto;
+  background: var(--pill-bg);
+  color: var(--heading-muted);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.card--dragging { opacity: 0.45; }
+
+.card--drop {
+  outline: 3px dashed var(--edge-accepted);
+  outline-offset: 2px;
+}
+
+.cards--drop {
+  outline: 2px dashed var(--heading-muted);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.card-head {
+  display: flex;
+  flex-wrap: wrap;  /* when the header's extras would squeeze the name below
+                     * half the row, they wrap to their own line instead */
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* Keep the status tag / spinner on the title's first line when it wraps. */
+.card-head .tag,
+.card-head .spinner {
+  margin-top: 1px;
+}
+
+/* The title wraps instead of being cut off: up to two lines, then an
+ * ellipsis, and long unbroken words wrap too (same pattern as .card-snippet).
+ * The name always keeps at least half the header row (min-width drives
+ * flex line-breaking in the wrapping .card-head), so the header's tags
+ * wrap below the title rather than blocking the name. */
+.card-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  flex: 1;
+  min-width: 50%;
+}
+
+/* Expanded state (long names): the two-line clamp is lifted so the full
+ * name is displayed. Toggled by the header's .card-title-toggle button. */
+.card-title--expanded {
+  -webkit-line-clamp: unset;
+}
+
+/* "more ▾ / less ▴" toggle for names that are still clamped after the
+ * dynamic font fit. Sits on the title's first line, top-right of the card
+ * header; hidden while the full name already fits. */
+.card-title-toggle {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  margin-top: 1px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--card-meta);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.card-title-toggle:hover {
+  background: rgba(128, 128, 128, 0.2);
+  color: var(--card-ink);
+}
+
+.card-title-toggle[hidden] { display: none; }
+
+.tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.tag-stopped {
+  background: var(--edge-stopped);
+  color: #fff;
+}
+
+.card-snippet {
+  margin: 6px 0 4px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--card-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.7em;
+  word-break: break-word;
+}
+
+.card-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--card-meta);
+  margin-bottom: 4px;
+}
+
+.card-elapsed { font-weight: 600; color: var(--edge-running); }
+
+/* Question box (harness_ask_user): the running model paused and is waiting for
+ * the user's answer on the card. */
+.card-question {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: var(--q-bg);
+  border: 1px solid var(--q-border);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.card-question-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+}
+
+.card-question-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--q-ink);
+  animation: q-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes q-pulse { 50% { opacity: 0.55; } }
+
+.card-question-dismiss { flex: none; }
+
+.card-question-text {
+  margin: 4px 0;
+  color: var(--card-ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.card-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0 4px;
+}
+
+.q-option { font-size: 11.5px; padding: 2px 8px; }
+
+.q-answer-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.q-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.q-send { font-size: 11.5px; padding: 3px 10px; }
+
+.card-question-history {
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--card-meta);
+}
+
+.q-history-line { margin: 1px 0; word-break: break-word; }
+.q-history-a { color: var(--ok-ink); }
+.q-history-cancelled { color: var(--danger-ink); }
+
+.card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.chip {
+  font-size: 10.5px;
+  background: var(--chip-bg);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  color: var(--chip-ink);
+}
+
+.chip-tokens { background: var(--chip-tokens-bg); }
+
+/* Live token chip on a card with a running session: same look, gently pulsing
+ * border so it reads as "updating", not static. */
+.chip-tokens-live {
+  background: var(--chip-tokens-bg);
+  outline: 1px solid var(--edge-running);
+  animation: chip-live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes chip-live-pulse {
+  0%, 100% { outline-color: rgba(59, 130, 214, 0.25); }
+  50% { outline-color: var(--edge-running); }
+}
+.chip-verified {
+  background: #1f8a70;
+  color: #fff;
+  font-weight: 700;
+}
+.chip-reviewed {
+  background: #1f8a70;
+  color: #fff;
+  font-weight: 700;
+}
+.chip-review-rejected { background: #f8d7da; color: #842029; }
+.chip-test-failed { background: #f8d7da; color: #842029; font-weight: 700; }
+.chip-review-exhausted { background: #fff3cd; color: #664d03; }
+.chip-git { background: #e2e8f0; color: #1e293b; }
+.chip-git-merged { background: #dcfce7; color: #166534; }
+.chip-merge-conflict { background: #f8d7da; color: #842029; }
+.chip-auto-accept { background: var(--chip-tokens-bg); }
+.chip-model { background: var(--chip-model-bg); }
+.chip-depends { background: #f6d7d7; color: #8f1f1f; }
+.chip-waiting { background: var(--q-bg); color: var(--q-ink); }
+
+html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
+
+/* Editor: the card's "runs after" dependency list. */
+.depends-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.depends-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.depends-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.depends-remove { flex: none; }
+
+.depends-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------------- Spinner ---------------- */
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(59, 130, 214, 0.3);
+  border-top-color: var(--edge-running);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---------------- Modals ---------------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 22, 28, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+
+.overlay[hidden] { display: none; }
+
+.modal {
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-wide { max-width: 860px; }
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--heading-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.field input[type="text"],
+.field select,
+.field textarea {
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  width: 100%;
+}
+
+.field textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.field input:disabled,
+.field textarea:disabled,
+.field select:disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.field-checkbox input { width: 16px; height: 16px; }
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 12px;
+}
+
+/* ---------------- Log viewer ---------------- */
+
+.log-content {
+  background: #1e1e2e;
+  color: #d8e0ea;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0;
+  min-height: 200px;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------------- Project picker ---------------- */
+
+.project-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.project-picker select {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  max-width: 200px;
+}
+
+#manage-projects-btn {
+  padding: 4px 10px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.project-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-form input {
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.project-form .path-row {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 340px;
+  min-width: 0;
+}
+
+.project-form .path-row input { flex: 1; }
+
+.project-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.project-list .pl-name { font-weight: 700; }
+.project-list .pl-path {
+  flex: 1;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-list .btn { padding: 3px 10px; font-size: 12px; }
+.project-list .project-empty { color: var(--muted); border: none; padding: 4px 0; }
+
+.tag-project {
+  background: #2f3542;
+  color: #fff;
+}
+
+/* The model picker on a card: a chip-sized select, so a card's model is
+ * visible and changeable without opening the editor. */
+.card-model {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+}
+
+.card-model-select {
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1.4;
+  padding: 1px 4px;
+  max-width: 150px;
+  border: 1px dashed var(--border-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--heading-muted);
+  cursor: pointer;
+}
+
+.card-model-select:hover {
+  background: var(--pill-bg);
+  color: var(--ink);
+}
+
+/* A pinned model is a real choice, not the default: make it stand out. */
+.card-model-select:not([value=""]) {
+  border-style: solid;
+}
+
+/* Split tree: a card's parent and its sub-cards. Buttons, because clicking
+ * one jumps to the other card. */
+.tag-parent,
+.tag-children {
+  border: 1px dashed var(--border-soft);
+  background: transparent;
+  color: var(--heading-muted);
+  font: inherit;
+  font-size: 10.5px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tag-parent:hover,
+.tag-children:hover {
+  background: var(--pill-bg);
+  color: var(--ink);
+}
+
+/* The card a chip jumped to, so the jump is visible. */
+.card--flash {
+  outline: 3px solid var(--edge-accepted);
+  outline-offset: 2px;
+  transition: outline-color 0.2s ease;
+}
+
+.tag-reviewing {
+  background: #b8860b;
+  color: #fff;
+}
+
+.accept-hint {
+  font-size: 11.5px;
+  color: #8a6d1f;
+  margin-right: auto;
+  align-self: center;
+}
+
+.chip-workdir {
+  background: var(--chip-workdir-bg);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.field-hint {
+  font-size: 11.5px;
+  color: var(--hint-ink);
+}
+
+/* ---------------- Responsive ---------------- */
+
+@media (max-width: 900px) {
+  .board {
+    flex-direction: column;
+  }
+  .column {
+    width: 100%;
+  }
+  .cards {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .card {
+    flex: 1 1 240px;
+  }
+  .stack-wrap {
+    flex: 1 1 240px;
+    min-width: 240px;
+  }
+}
+
+/* ---------------- Archives modal ---------------- */
+
+.archive-list li {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.archive-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.archive-head .pl-path { flex: 1; }
+
+.archive-type {
+  background: var(--pill-bg);
+  color: var(--heading-muted);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.archive-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.archive-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  border-top: 1px dashed var(--border-soft);
+  padding: 4px 0;
+}
+
+.archive-card .pl-path { flex: 1; }
+.archive-card .btn { padding: 2px 8px; font-size: 11px; }
+
+/* The project header inside an archive's card list (the archive is
+ * project-related: its cards are listed under one header per project). */
+.archive-project-title {
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--heading-muted);
+}
+
+.archive-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 0 2px 10px;
+}
+
+.archive-controls .path-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Archive-the-whole-stack button on an accepted-column stack. It lives in the
+ * stack header, so it is visible without hovering: the pile stays a tidy pile
+ * and the controls are always where you expect them. */
+.stack-archive {
+  flex: 0 0 auto;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+/* Unstack: one button dissolves the whole stack, and each fanned card carries
+ * its own ⤴ to leave the stack on its own. */
+.stack-unstack {
+  flex: 0 0 auto;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.card-unstack {
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 12;
+  display: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  cursor: pointer;
+}
+
+/* Per-card ⤴ only while the pile is fanned out (it would cover the card
+ * otherwise); the header's own controls are always visible. */
+.stack--open .card-unstack { display: inline-block; }

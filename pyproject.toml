@@ -1,0 +1,19 @@
+[project]
+name = "vibe-harness"
+version = "0.1.0"
+description = "Post-it note dashboard that spins up headless Mistral Vibe sessions to implement specs"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-frontmatter>=1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
