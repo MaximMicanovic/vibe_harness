@@ -486,12 +486,12 @@ class SessionRunner:
             self.store.patch_session(card_id, patch)
             return self.store.get(card_id)
         if unmet:
-            # The card depends on other cards that have not completed yet:
-            # do not start it now — mark it as waiting; _drain_dependents
-            # starts it automatically once every dependency completes.
+            # The card depends on other cards that are not merged yet: do not
+            # start it now — mark it as waiting; _drain_dependents starts it
+            # automatically once every dependency is accepted (merged).
             self.store.patch_session(card_id, {
                 "waiting_for": unmet,
-                "queue_reason": "waiting for " + ", ".join(unmet) + " to complete",
+                "queue_reason": "waiting for " + ", ".join(unmet) + " to be merged",
             })
             return self.store.get(card_id)
         # The cap check and the slot registration must be atomic: two Run
@@ -757,7 +757,9 @@ class SessionRunner:
 
     def unmet_dependencies(self, card: dict) -> list[str]:
         """Ids from the card's depends_on that have not completed yet
-        (status done/accepted). A dependency whose card was deleted counts
+        (status accepted — merged). A dependency that is merely done
+        (reviewer-approved but not merged) still blocks: the dependent must
+        build on the merged result. A dependency whose card was deleted counts
         as satisfied (delete() also strips the reference)."""
         unmet = []
         for dep in card.get("depends_on") or []:
@@ -772,10 +774,10 @@ class SessionRunner:
     def run_if_ready(self, card_id: str) -> dict:
         """Run a draft card now if all its dependencies are satisfied;
         otherwise mark it waiting (session.waiting_for) so _drain_dependents
-        starts it automatically once they complete. Non-drafts are returned
+        starts it automatically once they are merged. Non-drafts are returned
         unchanged, and so are drafts that neither depend on anything nor were
         waiting. Used when a dependency is added or removed (a draft linked
-        onto an already-completed card runs immediately; unlinking the last
+        onto an already-merged card runs immediately; unlinking the last
         blocking edge releases a waiting draft)."""
         card = self.store.get(card_id)
         if card["status"] != "draft":
@@ -788,15 +790,15 @@ class SessionRunner:
         if unmet:
             return self.store.patch_session(card_id, {
                 "waiting_for": unmet,
-                "queue_reason": "waiting for " + ", ".join(unmet) + " to complete",
+                "queue_reason": "waiting for " + ", ".join(unmet) + " to be merged",
             })
         return self.run(card_id)
 
     def _drain_dependents(self) -> None:
         """Start the drafts that were waiting on dependencies (session
-        waiting_for set) and whose dependencies have now all completed
-        (done/accepted). Called whenever a card reaches a terminal status,
-        after an accept, and at startup.
+        waiting_for set) and whose dependencies have now all been merged
+        (accepted). Called whenever a card reaches a terminal status, after an
+        accept, and at startup — the accept is what actually releases them.
 
         Serialized by `_drain_lock` like _drain_queued_runs: two sessions
         ending together must not both start the same ready draft, and the

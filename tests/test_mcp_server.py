@@ -322,9 +322,12 @@ def test_dependency_tools_via_mcp(harness):
     assert err["isError"] is True and "itself" in err["payload"]
     assert call(harness, "add_dependency", card_id=follow["id"], depends_on="nope99")["isError"] is True
 
-    # run the dependency; when it completes the dependent starts by itself
+    # run the dependency; the dependent starts only once it is MERGED
     call(harness, "run_card", card_id=dep["id"])
     wait_status(harness, dep["id"], ("done", "failed"))
+    # Reviewer approval alone does not release the dependent.
+    assert call(harness, "get_card", card_id=follow["id"])["payload"]["status"] == "draft"
+    assert call(harness, "accept_card", card_id=dep["id"])["isError"] is False
     final = wait_status(harness, follow["id"], ("done", "failed"))
     assert final["status"] == "done"
     assert final["session"]["waiting_for"] is None

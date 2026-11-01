@@ -486,9 +486,13 @@ def test_dependencies_view(store: CardStore):
     store.set_status(b["id"], "done", session_patch={"review": {"approved": True}})
     deps = store.dependencies(a["id"])
     assert deps["depends_on"] == [b["id"], c["id"]]
-    assert deps["unmet"] == [c["id"]]        # b is done, c is still draft
+    # b is only done (reviewer-approved, not merged) — it still blocks.
+    assert deps["unmet"] == [b["id"], c["id"]]
     assert deps["blocks"] == []
     assert store.dependencies(b["id"])["blocks"] == [a["id"]]
+    # Merging b satisfies it; c is still a draft.
+    store.set_status(b["id"], "accepted")
+    assert store.dependencies(a["id"])["unmet"] == [c["id"]]
     # a deleted dependency counts as satisfied
     store.delete(c["id"])
     assert store.dependencies(a["id"])["unmet"] == []

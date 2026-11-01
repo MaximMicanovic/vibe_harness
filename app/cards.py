@@ -37,10 +37,12 @@ FINISHED_STATUSES = ("done", "failed", "stopped", "accepted")
 LIVE_STATUSES = ("running", "reviewing")
 
 # Statuses that satisfy a dependency: a card waiting on another card (via
-# `depends_on`) is run automatically once every dependency reaches one of
-# these ("done" = approved by the reviewer, "accepted" = merged). failed /
-# stopped do NOT satisfy a dependency — the dependent stays draft.
-COMPLETED_STATUSES = ("done", "accepted")
+# `depends_on`) is run automatically once every dependency is MERGED
+# ("accepted"). "done" — approved by the reviewer but not yet merged — does
+# NOT satisfy a dependency: the dependent must build on the merged result, not
+# on a branch that may still be rejected or reverted. failed / stopped do not
+# satisfy a dependency either — the dependent stays draft.
+COMPLETED_STATUSES = ("accepted",)
 
 # Keys of the session dict. A missing session is materialized with these keys
 # set to None before a session_patch is merged in.
@@ -469,8 +471,8 @@ class CardStore:
 
     def dependencies(self, card_id: str) -> dict:
         """Dependency view of one card: depends_on (what it waits for),
-        blocks (cards that wait for it), unmet (dependencies not yet in a
-        completed status; missing cards count as satisfied)."""
+        blocks (cards that wait for it), unmet (dependencies not yet merged;
+        missing cards count as satisfied)."""
         card = self.get(card_id)
         deps = card.get("depends_on") or []
         blocks = [n["id"] for n in self.list()

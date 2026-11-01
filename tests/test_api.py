@@ -1107,9 +1107,9 @@ def test_dependency_endpoints_crud(env):
     assert r.json()["depends_on"] == []
 
 
-def test_run_blocked_until_dependency_completes(env):
-    """A draft linked to an unfinished card waits; when the dependency reaches
-    done, the dependent starts automatically."""
+def test_run_blocked_until_dependency_is_merged(env):
+    """A draft linked to an unfinished card waits; it starts only once the
+    dependency is MERGED (accepted) — a reviewer-approved "done" is not enough."""
     dep = create_card(env.client, title="First", body="write first.py")
     follow = create_card(env.client, title="Second", body="write second.py")
     env.client.post(f"/api/cards/{follow['id']}/depends/{dep['id']}")
@@ -1121,22 +1121,31 @@ def test_run_blocked_until_dependency_completes(env):
     assert card["status"] == "draft"
     assert card["session"]["waiting_for"] == [dep["id"]]
 
-    # Run the dependency; when it reaches done the dependent starts on its own.
+    # Run the dependency. Reviewer approval alone must NOT release the
+    # dependent: it has to be merged first.
     env.client.post(f"/api/cards/{dep['id']}/run")
     wait_for_status(env.client, dep["id"], {"done"})
+    time.sleep(0.3)                       # give a (wrong) drain a chance to fire
+    still = env.client.get(f"/api/cards/{follow['id']}").json()
+    assert still["status"] == "draft"
+    assert still["session"]["waiting_for"] == [dep["id"]]
+
+    # Accepting (merging) the dependency releases it.
+    assert env.client.post(f"/api/cards/{dep['id']}/accept").status_code == 200
     follow_final = wait_for_status(env.client, follow["id"], {"done", "failed"}, timeout=15)
     assert follow_final["status"] == "done"
     assert follow_final["session"]["waiting_for"] is None
     assert follow_final["session"]["review"]["approved"] is True
 
 
-def test_link_onto_already_completed_card_runs_immediately(env):
-    dep = create_card(env.client, title="Done dep", body="write dep.py")
+def test_link_onto_already_merged_card_runs_immediately(env):
+    dep = create_card(env.client, title="Merged dep", body="write dep.py")
     env.client.post(f"/api/cards/{dep['id']}/run")
     wait_for_status(env.client, dep["id"], {"done"})
+    assert env.client.post(f"/api/cards/{dep['id']}/accept").status_code == 200
 
     follow = create_card(env.client, title="Follow-up", body="write follow.py")
-    # Linking a draft onto an already-done card starts it right away.
+    # Linking a draft onto an already-merged card starts it right away.
     r = env.client.post(f"/api/cards/{follow['id']}/depends/{dep['id']}")
     assert r.status_code == 200
     assert r.json()["status"] == "running"
@@ -1159,8 +1168,9 @@ def test_remove_dependency_can_unblock_run(env):
 
 
 def test_failed_dependency_does_not_trigger_dependent(env):
-    """Only done/accepted satisfy a dependency; a failed dependency leaves the
-    dependent waiting (it can be re-run manually after the dep is fixed)."""
+    """Only a merged (accepted) dependency satisfies a link; a failed one
+    leaves the dependent waiting (it can be re-run manually after the dep is
+    fixed)."""
     dep = create_card(env.client, title="Flaky", body="fail")
     follow = create_card(env.client, title="Follow", body="y")
     env.client.post(f"/api/cards/{follow['id']}/depends/{dep['id']}")

@@ -624,7 +624,7 @@ function buildCard(cardData) {
   card.addEventListener('click', () => { openEditor(cardData.id).catch(showError); });
 
   // Drag a DRAFT card onto another card to link them: the dragged draft runs
-  // automatically once the card it is dropped on completes (done/accepted).
+  // automatically once the card it is dropped on is merged (accepted).
   if (cardData.status === 'draft') {
     card.draggable = true;
     card.addEventListener('dragstart', (e) => {

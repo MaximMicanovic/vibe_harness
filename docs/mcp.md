@@ -15,7 +15,7 @@ dashboard's HTTP API, so the dashboard stays the single writer):
   `harness_update_card` / `harness_delete_card`
 - `harness_run_card` / `harness_stop_card` / `harness_accept_card` / `harness_card_log`
 - `harness_add_dependency` / `harness_remove_dependency` / `harness_list_dependencies` —
-  link cards so one runs automatically after another completes (done/accepted):
+  link cards so one runs automatically once another is merged (accepted):
   `add_dependency(card_id=<dependent>, depends_on=<dependency>)`. The board draws
   a red string between linked cards; the same link can be made by dragging a draft
   card onto another card.

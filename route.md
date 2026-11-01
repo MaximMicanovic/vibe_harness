@@ -115,7 +115,10 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   draft card onto another card, or `harness_add_dependency`) does not start while
   any dependency is unfinished: `run` marks it waiting (`session.waiting_for`)
   instead of spawning a session, and `_drain_dependents` starts it automatically
-  once every dependency reaches done/accepted (failed/stopped do not unblock).
+  once every dependency is **merged** (`accepted`). Reviewer approval alone
+  (`done`) does not unblock: the dependent builds on the merged result, not on a
+  branch that may still be rejected or reverted. failed/stopped do not unblock
+  either.
   So a chain of linked drafts costs the same tokens as running them by hand, in
   order, with no idle time between them — but do not link cards that should run
   independently, they would serialize.
@@ -294,8 +297,8 @@ group: `current_card`, `list_cards`, `get_card`, `create_card`, `update_card`,
 `delete_card`, `run_card`, `stop_card`, `accept_card`, `card_log`,
 `list_templates`, `stats`, a **read-only** `list_projects`, `ask_user`, the
 dependency-link tools `add_dependency` / `remove_dependency` /
-`list_dependencies` (chain cards so one runs automatically when another
-completes — done/accepted; the dashboard draws a red string between the
+`list_dependencies` (chain cards so one runs automatically once another is
+merged — accepted; the dashboard draws a red string between the
 linked cards, and dragging a draft card onto another card creates the same
 link), the **archive** tools `create_archive` / `list_archives` /
 `get_archive` / `archive_card` / `archive_cards` / `archive_stack` /
