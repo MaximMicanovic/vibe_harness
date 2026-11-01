@@ -1303,8 +1303,9 @@ function cardAnchor(card, boardRect) {
   return { x: r.left - boardRect.left + r.width / 2, y: r.top - boardRect.top + 6 };
 }
 
-/* Draw a red string from each dependency card to the dependent card (the
- * arrowhead points at the card that runs after), like yarn on a corkboard.
+/* Draw a red string from each dependent card to the card it runs after (the
+ * arrowhead points at the card that runs first — a queued draft points at the
+ * running/reviewing card it waits for), like yarn on a corkboard.
  * Recomputed on every board render and on resize. */
 /* Scroll a card into view and flash it, so a parent/child chip actually takes
  * you somewhere. The card may be in another column or inside a stack. */
@@ -1352,8 +1353,8 @@ function renderStrings() {
   for (const n of visible) {
     for (const dep of n.depends_on || []) {
       if (!visIds.has(dep)) continue;  // dependency not visible in this project view
-      const fromCard = cardOf(dep);    // the dependency (completes first)
-      const toCard = cardOf(n.id);     // the dependent (runs after)
+      const fromCard = cardOf(n.id);   // the dependent (the queued draft)
+      const toCard = cardOf(dep);      // the dependency (runs first)
       if (!fromCard || !toCard) continue;
       const a = cardAnchor(fromCard, boardRect);
       const b = cardAnchor(toCard, boardRect);
