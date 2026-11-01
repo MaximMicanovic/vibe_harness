@@ -41,7 +41,7 @@ const state = {
   archives: [],          // archives from GET /api/archives
   archivePick: null,     // null | { kind: 'card'|'cards'|'project', id, ids, name, label } — pick an archive to move into
   archiveExpanded: new Set(),  // archive ids whose card list is shown
-  sidebarPanel: null,    // null | 'models' | 'archive' — the open sidebar panel
+  sidebarPanel: null,    // null | 'settings' | 'models' | 'archive' | 'split' — the open sidebar panel
   sidebarArchiveOpen: new Set(),  // archive ids expanded in the sidebar's archive browser
   sidebarProjectOpen: new Set(),  // project names expanded in the archive browser
   sidebarArchiveProjects: new Set(),  // '<archiveId>::<project>' keys the user folded away
@@ -395,11 +395,28 @@ function isResolving(card) {
   return !!(s.git && s.git.resolving === true);
 }
 
-/* A draft whose run was queued because a merge conflict is being applied in
- * its repo — the card spins until the conflict resolves and the run starts. */
+/* A draft whose run is queued — either for a free session slot (the
+ * concurrency cap) or behind an in-progress merge conflict. The card spins
+ * until the run starts. */
 function isQueued(card) {
   const s = card.session || {};
   return s.queued === true;
+}
+
+/* The queue chip. Two things queue a run: no free session slot (the
+ * concurrency cap) and an in-progress merge conflict in the card's repo. A
+ * capacity wait is normal traffic, not an error — it gets the neutral
+ * "waiting" style and the reason the server recorded ("waiting for a free
+ * slot (2/3 running)"); only a merge conflict keeps the red chip. */
+function buildQueueChip(session) {
+  const reason = session.queue_reason || '';
+  const capacity = reason.indexOf('waiting for a free slot') === 0;
+  const c = chip(capacity ? 'waiting' : 'merge-conflict',
+                 '⏳ ' + (reason || 'waiting for merge conflict to resolve'));
+  c.title = capacity
+    ? reason + ' — the run starts automatically when a session ends'
+    : (reason || 'run queued until the in-progress merge conflict resolves');
+  return c;
 }
 
 /* Display name for a dependency id (the linked card's title, or the raw id
@@ -533,9 +550,7 @@ function buildCard(cardData) {
       chips.appendChild(wc);
     }
     if (s.queued === true) {
-      const qc = chip('merge-conflict', '⏳ waiting for merge conflict to resolve');
-      qc.title = s.queue_reason || 'run queued until the in-progress merge conflict resolves';
-      chips.appendChild(qc);
+      chips.appendChild(buildQueueChip(s));
     }
     if (s.started_at) {
       if (running) {
@@ -1819,6 +1834,7 @@ const sidebarBody = $('sidebar-body');
 const sidebarRail = $('sidebar-rail');
 
 const SIDEBAR_PANELS = {
+  settings: { title: 'Settings', render: renderSettingsPanel },
   models: { title: 'Models', render: renderModelsPanel },
   archive: { title: 'Archive', render: renderArchivePanel },
   split: { title: 'Split', render: renderSplitPanel },
@@ -1866,6 +1882,55 @@ async function renderKeysPanel() {
     list.appendChild(row);
   }
   sidebarBody.appendChild(list);
+}
+
+/* --- settings: how many sessions may run at once --- */
+
+/* The concurrency cap. The runner reads it per run, so a change applies to the
+ * next Run click without a restart; cards over the cap wait in Draft and start
+ * automatically, oldest queue time first, as sessions end. */
+async function renderSettingsPanel() {
+  const settings = await api('/api/settings');
+  state.settings = settings;
+  sidebarBody.textContent = '';
+
+  const row = el('div', 'model-role');
+  const label = el('label', '', 'Max concurrent sessions');
+  label.htmlFor = 'max-concurrent-input';
+  row.appendChild(label);
+
+  const input = el('input');
+  input.type = 'number';
+  input.id = 'max-concurrent-input';
+  input.min = '0';
+  input.step = '1';
+  input.value = String(settings.max_concurrent);
+  input.title = 'How many agent sessions may run at once — 0 = unlimited';
+  input.addEventListener('change', () => {
+    saveMaxConcurrent(input.value).catch(showError);
+  });
+  row.appendChild(input);
+  row.appendChild(el('p', 'model-hint',
+    'How many agent sessions may run at once (0 = unlimited). Cards over the '
+    + 'cap wait in Draft and start automatically, oldest first, as sessions end.'));
+  sidebarBody.appendChild(row);
+
+  const running = settings.running || 0;
+  const limit = settings.max_concurrent;
+  const occupancy = el('p', 'sidebar-empty', limit > 0
+    ? running + ' of ' + limit + ' running'
+    : running + ' running (no limit)');
+  occupancy.id = 'max-concurrent-occupancy';
+  sidebarBody.appendChild(occupancy);
+}
+
+async function saveMaxConcurrent(raw) {
+  const value = Math.max(0, Math.floor(Number(raw) || 0));
+  state.settings = await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ max_concurrent: value }),
+  });
+  await renderSettingsPanel();
 }
 
 /* --- models: which model each kind of session runs on --- */

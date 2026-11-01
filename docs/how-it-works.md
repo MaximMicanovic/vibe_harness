@@ -33,6 +33,29 @@ The pipeline a card goes through: implement, test gate, review, accept.
 Prompts, logs, and `export.json` for every round are kept under
 `sessions/<id>/run-N/` and `sessions/<id>/review-N/`.
 
+## Concurrency cap
+
+The harness runs at most `VIBE_HARNESS_MAX_CONCURRENT` sessions at once
+(default 3; `0` = unlimited). The sidebar's **Settings** panel (⚙️) sets the
+same cap per harness — it is stored in `settings.json`, wins over the env var,
+and is read at run time, so a change applies without a restart. The panel also
+shows the current occupancy ("2 of 3 running").
+
+Pressing **Run** when every slot is taken does not fail and does not spawn
+anything: the card stays in **Draft** flagged `session.queued` with
+`queue_reason` "waiting for a free slot (2/3 running)" (a neutral chip, not an
+error), and `session.queued_at` records when it joined the queue. As soon as a
+session ends — the end of every session, after **Stop**, after a merge-conflict
+resolver concludes, and at startup — `_drain_queued_runs()` starts the queued
+cards **oldest queue time first**, stopping as soon as the cap is reached, so no
+card starves. Drains are serialized (one at a time) and the cap check plus the
+slot registration are atomic, so two sessions ending together cannot both start
+the same queued card or push the board past the cap; a session's slot is always
+released — even when recording its outcome fails — so the cap cannot silently
+shrink. A card in the review loop holds one slot at a time (run → review →
+fixer are sequential), which is what makes the cap a cap on *concurrent*
+sessions, worktrees and test suites.
+
 ## Git workflow
 
 Runs in a real work folder (a project's folder or a card's work folder override —

@@ -448,6 +448,17 @@ class SessionRunner:
         # card_id -> {"proc": Popen, "stop_requested": bool}; guarded by _lock.
         self._registry: dict[str, dict] = {}
         self._lock = threading.Lock()
+        # Serializes queue drains: every session end and every stop() drains,
+        # and two drains running at once would both see the same queued card
+        # and start it twice (a duplicate session leaves a stale registry
+        # entry, which silently shrinks the concurrency cap). Also serializes
+        # the dependency drain, which starts sessions the same way.
+        self._drain_lock = threading.Lock()
+        # Serializes the cap check + slot registration in run(): the check and
+        # the registry insert must be atomic, or two starts both pass the check
+        # and the cap is exceeded. Lock order is _drain_lock -> _start_lock ->
+        # _lock; nothing takes them in the other direction.
+        self._start_lock = threading.Lock()
         # Serializes live-token journal scans (API handlers may race).
         self._usage_lock = threading.Lock()
 
@@ -483,23 +494,50 @@ class SessionRunner:
                 "queue_reason": "waiting for " + ", ".join(unmet) + " to complete",
             })
             return self.store.get(card_id)
-        git_patch = self._prepare_git(card)
-        workdir = Path(git_patch["worktree"]) if git_patch else None
-        extra_patch: dict = {"queued": False, "waiting_for": None}
-        if git_patch:
-            extra_patch["git"] = git_patch
-        if self.config.mailbox:
-            # Per-card MCP mailbox: state under sessions/<id>/mailbox + the
-            # stdio server attached via .vibe/config.toml in the work folder
-            # (the card's linked worktree for git-backed runs, else sandbox).
-            ws0 = workdir if workdir is not None else self._resolve_ws(card)[0]
-            extra_patch["mailbox"] = mailbox.setup_mailbox(
-                ws0, self.sessions_dir / card_id)
-        self._spawn(card_id, kind="run",
-                    prompt=prompt_template(card["body"], self._mcp_name(),
-                                           tdd=self.config.tdd),
-                    extra_patch=extra_patch or None,
-                    workdir=workdir)
+        # The cap check and the slot registration must be atomic: two Run
+        # clicks (or a drain racing a click) that both pass the check would
+        # start two sessions at the cap. `_start_lock` is held across the whole
+        # start path — the git prep (worktree add) is exactly the window the
+        # check protects, and it is wide enough to lose the race in practice.
+        with self._start_lock:
+            # Re-read: another start may have won while we waited for the lock.
+            card = self.store.get(card_id)
+            if card["status"] in LIVE_STATUSES:
+                raise CardRunning(f"card {card_id} is already running")
+            limit = self._max_concurrent()
+            running = self.running_count()
+            if limit > 0 and running >= limit:
+                # No free session slot: queue the run instead of spawning
+                # another session (and worktree, and test suite).
+                # _drain_queued_runs starts it, oldest queue time first, as
+                # soon as a session ends.
+                session = card.get("session") or {}
+                self.store.patch_session(card_id, {
+                    "queued": True,
+                    # Keep the original queue time: pressing Run again must not
+                    # jump the card ahead of the ones queued before it.
+                    "queued_at": session.get("queued_at") or now_iso(),
+                    "queue_reason": f"waiting for a free slot ({running}/{limit} running)",
+                })
+                return self.store.get(card_id)
+            git_patch = self._prepare_git(card)
+            workdir = Path(git_patch["worktree"]) if git_patch else None
+            extra_patch: dict = {"queued": False, "queued_at": None,
+                                 "waiting_for": None}
+            if git_patch:
+                extra_patch["git"] = git_patch
+            if self.config.mailbox:
+                # Per-card MCP mailbox: state under sessions/<id>/mailbox + the
+                # stdio server attached via .vibe/config.toml in the work folder
+                # (the card's linked worktree for git-backed runs, else sandbox).
+                ws0 = workdir if workdir is not None else self._resolve_ws(card)[0]
+                extra_patch["mailbox"] = mailbox.setup_mailbox(
+                    ws0, self.sessions_dir / card_id)
+            self._spawn(card_id, kind="run",
+                        prompt=prompt_template(card["body"], self._mcp_name(),
+                                               tdd=self.config.tdd),
+                        extra_patch=extra_patch or None,
+                        workdir=workdir)
         return self.store.get(card_id)
 
     def _mcp_name(self) -> str | None:
@@ -658,23 +696,62 @@ class SessionRunner:
         target = self._finalize_resolver if kind == "resolve" else self._finalize
         threading.Thread(target=target, args=(card_id,), daemon=True).start()
 
+    def _max_concurrent(self) -> int:
+        """Concurrent-session cap in force right now; 0 = unlimited.
+
+        The sidebar setting (settings.json) wins, Config.max_concurrent is the
+        fallback when it is unset. Read per run, so changing the setting takes
+        effect without a restart.
+        """
+        if self.settings is not None:
+            return self.settings.max_concurrent(self.config.max_concurrent)
+        return self.config.max_concurrent
+
+    def running_count(self) -> int:
+        """Live sessions holding a slot — one per card, because run -> review
+        -> fixer are sequential (a card in the review loop holds one slot)."""
+        with self._lock:
+            return len(self._registry)
+
     def _drain_queued_runs(self) -> None:
-        """Start the runs that were queued behind an in-progress merge
-        conflict, for cards whose target repo no longer has a merge in
-        progress. Called when a resolver concludes a merge (and at startup),
-        so queued drafts do not wait for another manual Run click."""
-        for card in self.store.list():
-            session = card.get("session") or {}
-            if not session.get("queued") or card["status"] in LIVE_STATUSES:
-                continue
-            try:
-                if self._merge_in_progress_for(card):
-                    continue  # still waiting for the merge conflict to resolve
-                self.store.patch_session(card["id"], {"queued": False,
-                                                      "queue_reason": None})
-                self.run(card["id"])
-            except Exception:
-                pass  # raced with another action; a later drain or manual Run retries
+        """Start queued runs while slots are free, oldest queue time first.
+
+        Two things queue a run: an in-progress merge conflict in the card's
+        repo, and no free session slot (the concurrency cap). FIFO by
+        `queued_at` so no card starves — `store.list()` order is
+        most-recently-updated first, which would let a fresh card jump the
+        queue. The loop stops as soon as the cap is reached. Called at the end
+        of every session, after stop(), after a resolver concludes, and at
+        startup, so queued drafts do not wait for another manual Run click.
+
+        Serialized by `_drain_lock`: sessions end concurrently, and two drains
+        interleaving between the limit check and the queue patch would start
+        the same card twice. A second caller waits for the running drain and
+        then re-reads the board, so no wakeup is lost.
+        """
+        with self._drain_lock:
+            queued = []
+            for card in self.store.list():
+                session = card.get("session") or {}
+                if not session.get("queued") or card["status"] in LIVE_STATUSES:
+                    continue
+                queued.append(card)
+            # Cards queued before queued_at existed sort first (empty string).
+            queued.sort(key=lambda c: ((c.get("session") or {}).get("queued_at") or "",
+                                       c["id"]))
+            for card in queued:
+                limit = self._max_concurrent()
+                if limit > 0 and self.running_count() >= limit:
+                    return  # no free slot: the rest keep waiting, in order
+                try:
+                    if self._merge_in_progress_for(card):
+                        continue  # still waiting for the merge conflict to resolve
+                    self.store.patch_session(card["id"], {"queued": False,
+                                                          "queued_at": None,
+                                                          "queue_reason": None})
+                    self.run(card["id"])
+                except Exception:
+                    pass  # raced with another action; a later drain or manual Run retries
 
     # ---------------------------------------------------------- dependencies
 
@@ -719,22 +796,29 @@ class SessionRunner:
         """Start the drafts that were waiting on dependencies (session
         waiting_for set) and whose dependencies have now all completed
         (done/accepted). Called whenever a card reaches a terminal status,
-        after an accept, and at startup."""
-        for card in self.store.list():
-            if card["status"] != "draft":
-                continue
-            session = card.get("session") or {}
-            if not session.get("waiting_for"):
-                continue
-            try:
-                if self.unmet_dependencies(card):
-                    continue  # still waiting for some dependency
-                self.store.patch_session(card["id"], {
-                    "waiting_for": None, "queued": False, "queue_reason": None,
-                })
-                self.run(card["id"])
-            except Exception:
-                pass  # raced with another action; a later drain or manual Run retries
+        after an accept, and at startup.
+
+        Serialized by `_drain_lock` like _drain_queued_runs: two sessions
+        ending together must not both start the same ready draft, and the
+        starts must not interleave past the cap check.
+        """
+        with self._drain_lock:
+            for card in self.store.list():
+                if card["status"] != "draft":
+                    continue
+                session = card.get("session") or {}
+                if not session.get("waiting_for"):
+                    continue
+                try:
+                    if self.unmet_dependencies(card):
+                        continue  # still waiting for some dependency
+                    self.store.patch_session(card["id"], {
+                        "waiting_for": None, "queued": False, "queued_at": None,
+                        "queue_reason": None,
+                    })
+                    self.run(card["id"])
+                except Exception:
+                    pass  # raced with another action; a later drain or manual Run retries
 
     def accept_card(self, card_id: str) -> dict:
         """Accept a done card: gate first, then merge its git branch (if any).
@@ -880,11 +964,21 @@ class SessionRunner:
         """Resolver session finished: if it concluded the merge (exit 0,
         MERGE_HEAD gone, tree clean), finish the accept — delete the card
         branch, mark merged, accept the card. Otherwise leave the card done
-        with the conflict still open and `resolving` cleared."""
+        with the conflict still open and `resolving` cleared.
+
+        Like _finalize, the slot is released in a `finally` so a failure while
+        recording the outcome cannot leave a stale registry entry.
+        """
         with self._lock:
             entry = self._registry.get(card_id)
         if entry is None:
             return
+        try:
+            self._record_resolver_outcome(card_id, entry)
+        finally:
+            self._release_slot(card_id, entry)
+
+    def _record_resolver_outcome(self, card_id: str, entry: dict) -> None:
         proc = entry["proc"]
         exit_code = proc.wait()
 
@@ -906,22 +1000,6 @@ class SessionRunner:
                     f"resolver session exited with code {exit_code}")
             self.store.patch_session(card_id, {"git": git_patch,
                                                "resolver": resolver_patch})
-
-        with self._lock:
-            if self._registry.get(card_id) is entry:
-                self._registry.pop(card_id, None)
-
-        # The merge state may have changed: start any runs that were queued
-        # behind this conflict (no-op while a merge is still in progress).
-        try:
-            self._drain_queued_runs()
-        except Exception:
-            pass  # never let the queue drain break the resolver finalize
-        # The accept may have completed the card: start waiting dependents.
-        try:
-            self._drain_dependents()
-        except Exception:
-            pass
 
     def _conclude_resolved_merge(self, card: dict,
                                  resolver_patch: dict | None = None) -> None:
@@ -1106,6 +1184,15 @@ class SessionRunner:
         persistent worker keeps its context across fix rounds. Only worker
         ('run') rounds are ever resumed; reviewers are always fresh.
         """
+        # One live session per card. A second spawn would overwrite the
+        # registry entry: the first process would go unmanaged and its finalize
+        # thread could never release the slot (the cap would silently shrink).
+        # A sequential handover (run -> review -> fixer) is fine — the previous
+        # process has already exited by then.
+        with self._lock:
+            existing = self._registry.get(card_id)
+        if existing is not None and existing["proc"].poll() is None:
+            raise CardRunning(f"card {card_id} already has a live session")
         card = self.store.get(card_id)
         sdir = self.sessions_dir / card_id
         sdir.mkdir(parents=True, exist_ok=True)
@@ -1393,11 +1480,55 @@ class SessionRunner:
 
     def _finalize(self, card_id: str) -> None:
         """Runs in a daemon thread: wait for exit, record the outcome, and
-        drive the review loop."""
+        drive the review loop.
+
+        The session slot is released in a `finally`: a failure while recording
+        the outcome (e.g. the card moved on and the store refuses the status
+        write) must never leave a stale registry entry — that would shrink the
+        concurrency cap for the rest of the process.
+        """
         with self._lock:
             entry = self._registry.get(card_id)
         if entry is None:
             return
+        try:
+            self._record_outcome(card_id, entry)
+        finally:
+            self._release_slot(card_id, entry)
+
+    def _release_slot(self, card_id: str, entry: dict) -> None:
+        """A session is over: drop its registry entry and start what it
+        unblocked (the next queued run, then waiting dependents).
+
+        Always runs, even when recording the outcome failed — a stale entry
+        would hold a slot forever and silently lower the cap.
+        """
+        with self._lock:
+            # Only drop the registry entry if it is still ours — a follow-up
+            # session (reviewer/fixer) may have re-registered in the meantime.
+            if self._registry.get(card_id) is entry:
+                self._registry.pop(card_id, None)
+        # This session is over: cancel any question it left pending (a waiter
+        # gets status "cancelled"; the card stops showing it as live).
+        try:
+            self.questions.cancel(card_id)
+        except Exception:
+            pass  # never let question cleanup break the loop
+        # A session slot just freed: start the next queued run (capacity queue
+        # or merge-conflict queue), oldest queue time first.
+        try:
+            self._drain_queued_runs()
+        except Exception:
+            pass  # never let the queue drain break the loop
+        # The card may have reached a terminal status (done/failed/stopped):
+        # start any drafts that were waiting on it and are now unblocked.
+        try:
+            self._drain_dependents()
+        except Exception:
+            pass  # never let the dependency drain break the loop
+
+    def _record_outcome(self, card_id: str, entry: dict) -> None:
+        """Record one finished session and drive the next pipeline step."""
         proc = entry["proc"]
         kind = entry["kind"]
 
@@ -1568,24 +1699,6 @@ class SessionRunner:
                                   source="review", review_record=review_record,
                                   session_patch=review_patch)
 
-        with self._lock:
-            # Only drop the registry entry if it is still ours — a follow-up
-            # session (reviewer/fixer) may have re-registered in the meantime.
-            if self._registry.get(card_id) is entry:
-                self._registry.pop(card_id, None)
-        # This session is over: cancel any question it left pending (a waiter
-        # gets status "cancelled"; the card stops showing it as live).
-        try:
-            self.questions.cancel(card_id)
-        except Exception:
-            pass  # never let question cleanup break the loop
-        # The card may have reached a terminal status (done/failed/stopped):
-        # start any drafts that were waiting on it and are now unblocked.
-        try:
-            self._drain_dependents()
-        except Exception:
-            pass  # never let the dependency drain break the loop
-
     # ----------------------------------------------------------------- stop
 
     @staticmethod
@@ -1621,7 +1734,13 @@ class SessionRunner:
                 self._signal_session(proc.pid, signal.SIGKILL)
 
         threading.Thread(target=_escalate, daemon=True).start()
-        # _finalize records status "stopped" once the process exits.
+        # _finalize records status "stopped" once the process exits and drains
+        # the queue there; drain here too so a stop that races an exit already
+        # observed still releases the slot for the next queued card.
+        try:
+            self._drain_queued_runs()
+        except Exception:
+            pass  # never let the queue drain break a stop
 
     # ---------------------------------------------------------------- status
 
