@@ -48,8 +48,11 @@ error), and `session.queued_at` records when it joined the queue. As soon as a
 session ends — the end of every session, after **Stop**, after a merge-conflict
 resolver concludes, and at startup — `_drain_queued_runs()` starts the queued
 cards **oldest queue time first**, stopping as soon as the cap is reached, so no
-card starves. A card in the review loop holds one slot at a time (run → review
-→ fixer are sequential), which is what makes the cap a cap on *concurrent*
+card starves. Drains are serialized (one at a time): two sessions ending
+together cannot both start the same queued card, and a session's slot is always
+released — even when recording its outcome fails — so the cap cannot silently
+shrink. A card in the review loop holds one slot at a time (run → review →
+fixer are sequential), which is what makes the cap a cap on *concurrent*
 sessions, worktrees and test suites.
 
 ## Git workflow

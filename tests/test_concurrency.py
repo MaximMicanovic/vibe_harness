@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app.cards import CardStore
+from app.cards import CardRunning, CardStore, InvalidTransition
 from app.config import Config, load_config
 from app.main import create_app
 from app.projects import ProjectStore
@@ -30,12 +31,10 @@ TESTS_DIR = Path(__file__).resolve().parent
 QUEUE_CHIP_JS = TESTS_DIR / "queue_chip_check.js"
 
 # Slow fake vibe: stays alive until stopped, so slots stay occupied while the
-# test presses Run on more cards.
+# test presses Run on more cards. `exec` so SIGTERM kills it immediately — a
+# shell waiting on a foreground child defers its trap (flaky 10s stops).
 FAKE_VIBE_SLOW = """#!/bin/sh
-trap 'echo "fake vibe: got SIGTERM, exiting"; exit 0' TERM
-echo "slow fake vibe started"
-sleep 30
-exit 0
+exec sleep 30
 """
 
 
@@ -263,8 +262,116 @@ def test_drain_stops_at_the_limit(store, tmp_path, slow_vibe):
         _wait_for_status(store, card["id"], "stopped")
 
 
-# ---------------------------------------------------------------------- API
+# ------------------------------------------------------- drain / slot races
 
+def test_concurrent_drains_start_a_queued_card_once(store, tmp_path, slow_vibe,
+                                                    monkeypatch):
+    """Two sessions ending together both call _drain_queued_runs(). The queued
+    card must start ONCE: a duplicate spawn overwrites the registry entry, the
+    second _finalize then dies before releasing the slot, and the cap silently
+    drops to N-1 for the rest of the process."""
+    runner = _make_runner(store, tmp_path, slow_vibe, max_concurrent=1)
+    running = store.create("Running", "spec")
+    runner.run(running["id"])
+    _wait_for_status(store, running["id"], "running")
+    queued = store.create("Queued", "spec")
+    runner.run(queued["id"])
+    assert store.get(queued["id"])["session"]["queued"] is True
+
+    # Widen the window between the limit check and the queue patch, so both
+    # drains are inside the loop at the same time (what two sessions ending
+    # together do).
+    real_merge = runner._merge_in_progress_for
+
+    def slow_merge(card):
+        time.sleep(0.3)
+        return real_merge(card)
+
+    monkeypatch.setattr(runner, "_merge_in_progress_for", slow_merge)
+
+    calls = []
+    real_run = runner.run
+
+    def counting_run(card_id):
+        calls.append(card_id)
+        return real_run(card_id)
+
+    monkeypatch.setattr(runner, "run", counting_run)
+
+    # The running session ends: its slot is free, exactly the state _finalize
+    # leaves behind before draining.
+    with runner._lock:
+        ended = runner._registry.pop(running["id"], None)
+
+    threads = [threading.Thread(target=runner._drain_queued_runs) for _ in range(2)]
+    try:
+        threads[0].start()
+        time.sleep(0.1)      # thread 1 is inside the drain, past the limit check
+        threads[1].start()
+        for t in threads:
+            t.join(timeout=20)
+        assert calls == [queued["id"]], (
+            f"the queued card must start exactly once, got {calls}")
+        assert runner.running_count() == 1
+    finally:
+        ended["proc"].kill()
+        ended["proc"].wait()
+        entry = runner._registry.get(queued["id"])
+        if entry is not None:
+            entry["proc"].kill()
+            entry["proc"].wait()
+        # Let both finalize threads release their slots before the tmp dir goes.
+        deadline = time.time() + 10
+        while runner.running_count() and time.time() < deadline:
+            time.sleep(0.05)
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_finalize_releases_the_slot_when_recording_fails(store, tmp_path,
+                                                         slow_vibe, monkeypatch):
+    """A failure while recording the outcome must not leave a stale registry
+    entry — that would shrink the concurrency cap for the rest of the process
+    (the reviewer's InvalidTransition case)."""
+    runner = _make_runner(store, tmp_path, slow_vibe, max_concurrent=1)
+    card = store.create("Card", "spec")
+    runner.run(card["id"])
+    _wait_for_status(store, card["id"], "running")
+
+    def failing_set_status(card_id, status, **kwargs):
+        raise InvalidTransition("the card already moved on")
+
+    monkeypatch.setattr(store, "set_status", failing_set_status)
+    runner.stop(card["id"])          # the session ends -> _finalize records it
+
+    deadline = time.time() + 10
+    while runner.running_count() and time.time() < deadline:
+        time.sleep(0.05)
+    assert runner.running_count() == 0, (
+        "a failed outcome write must still release the session slot")
+
+
+def test_spawn_refuses_a_second_live_session(store, tmp_path, slow_vibe):
+    """One live session per card: a second spawn would overwrite the registry
+    entry, leaving the first process unmanaged and its slot unreleasable."""
+    runner = _make_runner(store, tmp_path, slow_vibe)
+    card = store.create("Card", "spec")
+    proc = subprocess.Popen(["sleep", "30"])
+    with runner._lock:
+        runner._registry[card["id"]] = {"proc": proc, "stop_requested": False,
+                                        "kind": "run", "round": 1}
+    try:
+        with pytest.raises(CardRunning):
+            runner._spawn(card["id"], kind="run", prompt="spec")
+    finally:
+        proc.kill()
+        proc.wait()
+        entry = runner._registry.get(card["id"])
+        if entry is not None and entry["proc"] is not proc:
+            entry["proc"].kill()     # only on the unfixed code path
+            entry["proc"].wait()
+
+
+# ---------------------------------------------------------------------- API
 def make_env(tmp_path: Path, **config_kwargs) -> SimpleNamespace:
     cards_dir = tmp_path / "cards"
     sessions_dir = tmp_path / "sessions"
