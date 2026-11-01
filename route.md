@@ -47,7 +47,10 @@ you write a card (spec)
   → test gate  VIBE_HARNESS_TEST_CMD runs in the workspace           ← free (no LLM)
   → review-N   FRESH vibe --agent ask process every round, but its   ← small spend
                prompt only carries the spec + `git diff
-               <last-reviewed-commit>..HEAD` + the test output, and it
+               <last-reviewed-commit>..HEAD` (round 1: from the
+               MERGE-BASE of the card branch and its base, so a branch
+               that is merely behind its base is not read as a revert)
+               + the test output, and it
                can ask the persistent worker via the per-card MCP mailbox
                (`harness-mailbox`: post_message / wait_for_message /
                submit_verdict — the verdict is read from submit_verdict,

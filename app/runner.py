@@ -1247,7 +1247,11 @@ class SessionRunner:
         <last-reviewed-commit>..HEAD` in the card's worktree.
 
         The base is the commit the previous review round covered
-        (``session.last_reviewed_commit``), else the card branch's base commit.
+        (``session.last_reviewed_commit``), else the MERGE-BASE of the card
+        branch and its base branch. The merge-base matters: diffing from the
+        base TIP makes a branch that is merely behind its base look like it
+        reverts whatever landed there since, and the reviewer rejects the card
+        for someone else's commit.
         Returns (diff_text, range_description); (None, None) when the run is
         not git-backed (sandbox) or git fails. The diff is capped so the
         reviewer's context stays small.
@@ -1259,9 +1263,12 @@ class SessionRunner:
         try:
             base = session.get("last_reviewed_commit")
             if not base:
-                base = gitops.run_git(
-                    ["rev-parse", git_info.get("base_branch") or "HEAD"],
-                    Path(wt)).stdout.strip()
+                base_ref = git_info.get("base_branch") or "HEAD"
+                base = gitops.run_git(["merge-base", base_ref, "HEAD"],
+                                      Path(wt), check=False).stdout.strip()
+                if not base:
+                    base = gitops.run_git(["rev-parse", base_ref],
+                                          Path(wt)).stdout.strip()
             head = gitops.run_git(["rev-parse", "HEAD"], Path(wt)).stdout.strip()
             proc = gitops.run_git(["diff", f"{base}..{head}"], Path(wt), check=False)
             diff = proc.stdout or ""

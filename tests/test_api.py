@@ -1354,6 +1354,36 @@ def test_diff_endpoint_round_and_worktree_ranges(tmp_path):
 
 
 @git_test
+def test_diff_endpoint_card_range_ignores_base_moves(tmp_path):
+    """A card branch cut before the base moved must show what the CARD changed,
+    not the base's newer commits as deletions.
+
+    This is the reviewer's false "revert": `git diff base..branch` compares two
+    tips, so anything that landed on the base after the branch was cut shows up
+    as the card deleting it. The card range is measured from the merge-base —
+    which is exactly what accept merges (`merge_commit^..merge_commit`), so the
+    before-accept and after-accept views agree.
+    """
+    with _git_card(tmp_path) as (e, card, git_info):
+        proj = Path(git_info["repo"])
+        # The base moves forward while the card waits for review.
+        (proj / "someone_else.py").write_text("print('other work')\n")
+        _git(["add", "-A"], proj)
+        _git(["commit", "-q", "-m", "unrelated work on the base"], proj)
+
+        r = e.client.get(f"/api/cards/{card['id']}/diff")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "hello.py" in body["diff"]
+        # The base's newer commit is NOT shown as the card deleting it.
+        assert "someone_else.py" not in body["diff"]
+        assert [f["path"] for f in body["files"]] == ["hello.py"]
+        # base is the merge-base, not the moved base tip.
+        assert body["base"] == _git(["merge-base", git_info["base_branch"],
+                                     git_info["branch"]], proj)
+
+
+@git_test
 def test_diff_endpoint_truncates_huge_diffs(tmp_path):
     """The diff is capped (400 KB) and flagged, so a giant card cannot hang
     the panel."""

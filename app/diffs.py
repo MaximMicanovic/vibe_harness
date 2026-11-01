@@ -4,10 +4,14 @@ A reviewer session approves a change the user never sees; this module is what
 makes it inspectable. Three ranges, all read from the card's git session
 record (``session.git``):
 
-- ``card``     — what accept merged: ``base_branch..harness/<id>`` before
-                 accept, ``merge_commit^..merge_commit`` after. The card branch
-                 and its linked worktree are kept after accept, so this keeps
-                 working once the card is accepted.
+- ``card``     — what accept merged: ``merge-base(base_branch, harness/<id>)
+                 ..harness/<id>`` before accept, ``merge_commit^..merge_commit``
+                 after. Both are the same set of changes, so the view does not
+                 change when the card is accepted. (Diffing from the base TIP
+                 would show a branch that is merely behind its base as
+                 reverting whatever landed there since — the false "revert".)
+                 The card branch and its linked worktree are kept after accept,
+                 so this keeps working once the card is accepted.
 - ``round``    — what the last review round judged: the commits between the
                  previous round's commit and this round's commit (the harness
                  advances ``last_reviewed_commit`` to HEAD when a round ends,
@@ -37,6 +41,17 @@ class DiffRangeError(Exception):
 
 def _rev(cwd: Path, ref: str) -> str:
     return gitops.run_git(["rev-parse", ref], cwd).stdout.strip()
+
+
+def _merge_base(cwd: Path, a: str, b: str) -> str:
+    """The commit `b` was cut from `a` — what accept actually merges.
+
+    Diffing from the base TIP instead would show the card reverting everything
+    that landed on the base after the branch was cut: a card branch that is
+    merely behind its base would look like it deletes other people's work.
+    """
+    proc = gitops.run_git(["merge-base", a, b], cwd, check=False)
+    return (proc.stdout or "").strip() or _rev(cwd, a)
 
 
 def _cap(text: str) -> tuple[str, bool]:
@@ -86,7 +101,9 @@ def _card_range(session: dict, git_info: dict) -> tuple[str, str, list[str], Pat
         raise gitops.GitError(
             "the card branch is gone (accepted before branches were kept) — "
             "no diff to show")
-    base = _rev(root, base_branch)
+    # From the merge-base, not the base tip: that is what accept merges (and
+    # what `merge_commit^..merge_commit` shows after accept).
+    base = _merge_base(root, base_branch, branch)
     head = _rev(root, branch)
     return base, head, [f"{base}..{head}"], root
 

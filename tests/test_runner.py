@@ -1443,6 +1443,40 @@ def test_review_prompt_scoped_to_diff_since_last_review(store, tmp_path, project
 
 
 @git_test
+def test_review_diff_ignores_base_moves(store, tmp_path, fake_vibe, projects):
+    """The reviewer must see what the CARD changed. When the base branch moves
+    after the card branch was cut, `git diff base..HEAD` shows the card
+    DELETING that newer work — a false "revert" that gets the round rejected
+    for someone else's commit. The diff starts at the merge-base instead."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    gitops.ensure_repo(proj)
+    (proj / "base.txt").write_text("base\n")
+    _git(["add", "-A"], proj)
+    _git(["commit", "-q", "-m", "base"], proj)
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    card = store.create("Diff card", "spec", project="my-app")
+    branch = f"harness/{card['id']}"
+    wt = runner.sessions_dir / card["id"] / "worktree"
+    git_info = gitops.prepare_card_branch(proj, branch, wt)
+    (wt / "card.txt").write_text("card work\n")
+    _git(["add", "-A"], wt)
+    _git(["commit", "-q", "-m", "card work"], wt)
+    # The base moves forward while the card waits for review.
+    (proj / "someone_else.txt").write_text("other work\n")
+    _git(["add", "-A"], proj)
+    _git(["commit", "-q", "-m", "unrelated work on the base"], proj)
+
+    diff, rng = runner._review_diff({"git": git_info}, wt)
+
+    assert "card.txt" in diff
+    assert "someone_else.txt" not in diff          # not shown as a deletion
+    merge_base = _git(["merge-base", git_info["base_branch"], branch], proj)
+    assert rng.startswith(merge_base[:12])
+
+
+@git_test
 def test_mailbox_attached_to_card_worktree(store, tmp_path, fake_vibe, projects):
     """The per-card MCP mailbox is attached via .vibe/config.toml in the card's
     linked worktree (kept out of git via info/exclude), the mailbox state dir
