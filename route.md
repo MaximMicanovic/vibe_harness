@@ -112,9 +112,11 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   stat). Both run the same accept-time test gate and cost no LLM tokens; `pr`
   additionally needs `gh`, `gh auth login` and an `origin` remote, and fails
   with a 409 naming the missing piece before anything is pushed. In `pr` mode
-  the branch and its worktree are kept (the PR may need follow-up commits), so
-  a repo accumulates one worktree per accepted-but-unmerged card until the PR
-  lands.
+  the branch and its worktree are kept (the PR may need follow-up commits) —
+  including across restarts: startup pruning skips PR-accepted cards, because
+  the `-u` push makes `git branch -d` consider the branch merged and would
+  otherwise delete it. A repo therefore accumulates one worktree per
+  accepted-but-unmerged card until the PR lands.
 - **Loop cap.** Rejections (review or test) loop through a fixer, capped at
   `VIBE_HARNESS_MAX_REVIEW_ROUNDS` (default 5). After the cap the card lands in
   Done unapproved (`review.exhausted`) and *you* decide — no more paid rounds.

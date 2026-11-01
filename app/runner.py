@@ -1806,6 +1806,11 @@ class SessionRunner:
           the linked worktree is removed (``git worktree remove --force`` +
           prune) and the card branch is deleted only when already merged
           (safe ``git branch -d``) — unmerged work is never force-deleted.
+          EXCEPTION: a card accepted as a pull request keeps both. Its branch
+          and worktree are the working copy for follow-up commits on the PR,
+          and the ``-u`` push sets the branch's upstream to ``origin/<branch>``
+          — which makes ``git branch -d`` consider it merged and succeed, so
+          the safe-delete guard alone would not save it.
         """
         for card in self.store.list():
             status = card["status"]
@@ -1842,7 +1847,10 @@ class SessionRunner:
                 pass
         # Prune orphaned per-card worktrees/branches of cards that are no
         # longer live (nothing manages them after a restart). Cards still
-        # resolving keep their worktree/branch — a resolver owns them.
+        # resolving keep their worktree/branch — a resolver owns them — and so
+        # does a card accepted as a pull request: the PR may need follow-up
+        # commits, and its `-u` push makes `git branch -d` succeed (the branch
+        # looks "merged" to its upstream), so pruning would delete it.
         for card in self.store.list():
             if card["status"] in LIVE_STATUSES:
                 continue
@@ -1851,6 +1859,8 @@ class SessionRunner:
             if not git_info.get("worktree") or not git_info.get("repo"):
                 continue
             if card["status"] == "done" and git_info.get("resolving"):
+                continue
+            if session.get("pr_url") or session.get("pr_opened_at"):
                 continue
             try:
                 gitops.remove_card_worktree(git_info)

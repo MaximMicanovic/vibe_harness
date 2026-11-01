@@ -94,9 +94,13 @@ per card, shipped on accept — merged locally, or opened as a pull request.
   already landed is finished automatically (merged + accepted); an open
   conflict is left for a resolver. Orphaned worktrees of non-live cards are
   pruned, and their `harness/<id>` branch is deleted only when already merged
-  (safe `-d` — unmerged work is never force-deleted). Pending questions whose
-  waiter died with the server are cancelled (failed, adopted and
-  resolver-adopted cards alike).
+  (safe `-d` — unmerged work is never force-deleted). **A card accepted as a
+  pull request is exempt**: its branch and worktree are kept across restarts
+  (the PR may need follow-up commits), which the safe `-d` guard alone would
+  not achieve — the `-u` push points the branch at `origin/<branch>`, so git
+  considers it merged and `-d` would succeed. Pending questions whose waiter
+  died with the server are cancelled (failed, adopted and resolver-adopted
+  cards alike).
 - Cards show a `⎇ harness/<id> → <base>` chip while the work is unmerged, and
   `✓ merged into <base>` after a local accept — or a `↗ PR #<n>` link after a
   PR accept.
