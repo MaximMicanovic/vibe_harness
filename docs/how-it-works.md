@@ -56,6 +56,28 @@ shrink. A card in the review loop holds one slot at a time (run → review →
 fixer are sequential), which is what makes the cap a cap on *concurrent*
 sessions, worktrees and test suites.
 
+## Notifications: a card finishing is not silent
+
+The board polls `/api/cards` every 2 s while a card is live, so the tab already
+sees every status change. `app.js` keeps the previous status map in
+`state.prevStatuses` and diffs it on each refresh: a card moving from
+**Running**/**Reviewing** to **Done**/**Failed**/**Stopped** is announced.
+
+- **Desktop notification** via the browser Notification API, naming the card and
+  its outcome. Permission is requested on the **first click**, never on load.
+- **Beep fallback.** If permission is denied (or the browser has no Notification
+  API) a short tone is synthesised with WebAudio — there is no audio file.
+- **Silent cases.** Nothing fires on the first load (there is no previous state
+  to diff) and nothing fires for the card whose panel is open — you are already
+  looking at it.
+- **Title badge.** While notifications are unread and the tab is hidden the
+  document title reads `(N) vibe-harness`; focusing the tab clears it.
+- **Toggle.** The sidebar's **Settings** panel (⚙️) — the same panel as the
+  concurrency cap — has a *Desktop notifications* switch. The choice is per
+  browser, stored in `localStorage` under `vibe-harness:notifications` (`'0'` =
+  off, anything else = on), so it survives a reload. Switching it off also stops
+  the beep and the title badge.
+
 ## Git workflow
 
 Runs in a real work folder (a project's folder or a card's work folder override —

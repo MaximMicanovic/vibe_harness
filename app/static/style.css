@@ -572,6 +572,30 @@ body {
   line-height: 1.4;
 }
 
+/* --- settings panel --- */
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.setting-row input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent, #c2410c);
+  cursor: pointer;
+}
+
+.setting-label {
+  font-weight: 600;
+  color: var(--ink);
+}
+
 /* --- split panel --- */
 
 .split-table {
