@@ -288,9 +288,24 @@ async function action(fn) {
 
 /* ---------------- Stats bar ---------------- */
 
+/* Only Vibe streams live token counts (it writes a session journal the harness
+ * tails). Claude reports usage once, in its final result object, so a live
+ * counter would sit at zero for the whole run — hide it rather than show a
+ * number that never moves. */
+function backendHasLiveTokens() {
+  return !state.settings || state.settings.backend !== 'claude';
+}
+
 function renderStats() {
   const s = state.stats;
   if (!s) return;
+  const live = backendHasLiveTokens();
+  $('stat-tokens-wrap').hidden = !live;
+  if (!live) {
+    $('stat-runtime').textContent = fmtDuration(s.total_runtime_seconds);
+    $('stat-avg').textContent = fmtDuration(s.avg_runtime_seconds);
+    return;
+  }
   // Only the stats that are unique to the top bar — per-status counts are
   // already shown in each board column's header.
   $('stat-tokens').textContent = fmtTokens(s.total_tokens);
@@ -513,7 +528,7 @@ function buildCard(cardData) {
         chips.appendChild(chip('duration', fmtDuration((parseTs(s.finished_at) - parseTs(s.started_at)) / 1000)));
       }
     }
-    if (typeof s.live_tokens === 'number') {
+    if (typeof s.live_tokens === 'number' && backendHasLiveTokens()) {
       // Live-updating tokens of the in-flight session (server-attached while
       // the card is running/reviewing; refreshed by the 2s poll). The little
       // bubble shows the token types — cached, input, output — in the same
@@ -1814,6 +1829,16 @@ $('sidebar-close').addEventListener('click', closeSidebar);
 
 /* --- models: which model each kind of session runs on --- */
 
+/* Which backend runs sessions, cached for the stats bar and the card chips. */
+async function loadSettings() {
+  try {
+    state.settings = await api('/api/settings');
+  } catch (_) {
+    state.settings = null;  // assume the default backend
+  }
+  return state.settings;
+}
+
 /* The pickable models, cached for the per-card pickers. */
 async function loadModels() {
   try {
@@ -1894,6 +1919,10 @@ async function saveBackend(key) {
   state.settings = await api('/api/settings', {
     method: 'PUT', body: JSON.stringify({ backend: key }),
   });
+  // The token counter depends on the backend, so the board and the stats bar
+  // have to be redrawn, not just the panel.
+  renderStats();
+  renderBoard();
   await renderModelsPanel();
 }
 
@@ -2607,6 +2636,6 @@ for (const col of COLUMNS) wireColumnDrop($('col-' + col.key), col.key);
 loadProjects();
 // The model list feeds the picker on every card, so load it before the first
 // board render (the Models panel re-reads it when a role changes).
-loadModels().then(() => refresh()).then(migrateLocalStacks);
+Promise.all([loadModels(), loadSettings()]).then(() => refresh()).then(migrateLocalStacks);
 checkBuild();
 setInterval(checkBuild, BUILD_CHECK_MS);
