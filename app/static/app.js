@@ -445,6 +445,19 @@ function tiltFor(id) {
   return (h & 1 ? -0.6 : 0.5) + 'deg';
 }
 
+/* The dependencies this card is still waiting on. A link is satisfied only
+ * when the card it points at is MERGED (accepted) — the same rule the server
+ * uses to release the run, so the arrow disappears exactly when the wait ends.
+ * A dependency that is not on the board (deleted, or archived) counts as
+ * satisfied, matching the server's unmet_dependencies(). */
+function unmetDeps(cardData, index) {
+  const byId = index || new Map(state.cards.map((n) => [n.id, n]));
+  return (cardData.depends_on || []).filter((id) => {
+    const dep = byId.get(id);
+    return dep ? dep.status !== 'accepted' : false;
+  });
+}
+
 function buildCard(cardData) {
   const card = el('article', 'card card--' + cardData.status);
   card.dataset.cardId = cardData.id;
@@ -541,8 +554,9 @@ function buildCard(cardData) {
     wc.title = cardData.workdir + ' — Vibe works in this folder';
     chips.appendChild(wc);
   }
-  if (Array.isArray(cardData.depends_on) && cardData.depends_on.length) {
-    const names = cardData.depends_on.map(depName);
+  const waitingOn = unmetDeps(cardData);
+  if (waitingOn.length) {
+    const names = waitingOn.map(depName);
     const dc = chip('depends', '⛓ runs after ' + names.join(', '));
     dc.title = 'This card runs automatically once ' + names.join(', ')
       + ' is merged (accepted) — a red string links the cards. Remove the link in the editor.';
@@ -1378,9 +1392,12 @@ function renderStrings() {
   const boardRect = board.getBoundingClientRect();
   const visible = visibleCards();
   const visIds = new Set(visible.map((n) => n.id));
+  const statusIndex = new Map(state.cards.map((n) => [n.id, n]));
   const cardOf = (id) => board.querySelector('.card[data-card-id="' + CSS.escape(id) + '"]');
   for (const n of visible) {
-    for (const dep of n.depends_on || []) {
+    // Only the links still being waited on: once the dependency is merged the
+    // string has done its job and is not drawn any more.
+    for (const dep of unmetDeps(n, statusIndex)) {
       if (!visIds.has(dep)) continue;  // dependency not visible in this project view
       const fromCard = cardOf(n.id);   // the dependent (the queued draft)
       const toCard = cardOf(dep);      // the dependency (runs first)
