@@ -39,6 +39,9 @@ const state = {
   archiveProjects: new Map(),  // archive id -> its project groups (GET /api/archives/<id>), cached for the sidebar
   models: null,          // GET /api/models: { roles, models, default_model }
   settings: null,        // GET /api/settings: { backend, backends }
+  prevStatuses: null,    // Map cardId -> status from the previous refresh (null = first load)
+  notificationsEnabled: true,  // sidebar Settings toggle, persisted in localStorage
+  unreadNotifications: 0,      // finishes announced while the tab was hidden (title badge)
 };
 
 /* ---------------- DOM refs ---------------- */
@@ -1802,6 +1805,7 @@ const SIDEBAR_PANELS = {
   models: { title: 'Models', render: renderModelsPanel },
   archive: { title: 'Archive', render: renderArchivePanel },
   split: { title: 'Split', render: renderSplitPanel },
+  settings: { title: 'Settings', render: renderSettingsPanel },
 };
 
 function openSidebarPanel(key) {
@@ -1933,6 +1937,35 @@ async function saveRoleModel(role, model) {
   const data = await api('/api/models', { method: 'PUT', body: JSON.stringify({ models: patch }) });
   state.models = data;
   await renderModelsPanel();
+}
+
+/* --- settings: browser-side preferences --- */
+
+/* These are per-browser choices (localStorage), not server settings: they
+ * describe what this tab should do, not how the harness runs sessions. */
+async function renderSettingsPanel() {
+  sidebarBody.textContent = '';
+
+  const row = el('label', 'setting-row');
+  const box = el('input');
+  box.type = 'checkbox';
+  box.id = 'notify-toggle';
+  box.checked = state.notificationsEnabled;
+  box.title = 'Show a desktop notification when a card finishes while you are in another window';
+  box.addEventListener('change', () => setNotificationsEnabled(box.checked));
+  row.appendChild(box);
+  row.appendChild(el('span', 'setting-label', 'Desktop notifications'));
+  sidebarBody.appendChild(row);
+
+  const permission = notificationPermission();
+  sidebarBody.appendChild(el('p', 'sidebar-empty',
+    permission === 'denied'
+      ? 'This browser blocks notifications for the dashboard, so a short beep plays instead. '
+        + 'Allow notifications in the site settings to get the desktop popup back.'
+      : permission === 'unsupported'
+        ? 'This browser has no Notification API, so a short beep plays instead.'
+        : 'A card that finishes while you are in another window pops up a desktop notification. '
+          + 'The browser asks for permission on your first click.'));
 }
 
 /* --- archive: the archive folders and the stacks/cards inside them --- */
@@ -2266,6 +2299,146 @@ setInterval(() => {
   });
 }, 1000);
 
+/* ---------------- Desktop notifications ---------------- */
+
+/* A card finishing is silent: the board just changes colour, so if you are in
+ * another window you only find out by looking. Every refresh therefore diffs
+ * the card statuses against the previous one and announces the cards that just
+ * ended.
+ *
+ * The browser Notification API is the primary channel; when the user denied
+ * permission we fall back to a short synthesised WebAudio beep (no audio file).
+ * While the tab is hidden the title carries an unread count, so a glance at the
+ * tab strip is enough. */
+
+const NOTIFY_KEY = 'vibe-harness:notifications';
+const TITLE_BASE = document.title || 'vibe-harness';
+
+/* Statuses that mean "a session is in flight" and statuses that mean "it just
+ * ended". Only a move from the first set to the second one is announced. */
+const LIVE_STATUSES = new Set(['running', 'reviewing']);
+const FINISHED_STATUSES = new Set(['done', 'failed', 'stopped']);
+
+function loadNotificationsEnabled() {
+  try { return localStorage.getItem(NOTIFY_KEY) !== '0'; } catch (_) { return true; }
+}
+function saveNotificationsEnabled(on) {
+  try { localStorage.setItem(NOTIFY_KEY, on ? '1' : '0'); } catch (_) { /* private mode */ }
+}
+
+function notificationPermission() {
+  try {
+    if (typeof Notification === 'undefined') return 'unsupported';
+    return Notification.permission;
+  } catch (_) { return 'unsupported'; }
+}
+
+/* Ask on the first user gesture — never on load: a prompt nobody asked for is
+ * noise, and browsers block it outside a gesture anyway. */
+let permissionAsked = false;
+function askNotificationPermission() {
+  if (permissionAsked) return;
+  permissionAsked = true;
+  try {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'default') return;
+    const asked = Notification.requestPermission();
+    if (asked && typeof asked.catch === 'function') asked.catch(() => {});
+  } catch (_) { /* the callback form of older browsers needs no handling */ }
+}
+document.addEventListener('click', askNotificationPermission, { once: true });
+
+/* No audio asset: a short beep synthesised with WebAudio. One context is kept
+ * for the tab's lifetime — browsers cap how many a page may create. */
+let audioCtx = null;
+function beep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!audioCtx) audioCtx = new Ctx();
+    const ctx = audioCtx;
+    if (ctx.state === 'suspended' && typeof ctx.resume === 'function') ctx.resume();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.value = 0.08;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.18);
+  } catch (_) { /* audio blocked — nothing left to fall back to */ }
+}
+
+/* One notification per finished card, naming the card and its outcome. */
+function notifyCard(card) {
+  const outcome = card.status;
+  const name = card.title || card.id;
+  if (notificationPermission() === 'granted') {
+    try {
+      const note = new Notification(name, {
+        body: 'Card ' + outcome + ' — click to open the board.',
+        tag: 'vibe-harness:' + card.id,
+      });
+      note.onclick = () => { try { window.focus(); note.close(); } catch (_) { /* gone */ } };
+      return;
+    } catch (_) { /* fall through to the beep */ }
+  }
+  beep();
+}
+
+/* The card whose panel is open is the one the user is already looking at. */
+function cardPanelOpen(cardId) {
+  return state.editorCardId === cardId || state.logCardId === cardId;
+}
+
+/* Diff the new statuses against the previous refresh and return the cards that
+ * just finished. The first refresh has no previous map, so it only records. */
+function diffCardStatuses(cards) {
+  const prev = state.prevStatuses;
+  const next = new Map();
+  const finished = [];
+  for (const card of cards) {
+    next.set(card.id, card.status);
+    if (!prev) continue;                       // first load: nothing to compare
+    const before = prev.get(card.id);
+    if (before === undefined) continue;        // a card we have never seen
+    if (LIVE_STATUSES.has(before) && FINISHED_STATUSES.has(card.status)) finished.push(card);
+  }
+  state.prevStatuses = next;
+  return finished;
+}
+
+/* "(N) vibe-harness" while notifications are unread and the tab is hidden. */
+function updateTitleBadge() {
+  const unread = state.unreadNotifications;
+  document.title = (unread > 0 && document.hidden) ? '(' + unread + ') vibe-harness' : TITLE_BASE;
+}
+
+function announceFinished(cards) {
+  if (!state.notificationsEnabled) return;
+  for (const card of cards) {
+    if (cardPanelOpen(card.id)) continue;
+    notifyCard(card);
+    if (document.hidden) state.unreadNotifications += 1;
+  }
+  updateTitleBadge();
+}
+
+/* Coming back to the tab means the user has seen the board: drop the badge. */
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) state.unreadNotifications = 0;
+  updateTitleBadge();
+});
+
+function setNotificationsEnabled(on) {
+  state.notificationsEnabled = !!on;
+  saveNotificationsEnabled(state.notificationsEnabled);
+  // The toggle click is a user gesture, so it is a fine moment to ask.
+  if (state.notificationsEnabled) askNotificationPermission();
+  else state.unreadNotifications = 0;
+  updateTitleBadge();
+}
+
 /* ---------------- Polling ---------------- */
 
 function anyLive() {
@@ -2290,6 +2463,7 @@ async function refresh() {
     state.cards = results[0];
     state.stats = results[1];
     state.stacks = Array.isArray(results[2]) ? results[2] : [];
+    announceFinished(diffCardStatuses(state.cards));
     renderStats();
     renderBoard();
     updatePolling();
@@ -2630,6 +2804,8 @@ async function checkBuild() {
 renderThemeIndicator(window.VibeTheme ? window.VibeTheme.state : { dark: false, sunrise: null, sunset: null });
 // Land back on the project selected last time in this browser.
 state.selectedProject = loadSelectedProject();
+// ...and on the notification choice made in the sidebar's Settings panel.
+state.notificationsEnabled = loadNotificationsEnabled();
 // Card stacks come from the server with the cards (see refresh), and per-column
 // drop targets are wired once — renderBoard only replaces the columns'
 // children, not the columns.
