@@ -15,6 +15,14 @@
       <span>Project</span>
       <select id="project-select" title="Choose which project's dashboard to show"></select>
     </label>
+    <div class="search-box" id="search-box">
+      <span class="search-icon" aria-hidden="true">🔍</span>
+      <input id="search-input" type="search" placeholder="Search cards…" autocomplete="off"
+             spellcheck="false" aria-label="Search cards on the board and in the archives"
+             title="Search the board and the archives by title, body or id — / focuses this box, Esc clears it">
+      <span class="search-hint" id="search-hint" hidden></span>
+      <div class="search-results" id="search-results" hidden aria-label="Search results"></div>
+    </div>
     <button id="manage-projects-btn" class="btn" title="Add or remove projects">＋ Project</button>
     <button id="archives-btn" class="btn" title="The archive: a folder per archive (archives/) holding archived cards and projects">📦 Archives</button>
     <button id="restart-server-btn" class="btn" title="Hard-restart the dashboard server (picks up code changes)">⟳ Restart</button>

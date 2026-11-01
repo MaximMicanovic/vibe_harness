@@ -236,6 +236,12 @@ The cheapest token is the one never spent:
   cards/agents to find your expensive routes.
 - USD cost is intentionally not shown in the UI, but `--max-price` still caps
   real spend per session.
+- **Search costs nothing.** The top bar's search box filters the board in the
+  browser (the cards, bodies included, are already in `state.cards`) and asks
+  `GET /api/search?q=` for the archive hits — a linear scan over the board's
+  cards and every archived card (`app/search.py`), capped at 50 results, with
+  no index and no LLM call. Typing therefore spends zero tokens: the only cost
+  is one small HTTP request per debounced keystroke, and no session is spawned.
 
 ## 6. Low-token preset (copy-paste)
 

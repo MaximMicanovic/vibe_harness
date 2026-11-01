@@ -54,6 +54,7 @@ from app.questions import (
     QuestionStore,
 )
 from app import routemd
+from app.search import search_cards
 from app.runner import (
     TOKEN_BREAKDOWN_KEYS,
     NotRunningError,
@@ -521,6 +522,18 @@ def create_app(config: Config | None = None,
     def restore_card(card_id: str):
         # Restore an archived card to the board, whichever archive holds it.
         return archives.restore_card(card_id)
+
+    # --- search (board cards + every archived card) --------------------------
+    @app.get("/api/search")
+    def search_endpoint(response: Response, q: str = ""):
+        # A linear scan over the board and every archive: no index, no deps.
+        # The list is capped (RESULT_LIMIT); the headers say whether it was cut
+        # short and how many cards matched in total, so the documented list
+        # shape stays a list.
+        results, total = search_cards(q, store, archives)
+        response.headers["X-Search-Truncated"] = "true" if total > len(results) else "false"
+        response.headers["X-Search-Total"] = str(total)
+        return results
 
     # --- settings (which agent CLI the harness drives) -----------------------
     @app.get("/api/settings")
