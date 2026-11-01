@@ -123,16 +123,19 @@ exit 0
 """
 
 
-def make_env(tmp_path: Path, script: str = FAKE_VIBE, **config_kwargs) -> SimpleNamespace:
+def make_env(tmp_path: Path, script: str = FAKE_VIBE, settings=None,
+             **config_kwargs) -> SimpleNamespace:
     cards_dir = tmp_path / "cards"
     sessions_dir = tmp_path / "sessions"
     store = CardStore(cards_dir)
     fake = tmp_path / "fake_vibe.sh"
     fake.write_text(script)
     fake.chmod(0o755)
-    config = Config(vibe_bin=str(fake), time_limit_seconds=30, **config_kwargs)
+    config_kwargs.setdefault("time_limit_seconds", 30)
+    config = Config(vibe_bin=str(fake), **config_kwargs)
     projects = ProjectStore(tmp_path / "projects.json")
-    runner = SessionRunner(store, config, sessions_dir=sessions_dir, projects=projects)
+    runner = SessionRunner(store, config, sessions_dir=sessions_dir,
+                           projects=projects, settings=settings)
     app = create_app(config=config, store=store, runner=runner, projects=projects)
     client = TestClient(app)
     return SimpleNamespace(client=client, store=store, runner=runner,

@@ -237,6 +237,29 @@ The cheapest token is the one never spent:
 - USD cost is intentionally not shown in the UI, but `--max-price` still caps
   real spend per session.
 
+### Why a card failed — read the badge, not the log
+
+Reading a session log to work out *why* a card failed costs tokens and time.
+The harness answers it for free: `app/failures.py::classify(card)` turns the
+session record into `{kind, detail}`, `annotate_card` attaches it as
+`session.failure` (so the API and the MCP both carry it), the card shows the
+kind as a badge with the detail on hover, and the top bar's **Failures** filter
+narrows the board to one kind.
+
+Kinds, in priority order — each one points at a different knob:
+
+| kind | what it means | what to change |
+|---|---|---|
+| `stopped_by_user` | you pressed Stop | nothing — it was you |
+| `git_conflict` | the accept merge conflicted / a resolver was involved | resolve the conflict, then Accept again |
+| `timeout` | the session hit its limit (`stop_reason`, or the harness watchdog) | raise `VIBE_HARNESS_TIME_LIMIT`, or split the card |
+| `tests_failed` | the test gate rejected it | fix the spec or `VIBE_HARNESS_TEST_CMD`; the fixer already got the output |
+| `reviewer_rejected` | the review loop ran out with a rejection | tighten the spec — the reviewer's reason is in `review.reason` |
+| `no_verdict` | the reviewer never answered | re-run; check the review log if it repeats |
+| `crashed` | non-zero exit (or a failed commit) with no other explanation | this is the one worth reading the log for |
+
+A card that did not fail has no `session.failure` at all.
+
 ## 6. Low-token preset (copy-paste)
 
 ```bash

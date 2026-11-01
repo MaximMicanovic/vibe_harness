@@ -24,6 +24,7 @@ const state = {
   templatesLoaded: false,
   projects: [],
   selectedProject: '',   // '' = All projects
+  failureFilter: '',     // '' = every card, else only cards that failed this way
   expandedTitles: new Set(),  // card ids whose card title shows the full name
   stacks: [],            // [{ id, col, ids: [cardId bottom→top] }] — visual card stacks per column
   dragCardId: null,      // card id currently being dragged (HTML5 drag & drop: drafts link, others stack)
@@ -45,6 +46,7 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const emptyBoard = $('empty-board');
+const EMPTY_BOARD_TEXT = emptyBoard.textContent;
 const errorBanner = $('error-banner');
 const errorText = $('error-text');
 
@@ -382,6 +384,63 @@ function isQueued(card) {
   return s.queued === true;
 }
 
+/* ---------------- Why a card failed ---------------- */
+
+/* The classifier's kinds (app/failures.py) and the short label the badge shows.
+ * The server attaches `session.failure = {kind, detail}` to every card that
+ * failed; the detail is the one-line reason, shown as the badge's tooltip. */
+const FAILURE_LABELS = {
+  stopped_by_user: 'stopped by user',
+  git_conflict: 'merge conflict',
+  timeout: 'timed out',
+  tests_failed: 'tests failed',
+  reviewer_rejected: 'reviewer rejected',
+  no_verdict: 'no verdict',
+  crashed: 'crashed',
+};
+
+const FAILURE_FILTER_KEY = 'vibe-harness:failure-filter';
+
+function failureOf(card) {
+  const s = card && card.session;
+  return (s && s.failure) || null;
+}
+
+function failureLabel(kind) {
+  return FAILURE_LABELS[kind] || String(kind || '').replace(/_/g, ' ');
+}
+
+function loadFailureFilter() {
+  try {
+    const kind = localStorage.getItem(FAILURE_FILTER_KEY) || '';
+    // A kind that no longer exists (an older board) falls back to "any reason".
+    return kind in FAILURE_LABELS ? kind : '';
+  } catch (e) { return ''; }
+}
+
+function saveFailureFilter(kind) {
+  try {
+    if (kind) localStorage.setItem(FAILURE_FILTER_KEY, kind);
+    else localStorage.removeItem(FAILURE_FILTER_KEY);
+  } catch (e) { /* private mode: the filter just does not persist */ }
+}
+
+/* Fill the top-bar filter: "any reason" plus one entry per kind. */
+function renderFailureFilter() {
+  const select = $('failure-filter');
+  if (!select) return;
+  select.textContent = '';
+  const any = el('option', '', 'any reason');
+  any.value = '';
+  select.appendChild(any);
+  for (const kind of Object.keys(FAILURE_LABELS)) {
+    const opt = el('option', '', failureLabel(kind));
+    opt.value = kind;
+    select.appendChild(opt);
+  }
+  select.value = state.failureFilter || '';
+}
+
 /* Display name for a dependency id (the linked card's title, or the raw id
  * when that card is not on the board / was deleted). */
 function depName(id) {
@@ -440,6 +499,16 @@ function buildCard(cardData) {
   head.appendChild(titleToggle);
   if (cardData.status === 'stopped') head.appendChild(el('span', 'tag tag-stopped', 'stopped'));
   if (cardData.status === 'reviewing') head.appendChild(el('span', 'tag tag-reviewing', 'reviewing'));
+  // Why it failed, in one word on the card and the full sentence on hover —
+  // the classifier's verdict (session.failure), not a log to read.
+  const failure = failureOf(cardData);
+  if (failure) {
+    const badge = el('span', 'tag tag-failure tag-failure--' + failure.kind,
+                     '⚠ ' + failureLabel(failure.kind));
+    badge.title = failure.detail || failureLabel(failure.kind);
+    badge.dataset.failureKind = failure.kind;
+    head.appendChild(badge);
+  }
   if (cardData.project) head.appendChild(el('span', 'tag tag-project', cardData.project));
   // Split tree: a card that was split out of another shows its parent, and a
   // card that was split shows how many sub-cards it produced. Both jump to the
@@ -1143,9 +1212,17 @@ function layoutStack(stackEl) {
 
 /* Cards visible under the current top-bar project filter ('' = all projects). */
 function visibleCards() {
-  return state.selectedProject === ''
+  let cards = state.selectedProject === ''
     ? state.cards
     : state.cards.filter((n) => (n.project || '') === state.selectedProject);
+  if (state.failureFilter) {
+    // "show only failures of kind X": a card with no failure never matches.
+    cards = cards.filter((n) => {
+      const f = failureOf(n);
+      return !!f && f.kind === state.failureFilter;
+    });
+  }
+  return cards;
 }
 
 function renderBoard() {
@@ -1262,6 +1339,11 @@ function renderBoard() {
     total += cards.length;
   }
   emptyBoard.hidden = total > 0;
+  // An empty board because of the failure filter is not an empty board.
+  const emptyText = (state.failureFilter && total === 0)
+    ? 'No card failed that way — pick “any reason” to see the whole board.'
+    : EMPTY_BOARD_TEXT;
+  if (emptyBoard.textContent !== emptyText) emptyBoard.textContent = emptyText;
   renderStrings();
   window.scrollTo(scrollX, scrollY);
 }
@@ -1455,6 +1537,13 @@ projectSelect.addEventListener('change', () => {
   // project use, and does not touch the last-used memory.)
   if (state.selectedProject) saveLastProjectDefault(state.selectedProject);
   refresh();
+});
+
+/* The failure filter: narrow the board to one reason a card can fail for. */
+$('failure-filter').addEventListener('change', (e) => {
+  state.failureFilter = e.target.value || '';
+  saveFailureFilter(state.failureFilter);
+  renderBoard();
 });
 
 /* ---------------- Projects modal ---------------- */
@@ -2630,6 +2719,9 @@ async function checkBuild() {
 renderThemeIndicator(window.VibeTheme ? window.VibeTheme.state : { dark: false, sunrise: null, sunset: null });
 // Land back on the project selected last time in this browser.
 state.selectedProject = loadSelectedProject();
+// ...and on the failure filter, so a board narrowed to one reason stays that way.
+state.failureFilter = loadFailureFilter();
+renderFailureFilter();
 // Card stacks come from the server with the cards (see refresh), and per-column
 // drop targets are wired once — renderBoard only replaces the columns'
 // children, not the columns.

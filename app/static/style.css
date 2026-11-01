@@ -1400,6 +1400,25 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
   color: #fff;
 }
 
+/* Why a card failed: the classifier's kind, with the one-line detail as the
+ * hover title. One colour per kind, so a board of red cards is readable at a
+ * glance — the filter in the top bar narrows to one of them. */
+.tag-failure {
+  background: var(--edge-failed);
+  color: #fff;
+  cursor: help;
+}
+
+.tag-failure--stopped_by_user { background: var(--edge-stopped); }
+.tag-failure--git_conflict    { background: #8e44ad; }
+.tag-failure--timeout         { background: #b8860b; }
+.tag-failure--tests_failed    { background: var(--edge-failed); }
+.tag-failure--reviewer_rejected { background: #c0392b; }
+.tag-failure--no_verdict      { background: #7f8c8d; }
+.tag-failure--crashed         { background: #2f3542; }
+
+.failure-picker select { max-width: 170px; }
+
 .accept-hint {
   font-size: 11.5px;
   color: #8a6d1f;

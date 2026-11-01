@@ -33,6 +33,44 @@ The pipeline a card goes through: implement, test gate, review, accept.
 Prompts, logs, and `export.json` for every round are kept under
 `sessions/<id>/run-N/` and `sessions/<id>/review-N/`.
 
+## Why a card failed
+
+Logs are raw text: "tests failed" vs "the reviewer rejected it" vs "it timed
+out" vs "it crashed" is something you would otherwise work out by hand. The
+harness names it instead.
+
+`app/failures.py::classify(card)` is a **pure function** over the session
+record the runner already keeps (`exit_code`, `stop_reason`, `verified`,
+`test_output`, `git_error`, `review.approved` / `review.reason` /
+`review.source` / `review.exhausted`, `review_rounds`, `resolver`, `git.*`).
+It returns `{kind, detail}` — `detail` being one human sentence — or `None`
+for a card that did not fail. No store, no I/O, no clock: the same card always
+classifies the same way.
+
+Kinds, in priority order (the first match wins):
+
+| kind | when |
+|---|---|
+| `stopped_by_user` | the card is `stopped` and the harness watchdog did not kill it |
+| `git_conflict` | `git.merge_conflict` / `git.resolving` / a failed resolver |
+| `timeout` | `session.timed_out`, or a limit `stop_reason` (`limit`, `max_turns`, …) |
+| `tests_failed` | `verified` is false, the last rejection came from the test gate, or the post-merge gate failed |
+| `reviewer_rejected` | the loop ran out (`review.exhausted`) with an actual rejection |
+| `no_verdict` | the loop ran out and the reviewer never answered |
+| `crashed` | a non-zero exit (or a failed commit) with no other explanation |
+
+`annotate_card` attaches the result as `session.failure`, so it rides along on
+`GET /api/cards`, `GET /api/cards/<id>` and therefore on the MCP's `list_cards`
+/ `get_card`. The board shows the kind as a badge on the card (the detail is
+the tooltip) and the top bar's **Failures** filter narrows the board to one
+kind — the choice is remembered in the browser like the project filter.
+
+Two fields exist only for this: `session.timed_out` (the harness killed a
+session that outlived `VIBE_HARNESS_TIME_LIMIT` — a backend without a native
+time limit, i.e. Claude) and `review.no_verdict` (no verdict channel answered),
+so a timeout is not mistaken for a Stop and a silent reviewer is not mistaken
+for a rejection.
+
 ## Git workflow
 
 Runs in a real work folder (a project's folder or a card's work folder override —
