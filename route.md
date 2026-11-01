@@ -246,7 +246,9 @@ The cheapest token is the one never spent:
   (`{approved, reason, round, tokens, model, log, export_dir, via, commit}`);
   `session.review` is the last one. The Diff panel's `round` range reads them,
   so you can see what each review round actually judged — and what it cost —
-  without re-running anything.
+  without re-running anything. Round 1 has no previous round, so it starts at
+  the merge-base of the card branch and its base (never the base tip, which
+  would show the base's newer commits as deletions).
 - USD cost is intentionally not shown in the UI, but `--max-price` still caps
   real spend per session.
 

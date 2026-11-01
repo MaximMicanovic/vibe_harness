@@ -121,7 +121,7 @@ node because the content is model-written.
 | range | what it shows |
 |---|---|
 | `card` | what accept merged: `merge-base(base_branch, harness/<id>)..harness/<id>` before accept, `merge_commit^..merge_commit` after — the same changes either way |
-| `round` | what the last review round judged: the commits between the previous round's commit and this round's commit |
+| `round` | what the last review round judged: the commits between the previous round's commit and this round's commit (round 1: from the merge-base of the card branch and its base) |
 | `worktree` | uncommitted changes in the card's worktree (`git diff HEAD`) |
 
 The response is `{range, base, head, diff, truncated, files: [{path, additions,
@@ -129,8 +129,9 @@ deletions}], review}`. The diff is capped at 400 KB and flagged `truncated`. A
 sandbox (non-git) card answers `{diff: null, reason: "not git-backed"}` instead
 of failing.
 
-Both the `card` range and the reviewer's own diff start at the **merge-base** of
-the card branch and its base branch, not at the base branch's tip. A card branch
+The `card` range, the `round` range (round 1) and the reviewer's own diff all
+start at the **merge-base** of the card branch and its base branch, not at the
+base branch's tip. A card branch
 is cut when the run starts; if the base moves while the card is being reviewed,
 `git diff base..branch` compares two tips and shows the card *deleting* whatever
 landed on the base since — a false "revert" that gets the round rejected for

@@ -17,6 +17,9 @@ record (``session.git``):
                  advances ``last_reviewed_commit`` to HEAD when a round ends,
                  so the literal ``last_reviewed_commit..HEAD`` is empty right
                  after a review; the review history reconstructs the range).
+                 Round 1 has no previous round, so it starts at the merge-base
+                 of the card branch and its base branch — never at the base
+                 tip, which would show the base's newer commits as deletions.
 - ``worktree`` — uncommitted changes in the card's linked worktree
                  (``git diff HEAD``).
 
@@ -118,7 +121,10 @@ def _round_range(session: dict, git_info: dict) -> tuple[str, str, list[str], Pa
     previous = reviews[-2] if len(reviews) > 1 else None
     base = (previous or {}).get("commit")
     if not base:
-        base = _rev(root, git_info.get("base_branch") or "HEAD")
+        # Round 1: from the merge-base, not the base tip. A branch that is
+        # merely behind its base must not look like it deletes the base's
+        # newer commits — the same false revert the card range avoids.
+        base = _merge_base(root, git_info.get("base_branch") or "HEAD", head)
     return base, head, [f"{base}..{head}"], root
 
 

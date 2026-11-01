@@ -1384,6 +1384,33 @@ def test_diff_endpoint_card_range_ignores_base_moves(tmp_path):
 
 
 @git_test
+def test_diff_endpoint_round_range_ignores_base_moves(tmp_path):
+    """Round 1's range starts at the merge-base too.
+
+    The Round panel shows what the reviewer judged; measuring round 1 from the
+    base TIP would show the base's newer commits as deletions — the same false
+    revert the card range avoids.
+    """
+    with _git_card(tmp_path) as (e, card, git_info):
+        proj = Path(git_info["repo"])
+        # The base moves forward after the card branch was cut.
+        (proj / "someone_else.py").write_text("print('other work')\n")
+        _git(["add", "-A"], proj)
+        _git(["commit", "-q", "-m", "unrelated work on the base"], proj)
+
+        r = e.client.get(f"/api/cards/{card['id']}/diff?range=round")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["range"] == "round"
+        assert "hello.py" in body["diff"]
+        # The base's newer commit is NOT shown as the card deleting it.
+        assert "someone_else.py" not in body["diff"]
+        assert [f["path"] for f in body["files"]] == ["hello.py"]
+        assert body["base"] == _git(["merge-base", git_info["base_branch"],
+                                     git_info["branch"]], proj)
+
+
+@git_test
 def test_diff_endpoint_truncates_huge_diffs(tmp_path):
     """The diff is capped (400 KB) and flagged, so a giant card cannot hang
     the panel."""
