@@ -49,6 +49,8 @@ SESSION_KEYS = (
     "model", "tokens", "stop_reason", "workdir", "log", "export_dir",
     "review", "review_rounds", "git", "resolver", "test_output",
     "mailbox", "worker_session_id", "last_reviewed_commit",
+    # PR accept (accept_mode "pr"): the pull request the card shipped as.
+    "pr_url", "pr_number", "pr_opened_at",
 )
 
 

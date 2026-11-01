@@ -53,7 +53,9 @@ you write a card (spec)
                submit_verdict — the verdict is read from submit_verdict,
                VERDICT: text is only a fallback)
   → (reject → fixer run-N+1 (resumed) … capped at VIBE_HARNESS_MAX_REVIEW_ROUNDS)
-  → accept     test gate once more, then merge the card branch       ← free
+  → accept     test gate once more, then ship the card branch:       ← free
+               merge it locally (accept_mode=local) or push it and
+               open a PR with the verdict as the body (accept_mode=pr)
 ```
 
 Tokens are spent almost entirely in **run** sessions; **review** sessions are
@@ -98,8 +100,21 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   round's file before spawning the review and reads only that file afterwards —
   a round that never calls `submit_verdict` falls back to `VERDICT:` text parsing
   (`via="log"`) instead of inheriting the previous round's verdict. The harness
-  only supervises: round cap, accept/merge, token accounting, mailbox lifecycle.
+  only supervises: round cap, accept (merge or PR), token accounting, mailbox
+  lifecycle.
   Disable with `VIBE_HARNESS_MAILBOX=0`.
+- **Accept mode decides where the change lands, not what it costs.**
+  `VIBE_HARNESS_ACCEPT_MODE` (or the sidebar's **Accept mode** control,
+  `PUT /api/settings {"accept_mode": …}`) picks how an accepted card ships:
+  `local` (default) merges the card branch into the base branch in the project
+  folder; `pr` pushes `harness/<id>` to `origin` and opens a pull request whose
+  body carries the audit trail (spec, review verdict, test output tail, diff
+  stat). Both run the same accept-time test gate and cost no LLM tokens; `pr`
+  additionally needs `gh`, `gh auth login` and an `origin` remote, and fails
+  with a 409 naming the missing piece before anything is pushed. In `pr` mode
+  the branch and its worktree are kept (the PR may need follow-up commits), so
+  a repo accumulates one worktree per accepted-but-unmerged card until the PR
+  lands.
 - **Loop cap.** Rejections (review or test) loop through a fixer, capped at
   `VIBE_HARNESS_MAX_REVIEW_ROUNDS` (default 5). After the cap the card lands in
   Done unapproved (`review.exhausted`) and *you* decide — no more paid rounds.
@@ -201,6 +216,9 @@ The cheapest token is the one never spent:
   Ambiguity burns fixer rounds.
 - Set `VIBE_HARNESS_TEST_CMD` (e.g. `pytest -q`, `npm test`) so the test gate
   catches breakage before the reviewer — and so accept is ship-only-green.
+- On a shared repo, set `VIBE_HARNESS_ACCEPT_MODE=pr`: the review verdict rides
+  along as the PR body, so a human reviewer reads the audit trail instead of
+  paying for another agent pass over the same diff.
 - Don't re-run a Done card casually; each re-run clears the session and starts
   a fresh paid run. Edit → run only when the spec actually changed.
 - Use the card `template` field for recurring card shapes so the spec is

@@ -1,8 +1,10 @@
-"""Harness-wide settings the board can change: which backend runs sessions.
+"""Harness-wide settings the board can change: which backend runs sessions, and
+how an accepted card ships.
 
 Kept apart from `models.json` (per-role model choice) because it is a different
 kind of decision: the backend is *which agent CLI* the harness drives, the model
-is *which model* that CLI uses.
+is *which model* that CLI uses, and the accept mode is *where the change lands*
+(a local merge, or a pull request).
 """
 from __future__ import annotations
 
@@ -13,9 +15,40 @@ from pathlib import Path
 
 from app.backends import BACKENDS, DEFAULT_BACKEND, BackendError
 
+# How accepting a card ships the change. `local` merges the card branch into
+# the base branch in the project folder (the original behaviour); `pr` pushes
+# the branch and opens a pull request whose body carries the review verdict.
+ACCEPT_MODES: tuple[dict, ...] = (
+    {
+        "key": "local",
+        "label": "Merge locally",
+        "description": ("Accept merges the card branch into the base branch in "
+                        "the project folder, then deletes the branch."),
+    },
+    {
+        "key": "pr",
+        "label": "Open a pull request",
+        "description": ("Accept pushes the card branch to origin and opens a PR "
+                        "whose body carries the review verdict; the branch and "
+                        "worktree are kept for follow-up commits."),
+    },
+)
+ACCEPT_MODE_KEYS = tuple(m["key"] for m in ACCEPT_MODES)
+DEFAULT_ACCEPT_MODE = "local"
+
+
+class SettingsError(Exception):
+    """Unknown setting value (maps to HTTP 400)."""
+
+
+def describe_accept_modes() -> list[dict]:
+    """The accept modes the board offers, for the sidebar Settings panel."""
+    return [dict(m) for m in ACCEPT_MODES]
+
 
 class SettingsStore:
-    """`{"backend": "vibe"}` on disk, with the default for anything unset."""
+    """`{"backend": "vibe", "accept_mode": "local"}` on disk, with the default
+    for anything unset."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -49,5 +82,22 @@ class SettingsStore:
         with self._lock:
             data = self._load()
             data["backend"] = key
+            self._save(data)
+        return key
+
+    def accept_mode(self, default: str = DEFAULT_ACCEPT_MODE) -> str:
+        """The stored accept mode, else `default` (the config/env value)."""
+        key = str(self._load().get("accept_mode") or "").strip().lower()
+        return key if key in ACCEPT_MODE_KEYS else default
+
+    def set_accept_mode(self, key: str) -> str:
+        key = (key or "").strip().lower()
+        if key not in ACCEPT_MODE_KEYS:
+            raise SettingsError(
+                f"unknown accept_mode {key!r} "
+                f"(expected one of {', '.join(ACCEPT_MODE_KEYS)})")
+        with self._lock:
+            data = self._load()
+            data["accept_mode"] = key
             self._save(data)
         return key

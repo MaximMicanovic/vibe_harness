@@ -36,7 +36,8 @@ Prompts, logs, and `export.json` for every round are kept under
 ## Git workflow
 
 Runs in a real work folder (a project's folder or a card's work folder override —
-not the isolated sandbox) are **git-backed**:
+not the isolated sandbox) are **git-backed**: one branch and one linked worktree
+per card, shipped on accept — merged locally, or opened as a pull request.
 
 - If the folder is not a git repository yet, it is `git init`-ed for you (with a
   minimal `.gitignore` — committed in the initial commit so test artifacts never
@@ -51,10 +52,24 @@ not the isolated sandbox) are **git-backed**:
   own branch in its own worktree.
 - Each successful implementation round is committed on the card branch (in the
   card's worktree).
-- **Accept merges** the card branch into the base branch in the project folder
-  (fast-forward, with a real merge as fallback), then removes the card's
-  linked worktree and deletes the branch, leaving the folder on the base
-  branch. `auto_accept` merges the same way.
+- **Accept ships the change**, in one of two modes (`accept_mode`, the
+  sidebar's **Accept mode** control or `VIBE_HARNESS_ACCEPT_MODE`):
+  - **`local`** (the default) **merges** the card branch into the base branch in
+    the project folder (fast-forward, with a real merge as fallback), then
+    removes the card's linked worktree and deletes the branch, leaving the
+    folder on the base branch. `auto_accept` merges the same way.
+  - **`pr`** never merges: it pushes the card branch (`git push -u origin
+    harness/<id>`) and opens a pull request (`gh pr create --head
+    harness/<id>`) whose body carries the audit trail — the card spec, the
+    review verdict (approved + reason + round + model), the test output tail
+    and the diff stat. The card records `session.pr_url`, `pr_number` and
+    `pr_opened_at`, and the branch **and its worktree are kept** because the PR
+    may need follow-up commits. The accept button reads **Open PR**, and an
+    accepted card links to its PR. A preflight runs first and fails with a 409
+    naming the missing piece — `gh` not installed, `gh auth status` not green,
+    no `origin` remote, or the card branch gone — changing nothing. The body is
+    built by `app/praccept.py::build_pr_body`, a pure function unit-tested
+    without git or network.
 - **Merge conflict → a resolver model spins up.** The conflict does not fail the
   accept: the conflicted merge is left in place in the project folder, the card
   stays in **Done** (the card shows a spinner and a "⚠ merge conflict —
@@ -83,66 +98,8 @@ not the isolated sandbox) are **git-backed**:
   waiter died with the server are cancelled (failed, adopted and
   resolver-adopted cards alike).
 - Cards show a `⎇ harness/<id> → <base>` chip while the work is unmerged, and
-  `✓ merged into <base>` after accept.
-
-Cards without a project or work folder run in the isolated sandbox
-(`sessions/<id>/workspace`) and do not use git — there is no repo to branch
-from or merge into.
-
-## Git workflow
-
-Runs in a real work folder are git-backed: one branch and one linked
-worktree per card, merged on accept.
-
-Runs in a real work folder (a project's folder or a card's work folder override —
-not the isolated sandbox) are **git-backed**:
-
-- If the folder is not a git repository yet, it is `git init`-ed for you (with a
-  minimal `.gitignore` — committed in the initial commit so test artifacts never
-  dirty the tree — an initial commit, and a repo-local identity when none is
-  configured). Repositories that already exist are never modified.
-- The card runs on its own branch, `harness/<card-id>`, created from the branch
-  that was checked out when the run started (the *base branch*). The branch is
-  checked out in a per-card **linked git worktree** at `sessions/<card-id>/worktree`
-  (`git worktree add … -B <branch> <base>`), and vibe works there — so the
-  project folder itself stays on your base branch while the card runs, and
-  **several cards in the same repository can run concurrently**, each on its
-  own branch in its own worktree.
-- Each successful implementation round is committed on the card branch (in the
-  card's worktree).
-- **Accept merges** the card branch into the base branch in the project folder
-  (fast-forward, with a real merge as fallback), then removes the card's
-  linked worktree and deletes the branch, leaving the folder on the base
-  branch. `auto_accept` merges the same way.
-- **Merge conflict → a resolver model spins up.** The conflict does not fail the
-  accept: the conflicted merge is left in place in the project folder, the card
-  stays in **Done** (the card shows a spinner and a "⚠ merge conflict —
-  resolving…" chip), and a vibe session is spawned to fix the conflict there
-  (it concludes the merge with a commit). When it succeeds, the card is
-  accepted and merged automatically. If the
-  resolver fails, the card stays done with the conflict open — clicking Accept
-  again spawns a fresh resolver (clicking it while one is already running
-  returns 409).
-- A dirty tree never blocks a run: leftover uncommitted changes (e.g. from an
-  interrupted previous run) are stashed automatically — on a first run or a
-  re-run — and kept in `git stash list` for manual recovery. The card's git
-  record flags this with `stashed: true` and, when it happened on a first run,
-  `auto_stashed: true`. (Merging on accept still requires a clean tree.)
-- Deleting a card removes its linked worktree too (its unmerged branch is
-  kept for manual recovery).
-- **Restart / crash recovery** (startup, incl. after `kill -9`): fault-tolerant
-  per card — one broken card (e.g. deleted repo) is skipped and never crashes
-  startup. Live cards whose vibe process is still alive are **re-adopted** —
-  they finalize when the process exits and Stop works by pid — only dead-pid
-  cards are marked failed. A Done card stuck in "resolving…" whose merge
-  already landed is finished automatically (merged + accepted); an open
-  conflict is left for a resolver. Orphaned worktrees of non-live cards are
-  pruned, and their `harness/<id>` branch is deleted only when already merged
-  (safe `-d` — unmerged work is never force-deleted). Pending questions whose
-  waiter died with the server are cancelled (failed, adopted and
-  resolver-adopted cards alike).
-- Cards show a `⎇ harness/<id> → <base>` chip while the work is unmerged, and
-  `✓ merged into <base>` after accept.
+  `✓ merged into <base>` after a local accept — or a `↗ PR #<n>` link after a
+  PR accept.
 
 Cards without a project or work folder run in the isolated sandbox
 (`sessions/<id>/workspace`) and do not use git — there is no repo to branch

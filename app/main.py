@@ -61,7 +61,7 @@ from app.runner import (
     TestFailedError,
     WorkdirNotAllowed,
 )
-from app.settings import SettingsStore
+from app.settings import SettingsError, SettingsStore, describe_accept_modes
 from app.stacks import StackError, StackNotFound, StackStore
 
 
@@ -127,6 +127,7 @@ class StackCardsIn(BaseModel):
 
 class SettingsIn(BaseModel):
     backend: str | None = None
+    accept_mode: str | None = None
 
 
 class ModelsIn(BaseModel):
@@ -310,6 +311,10 @@ def create_app(config: Config | None = None,
 
     @app.exception_handler(BackendError)
     async def _backend_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(SettingsError)
+    async def _settings_error(request, exc):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     # --- cards ---------------------------------------------------------------
@@ -522,18 +527,24 @@ def create_app(config: Config | None = None,
         # Restore an archived card to the board, whichever archive holds it.
         return archives.restore_card(card_id)
 
-    # --- settings (which agent CLI the harness drives) -----------------------
+    # --- settings (which agent CLI the harness drives, how accept ships) -----
     @app.get("/api/settings")
     def get_settings():
         return {"backend": settings.backend(),
-                "backends": describe_backends(config)}
+                "backends": describe_backends(config),
+                "accept_mode": settings.accept_mode(config.accept_mode),
+                "accept_modes": describe_accept_modes()}
 
     @app.put("/api/settings")
     def put_settings(payload: SettingsIn):
         if payload.backend is not None:
             settings.set_backend(payload.backend)
+        if payload.accept_mode is not None:
+            settings.set_accept_mode(payload.accept_mode)
         return {"backend": settings.backend(),
-                "backends": describe_backends(config)}
+                "backends": describe_backends(config),
+                "accept_mode": settings.accept_mode(config.accept_mode),
+                "accept_modes": describe_accept_modes()}
 
     # --- models (per-role) ---------------------------------------------------
     # Which model each kind of session runs on: the worker (run-N), the

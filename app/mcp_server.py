@@ -248,8 +248,10 @@ TOOLS: list[dict] = [
     {
         "name": "accept_card",
         "description": (
-            "Accept a done card (test gate + merge of its git branch into the "
-            "base branch when git-backed). Only possible with an approved "
+            "Accept a done card (test gate, then ship it: in accept_mode "
+            "'local' the git branch is merged into the base branch; in 'pr' "
+            "mode the branch is pushed and a pull request is opened with the "
+            "review verdict as its body). Only possible with an approved "
             "review (or an exhausted review loop). " + _COMMON),
         "inputSchema": {
             "type": "object",

@@ -56,7 +56,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app import gitops, liveusage, mailbox
+from app import gitops, liveusage, mailbox, praccept
 from app.backends import Backend, get_backend
 from app.config import BASE_DIR, SESSIONS_DIR, Config, resolve_path
 from app.gitops import GitBusyError, GitError, GitMergeConflict
@@ -736,8 +736,22 @@ class SessionRunner:
             except Exception:
                 pass  # raced with another action; a later drain or manual Run retries
 
+    def accept_mode(self) -> str:
+        """How accepting a card ships the change: `local` (merge) or `pr`.
+
+        The sidebar choice (settings.json) wins over the config default
+        (VIBE_HARNESS_ACCEPT_MODE), so the board can switch without a restart.
+        """
+        if self.settings is not None:
+            return self.settings.accept_mode(self.config.accept_mode)
+        return self.config.accept_mode
+
     def accept_card(self, card_id: str) -> dict:
-        """Accept a done card: gate first, then merge its git branch (if any).
+        """Accept a done card: gate first, then ship it.
+
+        In `pr` mode the branch is pushed and a pull request is opened instead
+        of merging locally (see `_accept_with_pr`). In `local` mode the card
+        branch is merged into its base branch (if any).
 
         A merge conflict does NOT fail the accept: the conflicted merge is left
         in place, the card stays 'done' (Done column) flagged `resolving`, and
@@ -747,6 +761,8 @@ class SessionRunner:
         """
         card = self.store.check_accept(card_id)
         git_info = (card.get("session") or {}).get("git")
+        if self.accept_mode() == "pr":
+            return self._accept_with_pr(card, git_info)
         if git_info and gitops.merge_in_progress(Path(git_info["repo"])):
             # A conflicted merge is waiting for a resolver (retry accept).
             if self.is_running(card_id):
@@ -787,6 +803,55 @@ class SessionRunner:
                 **git_info, "merged": True, "resolving": False,
                 "merge_conflict": False, "merge_error": None}})
             accepted = self.store.accept(card_id)
+        # Accepted counts as completed: start drafts waiting on this card.
+        try:
+            self._drain_dependents()
+        except Exception:
+            pass
+        return accepted
+
+    def _accept_with_pr(self, card: dict, git_info: dict | None) -> dict:
+        """Accept in `pr` mode: push the card branch and open a pull request.
+
+        Preflight first (gh installed, `gh auth status` green, an `origin`
+        remote, the branch still there) so a missing piece fails with a 409
+        naming it and changes nothing. Then the same ship-only-green gate as a
+        local accept, then `git push -u origin <branch>` and `gh pr create`
+        with the audit trail as the body (spec, verdict, test output tail, diff
+        stat). The card is accepted with `session.pr_url` / `pr_number` /
+        `pr_opened_at` recorded; the branch AND its worktree are kept, because
+        the PR may need follow-up commits. Nothing is merged locally.
+        """
+        card_id = card["id"]
+        if not git_info:
+            raise GitError(
+                "PR accept needs a git-backed run: this card has no branch to "
+                "push (run it in a project folder, or switch accept_mode to local)")
+        praccept.preflight(git_info)
+        gate_output = self._green_gate(card)
+        card = self.store.get(card_id)
+        session = card.get("session") or {}
+        body = praccept.build_pr_body(
+            card=card,
+            review=session.get("review"),
+            # The accept-time run is the freshest evidence; a card accepted
+            # without a test command falls back to the recorded output.
+            test_output=gate_output or session.get("test_output"),
+            diff_stat=praccept.diff_stat(git_info),
+            branch=git_info.get("branch"),
+            base_branch=git_info.get("base_branch"),
+        )
+        praccept.push_branch(git_info)
+        url = praccept.open_pr(git_info, title=card.get("title") or card_id,
+                               body=body)
+        self.store.patch_session(card_id, {
+            "pr_url": url,
+            "pr_number": praccept.parse_pr_number(url),
+            "pr_opened_at": now_iso(),
+            "git": {**git_info, "merged": False, "resolving": False,
+                    "merge_conflict": False, "merge_error": None},
+        })
+        accepted = self.store.accept(card_id)
         # Accepted counts as completed: start drafts waiting on this card.
         try:
             self._drain_dependents()
@@ -1298,13 +1363,15 @@ class SessionRunner:
         output = (proc.stdout or "") + (proc.stderr or "")
         return proc.returncode == 0, output
 
-    def _green_gate(self, card: dict) -> None:
+    def _green_gate(self, card: dict) -> str | None:
         """Ship-only-green gate at accept: the test command must pass in the
         workspace right before the card is accepted/merged. Raises
-        TestFailedError (-> 409) on failure; records verified=True on pass.
+        TestFailedError (-> 409) on failure; records verified=True on pass and
+        returns the passing output (the PR body quotes it), or None when no
+        test command is configured.
         """
         if not self.config.test_cmd:
-            return
+            return None
         session = card.get("session") or {}
         ws = Path(session.get("workdir")
                   or (self.sessions_dir / card["id"] / "workspace"))
@@ -1322,6 +1389,7 @@ class SessionRunner:
             tail = (tested[1] if tested else "")[-2000:]
             raise TestFailedError(f"tests failed at accept:\n{tail}")
         self.store.patch_session(card["id"], {"verified": True})
+        return tested[1]
 
     def _loop_reject(self, card_id: str, card: dict, reason: str, *,
                      source: str, review_record: dict | None = None,

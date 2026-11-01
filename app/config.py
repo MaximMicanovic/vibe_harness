@@ -43,6 +43,7 @@ class Config:
     review_agent: str = "ask"               # read-only builtin agent for the review pass
     max_review_rounds: int = 5              # cap on review/fix loop rounds per card
     git_branch_prefix: str = "harness"      # per-card git branch prefix (<prefix>/<card_id>)
+    accept_mode: str = "local"              # "local" -> merge on accept | "pr" -> push + open a PR
     vibe_bin: str = "vibe"
     claude_bin: str = "claude"            # Claude Code CLI (backend "claude")
     allowed_workdirs: list[str] = field(default_factory=list)  # absolute prefixes; empty = allow all
@@ -82,6 +83,16 @@ def _env_bool(env: dict[str, str], name: str, default: bool) -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
+def _accept_mode(raw: str | None) -> str:
+    """`pr` opts into pull-request accept; anything else is the local default.
+
+    Lenient on purpose: a typo in the env var must not stop the server from
+    starting — it just keeps the current (local) behaviour. The sidebar setting
+    is strict instead (PUT /api/settings answers 400 on an unknown value).
+    """
+    return "pr" if (raw or "").strip().lower() == "pr" else "local"
+
+
 def load_config(env: dict[str, str] | None = None) -> Config:
     env = os.environ if env is None else env
 
@@ -109,6 +120,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         review_agent=env.get("VIBE_HARNESS_REVIEW_AGENT", "ask"),
         max_review_rounds=int(env.get("VIBE_HARNESS_MAX_REVIEW_ROUNDS", "5")),
         git_branch_prefix=env.get("VIBE_HARNESS_GIT_BRANCH_PREFIX", "harness"),
+        accept_mode=_accept_mode(env.get("VIBE_HARNESS_ACCEPT_MODE")),
         vibe_bin=env.get("VIBE_HARNESS_VIBE_BIN", "vibe"),
         claude_bin=env.get("VIBE_HARNESS_CLAUDE_BIN", "claude"),
         allowed_workdirs=allowed_workdirs,

@@ -67,6 +67,12 @@ class GitMergeConflict(GitError):
     resolution."""
 
 
+class GitPreflightError(GitError):
+    """PR accept cannot start: a required piece is missing (`gh` not installed,
+    `gh auth status` not green, no `origin` remote, card branch gone). The
+    message names the missing piece; nothing was changed."""
+
+
 def git_available() -> bool:
     return shutil.which("git") is not None
 
