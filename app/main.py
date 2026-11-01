@@ -405,6 +405,18 @@ def create_app(config: Config | None = None,
         # runner. GitError -> 409 (dirty tree, resolver already running, ...).
         return runner.accept_card(card_id)
 
+    @app.post("/api/cards/{card_id}/revert")
+    def revert_card(card_id: str):
+        # Undo an accepted card: revert its merge commit and reopen it as a
+        # draft. An archived card comes back to the board first (the existing
+        # restore path), so the revert lands on a card the board can show.
+        # Missing merge commit / dirty tree / conflict -> 409.
+        try:
+            store.get(card_id)
+        except CardNotFound:
+            archives.restore_card(card_id)      # CardNotArchived -> 404
+        return runner.revert_card(card_id)
+
     @app.get("/api/cards/{card_id}/log")
     def get_log(card_id: str, tail: int = Query(200, ge=1, le=5000)):
         return {"lines": runner.log_tail(card_id, n=tail)}

@@ -89,6 +89,7 @@
         <h2 id="editor-heading">New card</h2>
         <button class="icon-btn" id="editor-close" title="Close (Esc)">×</button>
       </div>
+      <p class="revert-note" id="revert-note" hidden></p>
       <label class="field" id="template-field">
         <span class="field-label">Template</span>
         <select id="template-select"></select>
@@ -130,6 +131,7 @@
         <button class="btn" id="btn-run">▶ Run with Vibe</button>
         <button class="btn btn-danger" id="btn-stop" hidden>■ Stop</button>
         <button class="btn btn-ok" id="btn-accept" hidden>✓ Accept</button>
+        <button class="btn" id="btn-revert" hidden title="Undo this accepted card: revert its merge commit and reopen it as a draft">↩ Revert</button>
         <button class="btn" id="btn-archive" hidden title="Move this accepted card into an archive">📦 Archive</button>
         <button class="btn" id="btn-log" hidden>View log</button>
         <button class="btn" id="btn-diff" hidden title="What this card actually changed (shortcut: hover the card and press D)">Diff</button>

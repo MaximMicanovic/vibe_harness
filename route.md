@@ -62,6 +62,10 @@ you write a card (spec)
   → inspect    GET /api/cards/<id>/diff?range=card|round|worktree    ← free
                (the board's Diff panel: D over a card, or the Diff
                 button) — no LLM tokens, it only reads git
+  → revert     POST /api/cards/<id>/revert (or the MCP revert_card)  ← free
+               `git revert` the card's merge commit in the project
+               folder, then accepted -> draft with the session kept;
+               a conflict aborts (409 + paths), no resolver is spawned
 ```
 
 Tokens are spent almost entirely in **run** sessions; **review** sessions are
@@ -294,7 +298,8 @@ touched. The server (`app/mcp_server.py`, stdlib-only stdio JSON-RPC) forwards
 to the dashboard HTTP API — the dashboard stays the single writer of cards
 and sessions. Tools are published as `harness_<tool>` in the `mcp_harness`
 group: `current_card`, `list_cards`, `get_card`, `create_card`, `update_card`,
-`delete_card`, `run_card`, `stop_card`, `accept_card`, `card_log`,
+`delete_card`, `run_card`, `stop_card`, `accept_card`, `revert_card`,
+`card_log`,
 `list_templates`, `stats`, a **read-only** `list_projects`, `ask_user`, the
 dependency-link tools `add_dependency` / `remove_dependency` /
 `list_dependencies` (chain cards so one runs automatically once another is

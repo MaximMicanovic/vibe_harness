@@ -25,7 +25,9 @@ TRANSITIONS = {
     "done": {"accepted"},
     "failed": set(),
     "stopped": set(),
-    "accepted": set(),
+    # accepted -> draft: reverting an accepted card reopens it (the merge
+    # commit is undone and the card goes back to the board as a draft).
+    "accepted": {"draft"},
 }
 
 # Editing a card in one of these statuses resets it to draft (a re-run starts
@@ -51,6 +53,9 @@ SESSION_KEYS = (
     "model", "tokens", "stop_reason", "workdir", "log", "export_dir",
     "review", "reviews", "review_rounds", "git", "resolver", "test_output",
     "mailbox", "worker_session_id", "last_reviewed_commit",
+    # Revert bookkeeping: when an accepted card's merge commit was undone and
+    # which commit undid it (the card is a draft again, the session is kept).
+    "reverted_at", "revert_commit",
 )
 
 
@@ -331,6 +336,8 @@ class CardStore:
 
         md = dict(post.metadata)
         md["status"] = status
+        # The flag follows the status: only an accepted card is `accepted`.
+        md["accepted"] = status == "accepted"
         session = dict(card["session"]) if card["session"] else dict.fromkeys(SESSION_KEYS)
         if session_patch:
             session.update(session_patch)
@@ -405,6 +412,14 @@ class CardStore:
         md["updated_at"] = _now()
         self._write(self._find_path(card_id), card["body"], md)
         return self.get(card_id)
+
+    def reopen_after_revert(self, card_id: str,
+                            session_patch: dict | None = None) -> dict:
+        """accepted -> draft after a revert: the card is back on the board as a
+        draft and `accepted` is cleared, but the SESSION IS KEPT (tokens, logs,
+        reviews, git) so the cost record of the accepted run survives. The
+        revert bookkeeping (`reverted_at`, `revert_commit`) is merged in."""
+        return self.set_status(card_id, "draft", session_patch=session_patch)
 
     # ------------------------------------------------------------------
     # dependencies ("runs after" links between cards)

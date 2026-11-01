@@ -150,6 +150,37 @@ Cards without a project or work folder run in the isolated sandbox
 (`sessions/<id>/workspace`) and do not use git — there is no repo to branch
 from or merge into.
 
+## Undoing an accepted card (revert)
+
+Accept merges; a revert un-merges. `POST /api/cards/<id>/revert` (and the
+`revert_card` MCP tool) undoes an accepted card and puts it back on the board
+as a **draft**, so the loop closes without a hand-run `git revert`:
+
+- **It reverts the card's merge commit** in the project folder (the repo root,
+  where the base branch is checked out): `git revert --no-edit -m 1 <sha>` for
+  the `--no-ff` merge commit an accept records, `git revert --no-edit <sha>`
+  for a plain commit. The new commit is recorded on the session as
+  `revert_commit`, with `reverted_at` (ISO) next to it.
+- **It needs a recorded merge commit.** A card accepted before merge commits
+  were recorded has none, so the revert refuses with a clear 409 instead of
+  guessing which commit to undo.
+- **It refuses a dirty tree**, and refuses while a merge or a revert is already
+  in progress in that repo (409) — those belong to a resolver or to you.
+- **A conflict aborts.** Unlike an accept-time merge conflict (left in place
+  for a resolver session), a conflicting revert runs `git revert --abort` and
+  returns 409 with the conflicting paths: the repository is left exactly as it
+  was, and no resolver is spawned.
+- **The card is reopened, not reset.** `accepted -> draft` is a real
+  transition; `accepted` is cleared but the **session history is kept**
+  (tokens, logs, reviews, git record), so the cost record of the accepted run
+  survives. The card shows a `↩ reverted` chip and the editor a note naming the
+  revert commit.
+- **An archived card comes back first.** If the card sits in an archive, the
+  revert restores it to the board (the existing restore path) and then reverts
+  it, so the reopened draft is visible.
+- The card's own branch and linked worktree are left alone (they are what the
+  diff view reads); a re-run resets the branch from the base as usual.
+
 ## Seeing what a card changed (the diff view)
 
 A reviewer session approves a change you never look at; the diff view is how you

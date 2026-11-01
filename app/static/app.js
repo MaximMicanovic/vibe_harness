@@ -95,11 +95,13 @@ const btnSave = $('btn-save');
 const btnRun = $('btn-run');
 const btnStop = $('btn-stop');
 const btnAccept = $('btn-accept');
+const btnRevert = $('btn-revert');
 const btnArchive = $('btn-archive');
 const btnLog = $('btn-log');
 const btnDiff = $('btn-diff');
 const btnDelete = $('btn-delete');
 const acceptHint = $('accept-hint');
+const revertNote = $('revert-note');
 
 /* The auto-accept checkbox remembers the last setting used (per browser). */
 const AUTO_ACCEPT_KEY = 'vibe-harness:auto-accept';
@@ -615,6 +617,15 @@ function buildCard(cardData) {
           chips.appendChild(mc);
         }
       }
+    }
+    if (s.reverted_at) {
+      // The accept was undone: the card is a draft again, and the note says
+      // when and which commit undid the merge.
+      const rc = chip('reverted', '↩ reverted');
+      rc.title = 'Reverted on ' + new Date(s.reverted_at).toLocaleString()
+        + (s.revert_commit ? ' — revert commit ' + s.revert_commit.slice(0, 7) : '')
+        + '. The card is a draft again; its session history is kept.';
+      chips.appendChild(rc);
     }
     if (s.model) chips.appendChild(chip('model', s.model));
     if (cardData.auto_accept) chips.appendChild(chip('auto-accept', 'auto-accept on'));
@@ -2602,6 +2613,14 @@ templateSelect.addEventListener('change', () => {
 
 /* ---------------- Editor modal ---------------- */
 
+/* The merge commit an accepted card's accept recorded — the one commit a
+ * revert undoes. Cards accepted before merge commits were recorded have none
+ * (the API refuses to revert them with a 409). */
+function cardMergeCommit(card) {
+  const s = (card && card.session) || {};
+  return (s.git && s.git.merge_commit) || s.merge_commit || '';
+}
+
 /* The card's "runs after" links, each with a remove (×) button. A card with a
  * live session cannot change its dependencies (the API returns 409), so the
  * buttons are hidden while it runs. */
@@ -2670,6 +2689,21 @@ async function openEditor(cardId) {
     const exhausted = review.exhausted === true;
     btnAccept.hidden = !(card.status === 'done' && (reviewed || exhausted));
     acceptHint.hidden = !(card.status === 'done' && !reviewed && !exhausted);
+    // Revert undoes the accept: offered on accepted cards, and the confirm
+    // dialog names the merge commit it will revert.
+    const mergeCommit = cardMergeCommit(card);
+    btnRevert.hidden = card.status !== 'accepted';
+    btnRevert.title = mergeCommit
+      ? 'Undo this card: revert merge commit ' + mergeCommit.slice(0, 7) + ' and reopen it as a draft'
+      : 'Undo this card: revert its merge commit and reopen it as a draft';
+    // A reverted card says so — the session keeps the revert bookkeeping.
+    const revertedAt = card.session && card.session.reverted_at;
+    revertNote.hidden = !revertedAt;
+    revertNote.textContent = revertedAt
+      ? '↩ Reverted on ' + new Date(revertedAt).toLocaleString()
+        + (card.session.revert_commit ? ' (revert commit ' + card.session.revert_commit.slice(0, 7) + ')' : '')
+        + ' — the card is a draft again and its session history is kept.'
+      : '';
     // Only accepted cards can be archived.
     btnArchive.hidden = card.status !== 'accepted';
     btnLog.hidden = !card.session;
@@ -2698,6 +2732,8 @@ async function openEditor(cardId) {
     btnStop.hidden = true;
     btnAccept.hidden = true;
     acceptHint.hidden = true;
+    btnRevert.hidden = true;
+    revertNote.hidden = true;
     btnArchive.hidden = true;
     btnLog.hidden = true;
     btnDiff.hidden = true;
@@ -2768,6 +2804,21 @@ btnStop.addEventListener('click', () => action(async () => {
 
 btnAccept.addEventListener('click', () => action(async () => {
   await api('/api/cards/' + encodeURIComponent(state.editorCardId) + '/accept', { method: 'POST' });
+  closeEditor();
+}));
+
+// Revert an accepted card: undo its merge commit and reopen it as a draft.
+// This rewrites the project's base branch, so it sits behind a confirm dialog
+// that names the commit being reverted.
+btnRevert.addEventListener('click', () => action(async () => {
+  const id = state.editorCardId;
+  if (!id) return;
+  const card = await api('/api/cards/' + encodeURIComponent(id));
+  const mergeCommit = cardMergeCommit(card);
+  const what = mergeCommit ? 'merge commit ' + mergeCommit.slice(0, 7) : 'its merge commit';
+  if (!window.confirm('Revert this card? This runs `git revert` on ' + what
+      + ' in the project folder and reopens the card as a draft.')) return;
+  await api('/api/cards/' + encodeURIComponent(id) + '/revert', { method: 'POST' });
   closeEditor();
 }));
 

@@ -498,3 +498,52 @@ def test_dependencies_view(store: CardStore):
     assert store.dependencies(a["id"])["unmet"] == []
     with pytest.raises(CardNotFound):
         store.dependencies("ffffff")
+
+
+# ----------------------------------------------------------------------
+# revert: accepted -> draft
+# ----------------------------------------------------------------------
+
+def test_accepted_to_draft_transition_is_allowed(store: CardStore):
+    """`accepted` is no longer a dead end: a revert reopens the card."""
+    from app.cards import TRANSITIONS
+    assert "draft" in TRANSITIONS["accepted"]
+
+    card = store.create("T", "b")
+    store.set_status(card["id"], "running")
+    store.set_status(card["id"], "done", session_patch={"review": {"approved": True}})
+    store.accept(card["id"])
+    reopened = store.set_status(card["id"], "draft")
+    assert reopened["status"] == "draft"
+    # The accepted flag follows the status: a draft card is not accepted.
+    assert reopened["accepted"] is False
+
+
+def test_reopen_after_revert_keeps_session_history(store: CardStore):
+    """Reopening after a revert keeps the session (tokens, logs, reviews, git)
+    so the cost record of the accepted run survives, and records the revert."""
+    card = store.create("T", "b")
+    store.set_status(card["id"], "running",
+                     session_patch={"pid": 4242, "tokens": 1234,
+                                    "log": "sessions/x/run-1/session.log"})
+    store.set_status(card["id"], "done",
+                     session_patch={"review": {"approved": True, "round": 1}})
+    store.accept(card["id"])
+    store.patch_session(card["id"], {"git": {"merge_commit": "a" * 40}})
+
+    reopened = store.reopen_after_revert(
+        card["id"], {"reverted_at": "2026-01-01T00:00:00+00:00",
+                     "revert_commit": "b" * 40})
+    assert reopened["status"] == "draft"
+    assert reopened["accepted"] is False
+    session = reopened["session"]
+    assert session["tokens"] == 1234
+    assert session["log"] == "sessions/x/run-1/session.log"
+    assert session["review"] == {"approved": True, "round": 1}
+    assert session["git"]["merge_commit"] == "a" * 40
+    assert session["revert_commit"] == "b" * 40
+    assert session["reverted_at"] == "2026-01-01T00:00:00+00:00"
+
+    # Only an accepted card can be reopened.
+    with pytest.raises(InvalidTransition):
+        store.reopen_after_revert(card["id"], {})

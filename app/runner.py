@@ -67,6 +67,7 @@ from app.cards import (
     CardNotFound,
     CardRunning,
     CardStore,
+    InvalidTransition,
 )
 from app.projects import ProjectStore
 from app.models import ModelSettings
@@ -886,6 +887,50 @@ class SessionRunner:
         except Exception:
             pass
         return accepted
+
+    def revert_card(self, card_id: str) -> dict:
+        """Undo an accepted card: revert its merge commit and reopen it.
+
+        The card must be accepted and must carry the merge commit its accept
+        recorded (``session.git.merge_commit``, or ``session.merge_commit``
+        for cards that record it there). A card accepted before merge commits
+        were recorded has nothing to revert -> GitError (409).
+
+        The revert is all-or-nothing: a conflict aborts it and raises
+        ``RevertConflict`` (409, with the conflicting paths) — no conflicted
+        revert is left in place and no resolver session is spawned. On
+        success the card goes back to draft with its session history intact
+        (tokens, logs, reviews) and ``reverted_at`` / ``revert_commit``
+        recorded.
+        """
+        card = self.store.get(card_id)                  # CardNotFound -> 404
+        if card["status"] != "accepted":
+            raise InvalidTransition(
+                f"cannot revert card in status {card['status']!r}; only an "
+                "accepted card can be reverted")
+        session = card.get("session") or {}
+        git_info = session.get("git") or {}
+        merge_commit = session.get("merge_commit") or git_info.get("merge_commit")
+        if not merge_commit:
+            raise GitError(
+                f"card {card_id!r} has no recorded merge commit — it was "
+                "accepted before merge commits were recorded, so there is "
+                "nothing to revert automatically (undo the change by hand)")
+        root = git_info.get("repo")
+        if not root:
+            raise GitError(
+                f"card {card_id!r} has no repository on record — its merge "
+                "commit cannot be reverted")
+        result = gitops.revert_merge_commit(Path(root), merge_commit)
+        reopened = self.store.reopen_after_revert(card_id, {
+            "reverted_at": result["reverted_at"],
+            "revert_commit": result["revert_commit"],
+            # The merge is undone: the card is no longer merged into its base.
+            "git": {**git_info, "merged": False, "reverted": True,
+                    "revert_commit": result["revert_commit"],
+                    "reverted_at": result["reverted_at"]},
+        })
+        return self.annotate_card(reopened)
 
     def _start_resolver(self, card: dict, git_info: dict, reason: str) -> None:
         """Flag the card as resolving and spawn the conflict-resolver session."""

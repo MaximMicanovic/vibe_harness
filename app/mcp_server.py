@@ -13,7 +13,7 @@ running dashboard's HTTP API (``VIBE_HARNESS_URL``, default
 and sessions.
 
 Tool surface mirrors what the user can do on the dashboard — list/get/create/
-update/delete cards, run/stop/accept, dependency links (add/remove/list),
+update/delete cards, run/stop/accept/revert, dependency links (add/remove/list),
 logs, templates, stats, read-only project list, and archives
 (create/list/get archives, move cards into/out of them) — with one deliberate
 exception: there is NO tool to create, delete, or switch projects (archiving
@@ -251,6 +251,22 @@ TOOLS: list[dict] = [
             "Accept a done card (test gate + merge of its git branch into the "
             "base branch when git-backed). Only possible with an approved "
             "review (or an exhausted review loop). " + _COMMON),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"card_id": {"type": "string"}},
+            "required": ["card_id"],
+        },
+    },
+    {
+        "name": "revert_card",
+        "description": (
+            "Undo an accepted card: `git revert` the merge commit its accept "
+            "recorded, then reopen the card as a draft (its session history — "
+            "tokens, logs, reviews — is kept). Needs the card's recorded merge "
+            "commit: a card accepted before merge commits were recorded "
+            "returns 409. A conflicting revert is aborted and returns 409 "
+            "with the conflicting paths; the repository is left untouched. "
+            + _COMMON),
         "inputSchema": {
             "type": "object",
             "properties": {"card_id": {"type": "string"}},
@@ -694,6 +710,10 @@ def tool_accept_card(args: dict) -> object:
     return _api().post(f"/api/cards/{args['card_id']}/accept")
 
 
+def tool_revert_card(args: dict) -> object:
+    return _api().post(f"/api/cards/{args['card_id']}/revert")
+
+
 def tool_card_log(args: dict) -> object:
     tail = args.get("tail", 200)
     return _api().get(f"/api/cards/{args['card_id']}/log?tail={int(tail)}")
@@ -917,6 +937,7 @@ TOOL_FUNCS = {
     "run_card": tool_run_card,
     "stop_card": tool_stop_card,
     "accept_card": tool_accept_card,
+    "revert_card": tool_revert_card,
     "card_log": tool_card_log,
     "list_templates": tool_list_templates,
     "list_models": tool_list_models,
