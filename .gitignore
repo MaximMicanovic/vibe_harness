@@ -20,3 +20,4 @@ projects.json
 # Working notes: the harness agents' decision log, which quotes the specs and
 # prompts this board was driven with. Local only — never published.
 NOTES.md
+settings.json

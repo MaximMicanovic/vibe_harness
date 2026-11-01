@@ -27,6 +27,7 @@ from app.config import (
     ARCHIVES_DIR,
     BASE_DIR,
     MODELS_FILE,
+    SETTINGS_FILE,
     CARDS_DIR,
     PROJECTS_FILE,
     STATIC_DIR,
@@ -43,6 +44,7 @@ from app.cards import (
     CardRunning,
     CardStore,
 )
+from app.backends import BackendError, describe_backends
 from app.models import ModelError, ModelSettings, describe as describe_models
 from app.projects import ProjectError, ProjectExists, ProjectNotFound, ProjectStore
 from app.questions import (
@@ -59,6 +61,7 @@ from app.runner import (
     TestFailedError,
     WorkdirNotAllowed,
 )
+from app.settings import SettingsStore
 from app.stacks import StackError, StackNotFound, StackStore
 
 
@@ -122,6 +125,10 @@ class StackCardsIn(BaseModel):
     card_ids: list[str] = Field(min_length=1)
 
 
+class SettingsIn(BaseModel):
+    backend: str | None = None
+
+
 class ModelsIn(BaseModel):
     """Per-role model choice: {role: alias}. An empty alias clears the role."""
     models: dict[str, str] = Field(default_factory=dict)
@@ -153,13 +160,18 @@ def create_app(config: Config | None = None,
                questions: QuestionStore | None = None,
                archives: ArchiveStore | None = None,
                stacks: StackStore | None = None,
-               models: ModelSettings | None = None) -> FastAPI:
+               models: ModelSettings | None = None,
+               settings: SettingsStore | None = None) -> FastAPI:
     """Application factory. Tests pass temp-dir store/runner/projects + a fake vibe bin."""
     config = config or load_config()
     store = store or CardStore(CARDS_DIR)
     projects = projects or ProjectStore(PROJECTS_FILE)
     models = models or ModelSettings(MODELS_FILE)
-    runner = runner or SessionRunner(store, config, projects=projects, models=models)
+    settings = settings or SettingsStore(SETTINGS_FILE)
+    runner = runner or SessionRunner(store, config, projects=projects,
+                                     models=models, settings=settings)
+    if runner.settings is None:
+        runner.settings = settings
     # The stack store prunes against the card store, so it has to live beside
     # it: falling back to the project's STACKS_FILE would let an app built
     # with a temp card store (every test app) prune the real board against
@@ -294,6 +306,10 @@ def create_app(config: Config | None = None,
 
     @app.exception_handler(ModelError)
     async def _model_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(BackendError)
+    async def _backend_error(request, exc):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     # --- cards ---------------------------------------------------------------
@@ -505,6 +521,19 @@ def create_app(config: Config | None = None,
     def restore_card(card_id: str):
         # Restore an archived card to the board, whichever archive holds it.
         return archives.restore_card(card_id)
+
+    # --- settings (which agent CLI the harness drives) -----------------------
+    @app.get("/api/settings")
+    def get_settings():
+        return {"backend": settings.backend(),
+                "backends": describe_backends(config)}
+
+    @app.put("/api/settings")
+    def put_settings(payload: SettingsIn):
+        if payload.backend is not None:
+            settings.set_backend(payload.backend)
+        return {"backend": settings.backend(),
+                "backends": describe_backends(config)}
 
     # --- models (per-role) ---------------------------------------------------
     # Which model each kind of session runs on: the worker (run-N), the

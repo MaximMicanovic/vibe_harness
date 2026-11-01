@@ -38,6 +38,7 @@ const state = {
   sidebarArchiveProjects: new Set(),  // '<archiveId>::<project>' keys the user folded away
   archiveProjects: new Map(),  // archive id -> its project groups (GET /api/archives/<id>), cached for the sidebar
   models: null,          // GET /api/models: { roles, models, default_model }
+  settings: null,        // GET /api/settings: { backend, backends }
 };
 
 /* ---------------- DOM refs ---------------- */
@@ -1824,9 +1825,38 @@ async function loadModels() {
 }
 
 async function renderModelsPanel() {
-  const data = await api('/api/models');
+  const [data, settings] = await Promise.all([api('/api/models'), api('/api/settings')]);
   state.models = data;
+  state.settings = settings;
   sidebarBody.textContent = '';
+
+  // Which agent CLI the harness drives. This sits above the per-role models
+  // because it decides what those models even mean.
+  const backendRow = el('div', 'model-role backend-role');
+  const backendLabel = el('label', '', 'Backend');
+  backendLabel.htmlFor = 'backend-select';
+  backendRow.appendChild(backendLabel);
+  const backendSelect = el('select');
+  backendSelect.id = 'backend-select';
+  for (const b of settings.backends) {
+    const opt = el('option', '', b.label + (b.available ? '' : ' — not installed'));
+    opt.value = b.key;
+    opt.disabled = !b.available;
+    backendSelect.appendChild(opt);
+  }
+  backendSelect.value = settings.backend;
+  backendSelect.title = 'Which agent CLI the harness spawns for every session';
+  backendSelect.addEventListener('change', () => {
+    saveBackend(backendSelect.value).catch(showError);
+  });
+  backendRow.appendChild(backendSelect);
+  const chosen = settings.backends.find((b) => b.key === settings.backend);
+  backendRow.appendChild(el('p', 'model-hint',
+    chosen && chosen.available
+      ? 'Sessions run on ' + chosen.label + ' (' + chosen.binary + ').'
+      : 'This backend is not installed — runs will fail until ' + (chosen ? chosen.binary : 'it') + ' is on PATH.'));
+  sidebarBody.appendChild(backendRow);
+
   for (const role of data.roles) {
     const row = el('div', 'model-role' + (role.available ? '' : ' model-role--off'));
     const id = 'model-' + role.key;
@@ -1858,6 +1888,13 @@ async function renderModelsPanel() {
     'A role left on “inherit” runs on your own active_model from ~/.vibe/config.toml. '
     + 'A chosen model is pinned for that session only (VIBE_ACTIVE_MODEL), so the global '
     + 'config is never rewritten and two sessions cannot race each other.'));
+}
+
+async function saveBackend(key) {
+  state.settings = await api('/api/settings', {
+    method: 'PUT', body: JSON.stringify({ backend: key }),
+  });
+  await renderModelsPanel();
 }
 
 async function saveRoleModel(role, model) {

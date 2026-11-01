@@ -20,6 +20,7 @@ All optional, via environment variables:
 | `VIBE_HARNESS_MAX_REVIEW_ROUNDS` | `5` | Review/fix loop cap per card; when hit, the card is done-but-unapproved and must be accepted manually |
 | `VIBE_HARNESS_GIT_BRANCH_PREFIX` | `harness` | Per-card git branch prefix (`<prefix>/<card-id>`) for git-backed runs |
 | `VIBE_HARNESS_VIBE_BIN` | `vibe` | Path/name of the Vibe CLI |
+| `VIBE_HARNESS_CLAUDE_BIN` | `claude` | Path/name of the Claude Code CLI (backend `claude`) |
 | `VIBE_HARNESS_ALLOWED_WORKDIRS` | unset (allow all) | Comma-separated absolute path prefixes; a card's work folder must be inside one of them, else runs return 403 |
 | `VIBE_HARNESS_MCP_ENABLED` | `1` | Inject the harness MCP server into spawned run sessions (models then get the `mcp_harness` tool group); `0` disables |
 | `VIBE_HARNESS_MCP_SERVER_NAME` | `harness` | MCP server alias — tools are published as `<name>_<tool>` (e.g. `harness_create_card`) |

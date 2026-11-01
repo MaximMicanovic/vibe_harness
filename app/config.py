@@ -17,6 +17,7 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PROJECTS_FILE = BASE_DIR / "projects.json"
 MODELS_FILE = BASE_DIR / "models.json"
+SETTINGS_FILE = BASE_DIR / "settings.json"
 
 
 def resolve_path(raw: str) -> Path:
@@ -43,6 +44,7 @@ class Config:
     max_review_rounds: int = 5              # cap on review/fix loop rounds per card
     git_branch_prefix: str = "harness"      # per-card git branch prefix (<prefix>/<card_id>)
     vibe_bin: str = "vibe"
+    claude_bin: str = "claude"            # Claude Code CLI (backend "claude")
     allowed_workdirs: list[str] = field(default_factory=list)  # absolute prefixes; empty = allow all
     mcp_server_name: str = "harness"         # MCP server alias injected into spawned vibe sessions
     mcp_enabled: bool = True                 # inject the harness MCP server (VIBE_MCP_SERVERS) into run sessions
@@ -108,6 +110,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         max_review_rounds=int(env.get("VIBE_HARNESS_MAX_REVIEW_ROUNDS", "5")),
         git_branch_prefix=env.get("VIBE_HARNESS_GIT_BRANCH_PREFIX", "harness"),
         vibe_bin=env.get("VIBE_HARNESS_VIBE_BIN", "vibe"),
+        claude_bin=env.get("VIBE_HARNESS_CLAUDE_BIN", "claude"),
         allowed_workdirs=allowed_workdirs,
         mcp_server_name=env.get("VIBE_HARNESS_MCP_SERVER_NAME", "harness"),
         mcp_enabled=_env_bool(env, "VIBE_HARNESS_MCP_ENABLED", True),

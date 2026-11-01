@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app import gitops, liveusage, mailbox
+from app.backends import Backend, get_backend
 from app.config import BASE_DIR, SESSIONS_DIR, Config, resolve_path
 from app.gitops import GitBusyError, GitError, GitMergeConflict
 from app.cards import (
@@ -430,7 +431,8 @@ class SessionRunner:
     def __init__(self, store: CardStore, config: Config, sessions_dir: Path = SESSIONS_DIR,
                  projects: ProjectStore | None = None,
                  questions: QuestionStore | None = None,
-                 models: ModelSettings | None = None):
+                 models: ModelSettings | None = None,
+                 settings: "SettingsStore | None" = None):
         self.store = store
         self.config = config
         self.sessions_dir = Path(sessions_dir)
@@ -438,6 +440,8 @@ class SessionRunner:
         # Per-role model choice (worker / review / resolver). None = every
         # session runs on the user's own active_model.
         self.models = models
+        # Which agent CLI to drive (vibe / claude). None = the default backend.
+        self.settings = settings
         # Per-card Q&A (model asks the user on the card via the MCP ask_user
         # tool); shared with the app's HTTP endpoints when the app built us.
         self.questions = questions or QuestionStore(self.sessions_dir)
@@ -828,14 +832,24 @@ class SessionRunner:
             encoding="utf-8")
 
         ws, _is_sandbox, trust_flags = self._resolve_ws(card)
+        backend = self.backend()
         log_path = rdir / "session.log"
         log_file = open(log_path, "ab")
         try:
-            cmd = self._build_cmd(prompt_path, ws, rdir, kind="run") + trust_flags
+            cmd = self._build_cmd(prompt_path, ws, rdir, kind="run",
+                                  backend=backend) + trust_flags
             # The resolver is its own role: it can run on its own model.
             env = {**os.environ, **self._model_env("resolve")}
-            proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
-                                    cwd=ws, start_new_session=True, env=env)
+            stdin_file = open(prompt_path, "rb") if backend.prompt_on_stdin else None
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdin=stdin_file, stdout=log_file,
+                    stderr=subprocess.STDOUT, cwd=ws, start_new_session=True, env=env)
+            finally:
+                if stdin_file is not None:
+                    stdin_file.close()
+            if not backend.native_time_limit:
+                self._watch_time_limit(card_id, proc)
         finally:
             log_file.close()
 
@@ -986,39 +1000,81 @@ class SessionRunner:
         # else: no repo / MERGE_HEAD still set — leave the conflict open for
         # a resolver (a retry accept spawns a fresh one).
 
-    def _build_cmd(self, prompt_path: Path, ws: Path, rdir: Path,
-                   kind: str, resume: str | None = None) -> list[str]:
-        """The vibe CLI command for one session. kind: 'run' or 'review'.
+    def backend(self) -> Backend:
+        """The agent CLI this session will drive (vibe / claude)."""
+        key = self.settings.backend() if self.settings else None
+        return get_backend(key)
 
-        `resume` (a vibe session id from a previous round's export.json)
-        resumes that session instead of starting a new one — used for fixer
-        rounds so the persistent worker keeps its cached context. Reviewers
-        are always fresh (no resume).
+    def _build_cmd(self, prompt_path: Path, ws: Path, rdir: Path,
+                   kind: str, resume: str | None = None,
+                   backend: Backend | None = None,
+                   mcp_config: Path | None = None) -> list[str]:
+        """The command line for one session. kind: 'run' or 'review'.
+
+        `resume` (a session id from a previous round's export) resumes that
+        session instead of starting a new one — used for fixer rounds so the
+        persistent worker keeps its cached context. Reviewers are always fresh
+        (no resume). The flags themselves belong to the backend.
         """
-        cmd = [self.config.vibe_bin]
-        if resume:
-            cmd += ["--resume", resume]
-        cmd += ["--prompt-file", str(prompt_path),
-                "--workdir", str(ws),
-                "--output-dir", str(rdir / "export"),
-                "--time-limit", str(self.config.time_limit_seconds)]
-        cmd += (["--max-price", str(self.config.max_price_usd)]
-                if self.config.max_price_usd is not None else [])
-        if kind == "review":
-            # The reviewer is a read-only pass; never the configured agent.
-            cmd += ["--agent", self.config.review_agent]
-        elif self.config.agent:
-            cmd += ["--agent", self.config.agent]
-        cmd += (["--auto-approve"] if self.config.approve == "auto"
-                else ["--smart-approve"])
-        enabled = list(self.config.enabled_tools)
-        if enabled and self.config.mcp_enabled:
-            # Keep the harness MCP tools (published as <name>_<tool>) available
-            # even under a tool allowlist.
-            enabled.append(f"{self.config.mcp_server_name}_*")
-        cmd += [flag for t in enabled
-                for flag in ("--enabled-tools", t)]
-        return cmd
+        backend = backend or self.backend()
+        return backend.build_cmd(config=self.config, prompt_path=prompt_path,
+                                 ws=ws, rdir=rdir, kind=kind, resume=resume,
+                                 mcp_config=mcp_config)
+
+    def _claude_mcp_config(self, rdir: Path, card_id: str) -> Path:
+        """Write the `--mcp-config` file that gives a Claude run the board tools.
+
+        Vibe reads the same server from VIBE_MCP_SERVERS; Claude wants a JSON
+        file with an `mcpServers` map. Same command, same env, so the tools
+        behave identically whichever backend spawned the session.
+        """
+        config = {
+            "mcpServers": {
+                self.config.mcp_server_name: {
+                    "command": sys.executable,
+                    "args": [str(MCP_SERVER_PATH)],
+                    "env": {
+                        "VIBE_HARNESS_URL": self.config.api_base_url(),
+                        "VIBE_HARNESS_NOTE_ID": card_id,
+                        "VIBE_HARNESS_ASK_USER_TIMEOUT": str(self.config.ask_user_timeout_seconds),
+                    },
+                }
+            }
+        }
+        path = rdir / "mcp.json"
+        path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        return path
+
+    def _watch_time_limit(self, card_id: str, proc) -> None:
+        """Terminate a session that outlives `time_limit_seconds`.
+
+        Only used for backends without a native time limit (Claude). Vibe
+        enforces its own `--time-limit` and writes the export on the way out;
+        here the harness has to stop the process, so the round ends as a
+        timeout rather than a clean finish.
+        """
+        limit = max(1, int(self.config.time_limit_seconds))
+
+        def watch() -> None:
+            try:
+                proc.wait(timeout=limit)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            with self._lock:
+                entry = self._registry.get(card_id)
+                if entry is not None and entry.get("proc") is proc:
+                    entry["stop_requested"] = True
+                    entry["timed_out"] = True
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+
+        threading.Thread(target=watch, daemon=True).start()
 
     def _spawn(self, card_id: str, *, kind: str, prompt: str,
                extra_patch: dict | None = None,
@@ -1077,22 +1133,37 @@ class SessionRunner:
                     "VIBE_HARNESS_MAILBOX_ROUND": round_key,
                     "VIBE_HARNESS_MAILBOX_SERVER": str(mailbox.SERVER_SCRIPT)})
 
+        backend = self.backend()
         log_path = rdir / "session.log"
         log_file = open(log_path, "ab")
         try:
-            cmd = self._build_cmd(prompt_path, ws, rdir, kind, resume=resume) + trust_flags
-            # Run sessions (implement/fix) get the harness MCP server injected
-            # via VIBE_MCP_SERVERS; review/resolver sessions stay MCP-free.
-            # The per-card mailbox env (dir/role/round/server) rides along on
-            # top of it for every session that has a mailbox configured.
-            if kind == "run":
-                run_env = self._session_env(card_id)
-                if env:
-                    run_env.update(env)
-                env = run_env
+            # Run sessions (implement/fix) get the harness MCP server; review
+            # and resolver sessions stay MCP-free. Vibe takes it through
+            # VIBE_MCP_SERVERS, Claude through a --mcp-config file.
+            mcp_config = None
+            if kind == "run" and self.config.mcp_enabled:
+                if backend.key == "claude":
+                    mcp_config = self._claude_mcp_config(rdir, card_id)
+                else:
+                    run_env = self._session_env(card_id)
+                    if env:
+                        run_env.update(env)
+                    env = run_env
+            cmd = self._build_cmd(prompt_path, ws, rdir, kind, resume=resume,
+                                  backend=backend, mcp_config=mcp_config) + trust_flags
             env.update(self._model_env(kind))
-            proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
-                                    cwd=ws, start_new_session=True, env=env)
+            stdin_file = open(prompt_path, "rb") if backend.prompt_on_stdin else None
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdin=stdin_file, stdout=log_file,
+                    stderr=subprocess.STDOUT, cwd=ws, start_new_session=True, env=env)
+            finally:
+                if stdin_file is not None:
+                    stdin_file.close()
+            if not backend.native_time_limit:
+                # Claude has no --time-limit: enforce it here, the same way the
+                # Stop button does, so a stuck session cannot run forever.
+                self._watch_time_limit(card_id, proc)
         finally:
             # The child owns its own dup of the fd; drop the parent's copy.
             log_file.close()
@@ -1135,19 +1206,14 @@ class SessionRunner:
                     highest = max(highest, int(m.group(1)))
         return highest + 1
 
-    @staticmethod
-    def _read_export(export_path: Path) -> dict:
-        # Real vibe 3.x export.json schema: usage.total_tokens,
-        # config.active_model, stop_reason, outcome. Alternate key names are
-        # probed defensively; never crash on missing keys.
-        if export_path.exists():
-            try:
-                loaded = json.loads(export_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    return loaded
-            except (OSError, ValueError):
-                pass
-        return {}
+    def _read_export(self, rdir: Path, backend: Backend | None = None) -> dict:
+        """One round's output, normalized to the harness's export shape.
+
+        Each backend knows where its own output lands (vibe: export/export.json,
+        claude: the JSON result on stdout, teed into session.log) and how to map
+        it onto `usage` / `session_id` / `config.active_model` / `stop_reason`.
+        """
+        return (backend or self.backend()).read_export(rdir)
 
     @staticmethod
     def _read_verdict(rdir: Path, ws: Path) -> tuple[bool, str | None] | None:
@@ -1324,7 +1390,7 @@ class SessionRunner:
         session = card.get("session") or {}
         ws = Path(session.get("workdir") or (sdir / "workspace"))
 
-        export = self._read_export(rdir / "export" / "export.json")
+        export = self._read_export(rdir)
         usage = export.get("usage") or export.get("token_usage") or {}
         tokens = usage.get("total_tokens", usage.get("total"))
         # Per-type breakdown (cached/output/input) for the token-counter hover

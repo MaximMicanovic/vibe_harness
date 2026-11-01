@@ -147,3 +147,36 @@ not the isolated sandbox) are **git-backed**:
 Cards without a project or work folder run in the isolated sandbox
 (`sessions/<id>/workspace`) and do not use git — there is no repo to branch
 from or merge into.
+
+## Backends: Vibe or Claude
+
+The harness is a board, not an agent — it drives a headless CLI and reads back
+what that CLI reports. Two are supported, chosen in the sidebar's **Models**
+panel (or `PUT /api/settings {"backend": "claude"}`):
+
+| | `vibe` (default) | `claude` |
+|---|---|---|
+| command | `vibe --prompt-file … --output-dir …` | `claude -p --output-format json` |
+| prompt | `--prompt-file` | stdin |
+| output | `export/export.json` | one JSON result object on stdout |
+| time limit | its own `--time-limit` | the harness watches the clock and terminates |
+| review pass | `--agent ask` (read-only) | `--tools Read,Grep,Glob,Bash` (no Edit/Write) |
+| budget cap | `--max-price` | `--max-budget-usd` |
+| MCP server | `VIBE_MCP_SERVERS` env | `--mcp-config` file |
+
+A backend owns three things: the command line, where its output lands, and how
+to normalize that output into the shape the rest of the harness speaks
+(`usage`, `session_id`, `config.active_model`, `stop_reason`). Everything
+downstream — the review loop, git, archives, the board — is backend-agnostic.
+
+Two caveats for `claude`:
+
+- **It runs on your Claude subscription.** `claude -p` uses the same OAuth
+  login as the interactive CLI, so headless runs consume the same rolling
+  5-hour window. When the window is exhausted the session fails with a
+  rate-limit error, which the harness reports as a failed card. Use
+  `--bare` + `ANTHROPIC_API_KEY` (per-token billing) if you want no window.
+- **`total_cost_usd` is notional on a subscription.** It is the API-equivalent
+  figure, not money charged, so the board's cost column overstates what you
+  actually paid.
+
