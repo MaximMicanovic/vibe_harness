@@ -56,6 +56,8 @@ SESSION_KEYS = (
     # Revert bookkeeping: when an accepted card's merge commit was undone and
     # which commit undid it (the card is a draft again, the session is kept).
     "reverted_at", "revert_commit",
+    # PR accept (accept_mode "pr"): the pull request the card shipped as.
+    "pr_url", "pr_number", "pr_opened_at",
 )
 
 

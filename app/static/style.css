@@ -1102,6 +1102,9 @@ body {
 .chip-test-failed { background: #f8d7da; color: #842029; font-weight: 700; }
 .chip-review-exhausted { background: #fff3cd; color: #664d03; }
 .chip-git { background: #e2e8f0; color: #1e293b; }
+/* The pull request an accepted card shipped as: a link, styled like a chip. */
+.chip-pr { background: #dbeafe; color: #1e40af; font-weight: 700; text-decoration: none; }
+.chip-pr:hover { text-decoration: underline; }
 .chip-git-merged { background: #dcfce7; color: #166534; }
 .chip-merge-conflict { background: #f8d7da; color: #842029; }
 .chip-reverted { background: #ede9fe; color: #5b21b6; }
@@ -1441,6 +1444,16 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
   padding: 6px 8px;
   margin: 0 0 10px;
 }
+
+/* The pull request an accepted card was shipped as (editor footer link). */
+.pr-link {
+  font-size: 12px;
+  color: #1e40af;
+  font-weight: 700;
+  text-decoration: none;
+  align-self: center;
+}
+.pr-link:hover { text-decoration: underline; }
 
 .chip-workdir {
   background: var(--chip-workdir-bg);

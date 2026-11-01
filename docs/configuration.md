@@ -19,6 +19,7 @@ All optional, via environment variables:
 | `VIBE_HARNESS_REVIEW_AGENT` | `ask` | Read-only builtin agent for the review pass |
 | `VIBE_HARNESS_MAX_REVIEW_ROUNDS` | `5` | Review/fix loop cap per card; when hit, the card is done-but-unapproved and must be accepted manually |
 | `VIBE_HARNESS_GIT_BRANCH_PREFIX` | `harness` | Per-card git branch prefix (`<prefix>/<card-id>`) for git-backed runs |
+| `VIBE_HARNESS_ACCEPT_MODE` | `local` | How accepting a card ships the change: `local` merges the card branch into the base branch in the project folder; `pr` pushes the branch to `origin` and opens a pull request whose body carries the review verdict (needs `gh`, `gh auth login` and an `origin` remote). The sidebar's **Accept mode** control (`PUT /api/settings {"accept_mode": …}`) overrides it; an unknown env value falls back to `local` |
 | `VIBE_HARNESS_VIBE_BIN` | `vibe` | Path/name of the Vibe CLI |
 | `VIBE_HARNESS_CLAUDE_BIN` | `claude` | Path/name of the Claude Code CLI (backend `claude`) |
 | `VIBE_HARNESS_ALLOWED_WORKDIRS` | unset (allow all) | Comma-separated absolute path prefixes; a card's work folder must be inside one of them, else runs return 403 |

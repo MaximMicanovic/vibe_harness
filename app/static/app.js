@@ -102,6 +102,7 @@ const btnDiff = $('btn-diff');
 const btnDelete = $('btn-delete');
 const acceptHint = $('accept-hint');
 const revertNote = $('revert-note');
+const cardPrLink = $('card-pr-link');
 
 /* The auto-accept checkbox remembers the last setting used (per browser). */
 const AUTO_ACCEPT_KEY = 'vibe-harness:auto-accept';
@@ -667,6 +668,18 @@ function buildCard(cardData) {
         + (s.revert_commit ? ' — revert commit ' + s.revert_commit.slice(0, 7) : '')
         + '. The card is a draft again; its session history is kept.';
       chips.appendChild(rc);
+    }
+    if (s.pr_url) {
+      // An accepted card shipped as a pull request: the link is the audit
+      // trail, so it sits on the card itself (clicking it must not open the
+      // editor).
+      const pc = el('a', 'chip chip-pr', '↗ PR' + (s.pr_number ? ' #' + s.pr_number : ''));
+      pc.href = s.pr_url;
+      pc.target = '_blank';
+      pc.rel = 'noopener';
+      pc.title = 'Pull request opened on accept: ' + s.pr_url;
+      pc.addEventListener('click', (e) => e.stopPropagation());
+      chips.appendChild(pc);
     }
     if (s.model) chips.appendChild(chip('model', s.model));
     if (cardData.auto_accept) chips.appendChild(chip('auto-accept', 'auto-accept on'));
@@ -2109,6 +2122,30 @@ async function renderModelsPanel() {
       : 'This backend is not installed — runs will fail until ' + (chosen ? chosen.binary : 'it') + ' is on PATH.'));
   sidebarBody.appendChild(backendRow);
 
+  // How accepting a card ships the change: merge locally, or open a pull
+  // request (push the branch, verdict as the PR body). It sits next to the
+  // backend because it decides what the Accept button even does.
+  const acceptRow = el('div', 'model-role backend-role');
+  const acceptLabel = el('label', '', 'Accept mode');
+  acceptLabel.htmlFor = 'accept-mode-select';
+  acceptRow.appendChild(acceptLabel);
+  const acceptSelect = el('select');
+  acceptSelect.id = 'accept-mode-select';
+  for (const m of settings.accept_modes) {
+    const opt = el('option', '', m.label);
+    opt.value = m.key;
+    acceptSelect.appendChild(opt);
+  }
+  acceptSelect.value = settings.accept_mode;
+  acceptSelect.title = 'How accepting a card ships the change';
+  acceptSelect.addEventListener('change', () => {
+    saveAcceptMode(acceptSelect.value).catch(showError);
+  });
+  acceptRow.appendChild(acceptSelect);
+  const chosenMode = settings.accept_modes.find((m) => m.key === settings.accept_mode);
+  acceptRow.appendChild(el('p', 'model-hint', chosenMode ? chosenMode.description : ''));
+  sidebarBody.appendChild(acceptRow);
+
   for (const role of data.roles) {
     const row = el('div', 'model-role' + (role.available ? '' : ' model-role--off'));
     const id = 'model-' + role.key;
@@ -2149,6 +2186,15 @@ async function saveBackend(key) {
   // The token counter depends on the backend, so the board and the stats bar
   // have to be redrawn, not just the panel.
   renderStats();
+  renderBoard();
+  await renderModelsPanel();
+}
+
+async function saveAcceptMode(key) {
+  state.settings = await api('/api/settings', {
+    method: 'PUT', body: JSON.stringify({ accept_mode: key }),
+  });
+  // The Accept button label follows the mode, so the board is redrawn too.
   renderBoard();
   await renderModelsPanel();
 }
@@ -2788,6 +2834,25 @@ async function openEditor(cardId) {
         + (card.session.revert_commit ? ' (revert commit ' + card.session.revert_commit.slice(0, 7) + ')' : '')
         + ' — the card is a draft again and its session history is kept.'
       : '';
+    // In pr mode accepting opens a pull request instead of merging locally, so
+    // the button says what it does.
+    const prMode = !!(state.settings && state.settings.accept_mode === 'pr');
+    btnAccept.textContent = prMode ? '↗ Open PR' : '✓ Accept';
+    btnAccept.title = prMode
+      ? 'Push the card branch and open a pull request with the review verdict as its body'
+      : 'Merge the card branch into the base branch';
+    acceptHint.textContent = prMode
+      ? 'Open PR is available once the reviewer approves the card — or after the review rounds are exhausted, as a manual accept.'
+      : 'Accept is available once the reviewer approves the card — or after the review rounds are exhausted, as a manual accept.';
+    // An accepted card shipped as a PR links to it.
+    const prUrl = (card.session && card.session.pr_url) || '';
+    cardPrLink.hidden = !prUrl;
+    if (prUrl) {
+      cardPrLink.href = prUrl;
+      cardPrLink.textContent = '↗ Pull request'
+        + (card.session.pr_number ? ' #' + card.session.pr_number : '');
+      cardPrLink.title = 'Opened on accept: ' + prUrl;
+    }
     // Only accepted cards can be archived.
     btnArchive.hidden = card.status !== 'accepted';
     btnLog.hidden = !card.session;
@@ -2815,9 +2880,11 @@ async function openEditor(cardId) {
     btnRun.hidden = false;   // saves, then runs
     btnStop.hidden = true;
     btnAccept.hidden = true;
+    btnAccept.textContent = '✓ Accept';
     acceptHint.hidden = true;
     btnRevert.hidden = true;
     revertNote.hidden = true;
+    cardPrLink.hidden = true;
     btnArchive.hidden = true;
     btnLog.hidden = true;
     btnDiff.hidden = true;

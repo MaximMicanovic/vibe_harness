@@ -81,7 +81,8 @@ sees every status change. `app.js` keeps the previous status map in
 ## Git workflow
 
 Runs in a real work folder (a project's folder or a card's work folder override —
-not the isolated sandbox) are **git-backed**:
+not the isolated sandbox) are **git-backed**: one branch and one linked worktree
+per card, shipped on accept — merged locally, or opened as a pull request.
 
 - If the folder is not a git repository yet, it is `git init`-ed for you (with a
   minimal `.gitignore` — committed in the initial commit so test artifacts never
@@ -96,14 +97,29 @@ not the isolated sandbox) are **git-backed**:
   own branch in its own worktree.
 - Each successful implementation round is committed on the card branch (in the
   card's worktree).
-- **Accept merges with `--no-ff`**: the card branch goes into the base branch in
-  the project folder as exactly **one merge commit**, whose second parent is the
-  card branch. That commit is what "this card" means — the diff view shows
-  `merge_commit^..merge_commit`, and a future revert has one commit to revert.
-  A fast-forwarded card would have no such commit. `auto_accept` merges the
-  same way. The result is recorded on the card's session git record:
-  `merge_commit` (sha), `merge_was_ff` (true only when the branch was already
-  contained in the base, so no commit was created) and `merged_at` (ISO).
+- **Accept ships the change**, in one of two modes (`accept_mode`, the
+  sidebar's **Accept mode** control or `VIBE_HARNESS_ACCEPT_MODE`):
+  - **`local`** (the default) **merges with `--no-ff`**: the card branch goes
+    into the base branch in the project folder as exactly **one merge commit**,
+    whose second parent is the card branch. That commit is what "this card"
+    means — the diff view shows `merge_commit^..merge_commit`, and a future
+    revert has one commit to revert. A fast-forwarded card would have no such
+    commit. `auto_accept` merges the same way. The result is recorded on the
+    card's session git record: `merge_commit` (sha), `merge_was_ff` (true only
+    when the branch was already contained in the base, so no commit was
+    created) and `merged_at` (ISO).
+  - **`pr`** never merges: it pushes the card branch (`git push -u origin
+    harness/<id>`) and opens a pull request (`gh pr create --head
+    harness/<id>`) whose body carries the audit trail — the card spec, the
+    review verdict (approved + reason + round + model), the test output tail
+    and the diff stat. The card records `session.pr_url`, `pr_number` and
+    `pr_opened_at`, and the branch **and its worktree are kept** because the PR
+    may need follow-up commits. The accept button reads **Open PR**, and an
+    accepted card links to its PR. A preflight runs first and fails with a 409
+    naming the missing piece — `gh` not installed, `gh auth status` not green,
+    no `origin` remote, or the card branch gone — changing nothing. The body is
+    built by `app/praccept.py::build_pr_body`, a pure function unit-tested
+    without git or network.
 - **The card branch and its linked worktree are KEPT after accept.** They are
   what the card's diff is read from, so `GET /api/cards/<id>/diff` still works
   on an accepted card. They are removed only when the card is **deleted** or
@@ -140,11 +156,16 @@ not the isolated sandbox) are **git-backed**:
   conflict is left for a resolver. Orphaned worktrees of non-live cards are
   pruned, and their `harness/<id>` branch is deleted only when already merged
   (safe `-d` — unmerged work is never force-deleted). **Accepted cards are
-  skipped**: their branch and worktree are what the diff view reads. Pending
-  questions whose waiter died with the server are cancelled (failed, adopted
-  and resolver-adopted cards alike).
+  skipped**: their branch and worktree are what the diff view reads. That
+  includes a card accepted as a pull request — its branch and worktree are
+  kept across restarts (the PR may need follow-up commits), which the safe
+  `-d` guard alone would not achieve: the `-u` push points the branch at
+  `origin/<branch>`, so git considers it merged and `-d` would succeed.
+  Pending questions whose waiter died with the server are cancelled (failed,
+  adopted and resolver-adopted cards alike).
 - Cards show a `⎇ harness/<id> → <base>` chip while the work is unmerged, and
-  `✓ merged into <base>` after accept.
+  `✓ merged into <base>` after a local accept — or a `↗ PR #<n>` link after a
+  PR accept.
 
 Cards without a project or work folder run in the isolated sandbox
 (`sessions/<id>/workspace`) and do not use git — there is no repo to branch

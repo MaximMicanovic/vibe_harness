@@ -6,17 +6,19 @@ never the network.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app import gitops, mailbox
 from app.config import Config, load_config
-from app.gitops import GitBusyError
+from app.gitops import GitBusyError, GitError
 from app.cards import CardRunning, CardStore
 from app.projects import ProjectStore
 from app.runner import (
@@ -2164,3 +2166,388 @@ def test_recover_stale_adopted_resolver_cancels_pending_questions(
     runner.stop(card_id)                       # cleanup: kill the adopted resolver
     _wait_for_flag(store, card_id,
                    lambda n: (n["session"]["git"] or {}).get("resolving"), False)
+
+
+# ----------------------------------------------------------------------
+# PR accept: accept_mode "pr" pushes the branch and opens a PR instead of
+# merging locally. No network: praccept's gh/git calls are stubbed.
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def pr_calls(monkeypatch):
+    """Stub the PR side effects; record what the runner asked for."""
+    from app import praccept
+
+    recorded = SimpleNamespace(pushed=[], opened=[], preflights=0)
+
+    def fake_preflight(git_info):
+        recorded.preflights += 1
+
+    def fake_push(git_info):
+        recorded.pushed.append(git_info["branch"])
+
+    def fake_open(git_info, title, body):
+        recorded.opened.append({"branch": git_info["branch"], "title": title,
+                                "body": body})
+        return "https://github.com/me/app/pull/12"
+
+    monkeypatch.setattr(praccept, "preflight", fake_preflight)
+    monkeypatch.setattr(praccept, "push_branch", fake_push)
+    monkeypatch.setattr(praccept, "open_pr", fake_open)
+    monkeypatch.setattr(praccept, "diff_stat", lambda git_info: " hello.txt | 1 +")
+    return recorded
+
+
+def _pr_runner(store, tmp_path, vibe_bin, projects, **config_kwargs):
+    return _make_runner_with_projects(store, tmp_path, vibe_bin, projects,
+                                      accept_mode="pr", **config_kwargs)
+
+
+@git_test
+def test_pr_accept_pushes_and_opens_a_pr(store, tmp_path, fake_vibe, projects, pr_calls):
+    """In pr mode accept pushes harness/<id> and opens a PR whose body carries
+    the review verdict; the card records the PR and keeps branch + worktree."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects)
+    card = store.create("PR card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+
+    runner.run(card_id)
+    done = _wait_for_status(store, card_id, "done")
+    git_info = done["session"]["git"]
+    branch = git_info["branch"]
+    worktree = Path(git_info["worktree"])
+
+    accepted = runner.accept_card(card_id)
+
+    assert accepted["status"] == "accepted"
+    session = accepted["session"]
+    assert session["pr_url"] == "https://github.com/me/app/pull/12"
+    assert session["pr_number"] == 12
+    assert session["pr_opened_at"]
+    # Pushed the card branch, then opened the PR on it.
+    assert pr_calls.preflights == 1
+    assert pr_calls.pushed == [branch]
+    assert pr_calls.opened[0]["branch"] == branch
+    assert pr_calls.opened[0]["title"] == "PR card"
+    body = pr_calls.opened[0]["body"]
+    assert "Write a hello file." in body                     # the card spec
+    assert "approved" in body.lower()                        # the verdict
+    if session["review"].get("reason"):
+        assert session["review"]["reason"] in body
+    assert "round 1" in body.lower()
+    assert "hello.txt | 1 +" in body                         # the diff stat
+    # Never merged locally: the branch and its worktree are kept for follow-up
+    # commits, and the base branch did not move.
+    assert session["git"]["merged"] is False
+    assert gitops.branch_exists(proj, branch)
+    assert worktree.is_dir()
+    assert "hello.txt" not in _git(
+        ["show", "--name-only", "--format=", git_info["base_branch"]], proj)
+
+
+FAKE_GH = """#!/bin/sh
+# Fake GitHub CLI: `auth status` is green, `pr create` records its argv and
+# prints a PR URL. No network.
+case "$1 $2" in
+  "auth status") exit 0 ;;
+  "pr create")
+    printf '%s\\n' "$@" > "$FAKE_GH_ARGS"
+    echo "https://github.com/me/app/pull/5"
+    exit 0 ;;
+esac
+exit 0
+"""
+
+
+def _fake_gh(tmp_path, monkeypatch):
+    """A fake `gh` on PATH (auth green, `pr create` prints a URL) plus a bare
+    `origin` repo. Returns (origin, args_file). No network."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    gh = bindir / "gh"
+    gh.write_text(FAKE_GH)
+    gh.chmod(0o755)
+    args_file = tmp_path / "gh-args.txt"
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_ARGS", str(args_file))
+    return origin, args_file
+
+
+@git_test
+def test_pr_accept_end_to_end_with_a_fake_gh(
+        store, tmp_path, fake_vibe, projects, monkeypatch):
+    """The real command lines, not the stubs: `git push -u origin <branch>` to
+    a bare origin plus `gh pr create` with the spec's flags. A fake `gh` on
+    PATH stands in for the network."""
+    origin, args_file = _fake_gh(tmp_path, monkeypatch)
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    gitops.ensure_repo(proj)
+    _git(["remote", "add", "origin", str(origin)], proj)
+
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects)
+    card = store.create("E2E PR card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    done = _wait_for_status(store, card_id, "done")
+    branch = done["session"]["git"]["branch"]
+
+    accepted = runner.accept_card(card_id)
+
+    assert accepted["status"] == "accepted"
+    assert accepted["session"]["pr_url"] == "https://github.com/me/app/pull/5"
+    assert accepted["session"]["pr_number"] == 5
+    # The branch really landed on origin.
+    assert _git(["--git-dir", str(origin), "rev-parse", "--verify", branch], tmp_path)
+    # gh got the flags the spec pins.
+    argv = args_file.read_text().split("\n")
+    assert argv[:2] == ["pr", "create"]
+    assert "--head" in argv and branch in argv
+    assert "--title" in argv and "E2E PR card" in argv
+    assert "--body" in argv
+    # ...and the body carries the verdict.
+    assert any("Verdict" in line for line in argv)
+
+
+@git_test
+def test_recover_stale_keeps_the_branch_and_worktree_of_a_pr_accepted_card(
+        store, tmp_path, fake_vibe, projects, monkeypatch):
+    """A restart must not prune an accepted PR-mode card: the branch and its
+    worktree are the working copy for follow-up commits on the PR.
+
+    The `-u` push sets the branch's upstream to `origin/<branch>`, so
+    `git branch -d` considers it merged and succeeds — the safe-delete guard
+    alone does not save the branch, and the worktree is removed
+    unconditionally. Startup pruning has to skip PR-accepted cards explicitly.
+    """
+    origin, _args = _fake_gh(tmp_path, monkeypatch)
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    gitops.ensure_repo(proj)
+    _git(["remote", "add", "origin", str(origin)], proj)
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects)
+    card = store.create("PR kept card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    done = _wait_for_status(store, card_id, "done")
+    git_info = done["session"]["git"]
+    branch = git_info["branch"]
+    wt = Path(git_info["worktree"])
+
+    accepted = runner.accept_card(card_id)
+    assert accepted["status"] == "accepted"
+    assert accepted["session"]["pr_url"]
+    # The push really set the upstream — that is what defeats `git branch -d`.
+    assert _git(["rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"], proj) \
+        == f"origin/{branch}"
+
+    # server restart: a fresh runner over the same store/sessions dir
+    runner2 = _pr_runner(store, tmp_path, fake_vibe, projects)
+    runner2.recover_stale()
+
+    assert store.get(card_id)["status"] == "accepted"
+    assert gitops.branch_exists(proj, branch)          # kept for follow-ups
+    assert wt.is_dir()
+    assert wt.resolve() in gitops.registered_worktrees(proj)
+
+
+@git_test
+def test_recover_stale_keeps_a_locally_accepted_card_too(
+        store, tmp_path, fake_vibe, projects):
+    """The PR exemption is additive, not a replacement: a locally accepted
+    card keeps its branch and worktree across a restart as well (they are what
+    the diff view reads), so startup pruning skips it either way."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    card = store.create("Local card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    done = _wait_for_status(store, card_id, "done")
+    git_info = done["session"]["git"]
+    wt = Path(git_info["worktree"])
+
+    accepted = runner.accept_card(card_id)
+    assert accepted["session"]["git"]["merged"] is True
+    assert accepted["session"].get("pr_url") is None
+    assert gitops.branch_exists(proj, git_info["branch"])
+
+    runner2 = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    runner2.recover_stale()
+
+    assert store.get(card_id)["status"] == "accepted"
+    assert wt.exists()
+    assert wt.resolve() in gitops.registered_worktrees(proj)
+    assert gitops.branch_exists(proj, git_info["branch"])
+
+
+@git_test
+def test_pr_accept_fails_without_gh_and_changes_nothing(
+        store, tmp_path, fake_vibe, projects, monkeypatch):
+    """gh missing: accept raises a GitError naming gh and leaves the card done,
+    with no PR recorded and the branch untouched."""
+    from app import praccept
+
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects)
+    card = store.create("No gh card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    done = _wait_for_status(store, card_id, "done")
+    git_info = done["session"]["git"]
+
+    monkeypatch.setattr(praccept, "gh_available", lambda: False)
+    with pytest.raises(GitError) as excinfo:
+        runner.accept_card(card_id)
+
+    assert "gh" in str(excinfo.value)
+    after = store.get(card_id)
+    assert after["status"] == "done"                 # nothing changed
+    assert (after["session"] or {}).get("pr_url") is None
+    assert gitops.branch_exists(proj, git_info["branch"])
+
+
+@git_test
+def test_pr_accept_fails_when_gh_is_not_authenticated(
+        store, tmp_path, fake_vibe, projects, monkeypatch):
+    from app import praccept
+
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects)
+    card = store.create("Logged out card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    _wait_for_status(store, card_id, "done")
+
+    monkeypatch.setattr(praccept, "gh_available", lambda: True)
+    monkeypatch.setattr(praccept, "gh_authenticated", lambda: False)
+    with pytest.raises(GitError) as excinfo:
+        runner.accept_card(card_id)
+
+    assert "gh auth" in str(excinfo.value)
+    assert store.get(card_id)["status"] == "done"
+
+
+@git_test
+def test_pr_accept_fails_without_an_origin_remote(
+        store, tmp_path, fake_vibe, projects, monkeypatch):
+    from app import praccept
+
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects)
+    card = store.create("No origin card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    _wait_for_status(store, card_id, "done")
+
+    monkeypatch.setattr(praccept, "gh_available", lambda: True)
+    monkeypatch.setattr(praccept, "gh_authenticated", lambda: True)
+    with pytest.raises(GitError) as excinfo:
+        runner.accept_card(card_id)
+
+    assert "origin" in str(excinfo.value)
+    assert store.get(card_id)["status"] == "done"
+
+
+@git_test
+def test_pr_accept_still_gates_on_green_tests(
+        store, tmp_path, fake_vibe, projects, pr_calls):
+    """Ship only green holds in pr mode too: a failing test command blocks the
+    accept before anything is pushed."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects,
+                        test_cmd="test ! -f FAIL")
+    card = store.create("Gated PR card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    done = _wait_for_status(store, card_id, "done")
+    ws = Path(done["session"]["workdir"])
+    (ws / "FAIL").write_text("x")
+
+    with pytest.raises(TestFailedError):
+        runner.accept_card(card_id)
+
+    assert pr_calls.pushed == []                     # nothing was pushed
+    assert store.get(card_id)["status"] == "done"
+
+
+@git_test
+def test_pr_body_quotes_the_accept_time_test_output(
+        store, tmp_path, fake_vibe, projects, pr_calls):
+    """The PR body carries the test output of the accept-time green gate, not
+    just whatever an earlier rejection happened to record."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _pr_runner(store, tmp_path, fake_vibe, projects,
+                        test_cmd="echo ACCEPT-GATE-GREEN")
+    card = store.create("Green PR card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    _wait_for_status(store, card_id, "done")
+
+    runner.accept_card(card_id)
+
+    assert "ACCEPT-GATE-GREEN" in pr_calls.opened[0]["body"]
+
+
+@git_test
+def test_local_accept_mode_still_merges(store, tmp_path, fake_vibe, projects, pr_calls):
+    """local (the default) is unchanged: accept merges and never opens a PR."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    assert runner.accept_mode() == "local"
+    card = store.create("Local card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    done = _wait_for_status(store, card_id, "done")
+    git_info = done["session"]["git"]
+
+    accepted = runner.accept_card(card_id)
+
+    assert accepted["status"] == "accepted"
+    assert accepted["session"]["git"]["merged"] is True
+    assert accepted["session"].get("pr_url") is None
+    assert pr_calls.pushed == [] and pr_calls.opened == []
+    # A local accept keeps the branch and its worktree as well (the diff view
+    # reads them); they go away only on delete/archive.
+    assert gitops.branch_exists(proj, git_info["branch"])
+
+
+@git_test
+def test_accept_mode_setting_overrides_the_config_default(
+        store, tmp_path, fake_vibe, projects):
+    """The sidebar choice (settings.json) wins over VIBE_HARNESS_ACCEPT_MODE."""
+    from app.settings import SettingsStore
+
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    settings = SettingsStore(tmp_path / "settings.json")
+    config = Config(vibe_bin=str(fake_vibe), time_limit_seconds=30, accept_mode="pr")
+    runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
+                           projects=projects, settings=settings)
+    assert runner.accept_mode() == "pr"              # the config default
+    settings.set_accept_mode("local")
+    assert runner.accept_mode() == "local"           # the stored choice wins
+    settings.set_accept_mode("pr")
+    assert runner.accept_mode() == "pr"

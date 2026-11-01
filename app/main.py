@@ -61,7 +61,7 @@ from app.runner import (
     TestFailedError,
     WorkdirNotAllowed,
 )
-from app.settings import SettingsStore
+from app.settings import SettingsError, SettingsStore, describe_accept_modes
 from app.stacks import StackError, StackNotFound, StackStore
 
 
@@ -129,6 +129,7 @@ class SettingsIn(BaseModel):
     backend: str | None = None
     # Concurrent-session cap; 0 = unlimited. None = leave it unchanged.
     max_concurrent: int | None = Field(default=None, ge=0)
+    accept_mode: str | None = None
 
 
 class ModelsIn(BaseModel):
@@ -312,6 +313,10 @@ def create_app(config: Config | None = None,
 
     @app.exception_handler(BackendError)
     async def _backend_error(request, exc):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(SettingsError)
+    async def _settings_error(request, exc):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     # --- cards ---------------------------------------------------------------
@@ -592,18 +597,23 @@ def create_app(config: Config | None = None,
         # Restore an archived card to the board, whichever archive holds it.
         return archives.restore_card(card_id)
 
-    # --- settings (which agent CLI the harness drives, concurrency cap) ------
+    # --- settings (which agent CLI the harness drives, concurrency cap, how
+    # accept ships) ----------------------------------------------------------
     def _settings_payload() -> dict:
         """Everything the sidebar's Settings panel needs in one round trip.
 
         `max_concurrent` is the effective cap (the stored setting, else
         Config.max_concurrent; 0 = unlimited) and `running` is the current
-        occupancy, so the panel can say "2 of 3 running".
+        occupancy, so the panel can say "2 of 3 running". `accept_mode` is the
+        effective mode (the stored setting, else Config.accept_mode) and
+        `accept_modes` the choices the panel offers.
         """
         return {"backend": settings.backend(),
                 "backends": describe_backends(config),
                 "max_concurrent": settings.max_concurrent(config.max_concurrent),
-                "running": runner.running_count()}
+                "running": runner.running_count(),
+                "accept_mode": settings.accept_mode(config.accept_mode),
+                "accept_modes": describe_accept_modes()}
 
     @app.get("/api/settings")
     def get_settings():
@@ -615,6 +625,8 @@ def create_app(config: Config | None = None,
             settings.set_backend(payload.backend)
         if payload.max_concurrent is not None:
             settings.set_max_concurrent(payload.max_concurrent)
+        if payload.accept_mode is not None:
+            settings.set_accept_mode(payload.accept_mode)
         return _settings_payload()
 
     # --- models (per-role) ---------------------------------------------------

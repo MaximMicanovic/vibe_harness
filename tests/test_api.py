@@ -19,6 +19,7 @@ from app.archives import ArchiveStore
 from app.cards import CardStore
 from app.projects import ProjectStore
 from app.runner import SessionRunner
+from app.settings import SettingsStore
 
 FAKE_VIBE = """#!/bin/sh
 # Fake vibe: write artifacts into --workdir / --output-dir, then exit 0.
@@ -135,12 +136,17 @@ def make_env(tmp_path: Path, script: str = FAKE_VIBE, archives=None,
     fake.chmod(0o755)
     config = Config(vibe_bin=str(fake), time_limit_seconds=30, **config_kwargs)
     projects = ProjectStore(tmp_path / "projects.json")
-    runner = SessionRunner(store, config, sessions_dir=sessions_dir, projects=projects)
+    # A per-test settings store: PUT /api/settings must never write the real
+    # settings.json of the harness this suite runs in.
+    settings = SettingsStore(tmp_path / "settings.json")
+    runner = SessionRunner(store, config, sessions_dir=sessions_dir, projects=projects,
+                           settings=settings)
     app = create_app(config=config, store=store, runner=runner, projects=projects,
-                     archives=archives)
+                     archives=archives, settings=settings)
     client = TestClient(app)
     return SimpleNamespace(client=client, store=store, runner=runner,
-                           projects=projects, sessions_dir=sessions_dir, tmp_path=tmp_path)
+                           projects=projects, sessions_dir=sessions_dir,
+                           settings=settings, tmp_path=tmp_path)
 
 
 @pytest.fixture()
@@ -1729,3 +1735,108 @@ def test_revert_action_wired(env):
     assert "s.reverted_at" in js
     assert "chip('reverted'" in js
     assert "revertNote" in js
+
+# ----------------------------------------------------------------------
+# accept_mode: local (merge) or pr (push + open a pull request)
+# ----------------------------------------------------------------------
+
+def test_settings_expose_the_accept_mode(env):
+    data = env.client.get("/api/settings").json()
+    assert data["accept_mode"] == "local"
+    assert [m["key"] for m in data["accept_modes"]] == ["local", "pr"]
+
+
+def test_settings_switch_the_accept_mode(env):
+    r = env.client.put("/api/settings", json={"accept_mode": "pr"})
+    assert r.status_code == 200, r.text
+    assert r.json()["accept_mode"] == "pr"
+    assert env.client.get("/api/settings").json()["accept_mode"] == "pr"
+    # ...and back, without touching the backend.
+    r = env.client.put("/api/settings", json={"accept_mode": "local"})
+    assert r.json()["accept_mode"] == "local"
+    assert r.json()["backend"] == "vibe"
+
+
+def test_settings_reject_an_unknown_accept_mode(env):
+    r = env.client.put("/api/settings", json={"accept_mode": "merge"})
+    assert r.status_code == 400
+    assert env.client.get("/api/settings").json()["accept_mode"] == "local"
+
+
+def test_settings_empty_patch_keeps_the_accept_mode(env):
+    env.client.put("/api/settings", json={"accept_mode": "pr"})
+    r = env.client.put("/api/settings", json={})
+    assert r.status_code == 200
+    assert r.json()["accept_mode"] == "pr"
+
+
+@git_test
+def test_accept_in_pr_mode_opens_a_pull_request(tmp_path, monkeypatch):
+    """pr mode over HTTP: accept pushes the branch and opens a PR (stubbed),
+    records the URL on the card, and never merges locally."""
+    from app import praccept
+
+    opened = []
+
+    def fake_open(git_info, title, body):
+        opened.append({"branch": git_info["branch"], "title": title, "body": body})
+        return "https://github.com/me/app/pull/3"
+
+    monkeypatch.setattr(praccept, "preflight", lambda git_info: None)
+    monkeypatch.setattr(praccept, "push_branch", lambda git_info: None)
+    monkeypatch.setattr(praccept, "open_pr", fake_open)
+    monkeypatch.setattr(praccept, "diff_stat", lambda git_info: " hello.py | 1 +")
+
+    e = make_env(tmp_path, accept_mode="pr")
+    with e.client:
+        proj = tmp_path / "proj"
+        e.client.post("/api/projects", json={"name": "p", "path": str(proj)})
+        card = create_card(e.client, project="p", body="write hello.py")
+        e.client.post(f"/api/cards/{card['id']}/run")
+        done = wait_for_status(e.client, card["id"], {"done"})
+        git_info = done["session"]["git"]
+
+        r = e.client.post(f"/api/cards/{card['id']}/accept")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["session"]["pr_url"] == "https://github.com/me/app/pull/3"
+        assert body["session"]["pr_number"] == 3
+        assert body["session"]["git"]["merged"] is False
+        # The branch and its worktree are kept for follow-up commits.
+        assert gitops.branch_exists(proj, git_info["branch"])
+        assert Path(git_info["worktree"]).is_dir()
+        assert opened[0]["branch"] == git_info["branch"]
+        assert "write hello.py" in opened[0]["body"]
+
+
+@git_test
+def test_accept_in_pr_mode_without_gh_is_a_409(tmp_path, monkeypatch):
+    """gh missing: the API answers 409 naming gh and the card stays done."""
+    from app import praccept
+
+    monkeypatch.setattr(praccept, "gh_available", lambda: False)
+
+    e = make_env(tmp_path, accept_mode="pr")
+    with e.client:
+        proj = tmp_path / "proj"
+        e.client.post("/api/projects", json={"name": "p", "path": str(proj)})
+        card = create_card(e.client, project="p", body="write hello.py")
+        e.client.post(f"/api/cards/{card['id']}/run")
+        wait_for_status(e.client, card["id"], {"done"})
+
+        r = e.client.post(f"/api/cards/{card['id']}/accept")
+        assert r.status_code == 409, r.text
+        assert "gh" in r.json()["detail"]
+        assert e.client.get(f"/api/cards/{card['id']}").json()["status"] == "done"
+
+
+def test_accept_button_reads_open_pr_in_pr_mode(tmp_path):
+    """The UI follows the setting: the accept button says "Open PR" in pr mode
+    and an accepted card with a PR renders a link to it."""
+    e = make_env(tmp_path, accept_mode="pr")
+    with e.client:
+        js = e.client.get("/app.js").text
+        assert "Open PR" in js
+        assert "pr_url" in js
+        assert "accept_mode" in js
