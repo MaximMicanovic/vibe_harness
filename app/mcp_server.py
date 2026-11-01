@@ -258,6 +258,14 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "accept_all_cards",
+        "description": (
+            "Accept every card currently in Done, merging them one at a time "
+            "(the batch is a snapshot: cards that reach Done later are not "
+            "included). Returns the queued card ids. " + _COMMON),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "revert_card",
         "description": (
             "Undo an accepted card: `git revert` the merge commit its accept "
@@ -710,6 +718,10 @@ def tool_accept_card(args: dict) -> object:
     return _api().post(f"/api/cards/{args['card_id']}/accept")
 
 
+def tool_accept_all_cards(args: dict) -> object:
+    return _api().post("/api/cards/accept-all")
+
+
 def tool_revert_card(args: dict) -> object:
     return _api().post(f"/api/cards/{args['card_id']}/revert")
 
@@ -937,6 +949,7 @@ TOOL_FUNCS = {
     "run_card": tool_run_card,
     "stop_card": tool_stop_card,
     "accept_card": tool_accept_card,
+    "accept_all_cards": tool_accept_all_cards,
     "revert_card": tool_revert_card,
     "card_log": tool_card_log,
     "list_templates": tool_list_templates,

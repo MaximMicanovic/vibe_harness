@@ -59,6 +59,13 @@ you write a card (spec)
   → accept     test gate once more, then merge the card branch       ← free
                with --no-ff (one merge commit per card); the branch
                and its worktree are KEPT so the diff stays readable
+  → accept all POST /api/cards/accept-all (the Done column's button)  ← free
+               snapshots the cards in Done NOW and merges them one at
+               a time in a background drain (they share one main
+               worktree, so they cannot run concurrently); a conflicted
+               accept hands to a resolver and the batch WAITS for it.
+               A card that reaches Done mid-batch is not included — it
+               renders below the button for the next click.
   → inspect    GET /api/cards/<id>/diff?range=card|round|worktree    ← free
                (the board's Diff panel: D over a card, or the Diff
                 button) — no LLM tokens, it only reads git
@@ -298,7 +305,8 @@ touched. The server (`app/mcp_server.py`, stdlib-only stdio JSON-RPC) forwards
 to the dashboard HTTP API — the dashboard stays the single writer of cards
 and sessions. Tools are published as `harness_<tool>` in the `mcp_harness`
 group: `current_card`, `list_cards`, `get_card`, `create_card`, `update_card`,
-`delete_card`, `run_card`, `stop_card`, `accept_card`, `revert_card`,
+`delete_card`, `run_card`, `stop_card`, `accept_card`,
+`accept_all_cards`, `revert_card`,
 `card_log`,
 `list_templates`, `stats`, a **read-only** `list_projects`, `ask_user`, the
 dependency-link tools `add_dependency` / `remove_dependency` /

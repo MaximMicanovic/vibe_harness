@@ -458,6 +458,33 @@ function unmetDeps(cardData, index) {
   });
 }
 
+/* The "Accept all" button at the bottom of Done. It merges the cards that were
+ * in Done when it was clicked, one at a time; a card that finishes afterwards
+ * renders BELOW it and is picked up by the next click. */
+function buildAcceptAll(batchCount, restCount) {
+  const wrap = el('div', 'accept-all');
+  wrap.dataset.acceptAll = '1';
+  const btn = el('button', 'accept-all-btn');
+  btn.type = 'button';
+  if (batchCount) {
+    btn.textContent = 'Merging… (' + batchCount + ' queued)';
+    btn.disabled = true;
+    btn.title = 'Merging the cards that were in Done when the batch started';
+  } else {
+    btn.textContent = 'Accept all (' + restCount + ')';
+    btn.title = 'Merge every card in Done, one at a time';
+    btn.addEventListener('click', () => action(async () => {
+      const res = await api('/api/cards/accept-all', { method: 'POST' });
+      if (!res || !res.queued || !res.queued.length) {
+        showError(new Error('nothing to accept'));
+      }
+      await refresh();
+    }));
+  }
+  wrap.appendChild(btn);
+  return wrap;
+}
+
 function buildCard(cardData) {
   const card = el('article', 'card card--' + cardData.status);
   card.dataset.cardId = cardData.id;
@@ -1236,7 +1263,8 @@ function renderBoard() {
     // and only rebuild what actually changed.
     const oldNodes = new Map();
     for (const child of Array.from(wrap.children)) {
-      const key = child.dataset && child.dataset.stackId ? 'stack:' + child.dataset.stackId
+      const key = child.dataset && child.dataset.acceptAll ? 'accept-all'
+        : child.dataset && child.dataset.stackId ? 'stack:' + child.dataset.stackId
         : child.dataset && child.dataset.cardId ? 'card:' + child.dataset.cardId : null;
       if (key) oldNodes.set(key, child);
     }
@@ -1260,7 +1288,26 @@ function renderBoard() {
     const cardItems = cards
       .filter((n) => !stackedIds.has(n.id))
       .map((n) => ({ kind: 'card', card: n, ts: parseTs(n.updated_at) || 0 }));
-    const items = stackItems.concat(cardItems).sort((a, b) => b.ts - a.ts);
+    let items = stackItems.concat(cardItems).sort((a, b) => b.ts - a.ts);
+    // Done column: the "Accept all" button sits between the cards in the
+    // running batch (above it) and the ones that finished afterwards (below
+    // it), so a card that lands in Done mid-batch is visibly NOT included.
+    let batchCount = 0, restCount = 0;
+    if (col.key === 'done' && items.length) {
+      const inBatch = (item) => item.kind === 'stack'
+        ? item.stack.ids.some((id) => ((byId.get(id) || {}).session || {}).accept_queued)
+        : !!((item.card.session || {}).accept_queued);
+      const batch = items.filter(inBatch);
+      const rest = items.filter((it) => !inBatch(it));
+      batchCount = batch.length;
+      restCount = rest.length;
+      // No batch running: the button is simply the last thing in the column.
+      // Batch running: it sits under the batch, with the cards that finished
+      // afterwards below it.
+      items = batchCount
+        ? batch.concat([{ kind: 'accept-all', ts: 0 }], rest)
+        : rest.concat([{ kind: 'accept-all', ts: 0 }]);
+    }
     // Place the items in sorted order without needless DOM moves. appendChild
     // on a node that is already in position still removes and re-inserts it,
     // and a re-inserted node restarts its CSS transitions — so re-appending
@@ -1268,6 +1315,26 @@ function renderBoard() {
     // board). Walk a cursor and only touch the DOM when a node is out of place.
     let cursor = wrap.firstElementChild;
     for (const item of items) {
+      if (item.kind === 'accept-all') {
+        const key = 'accept-all';
+        const sig = 'accept-all#' + batchCount + '#' + restCount;
+        const old = oldNodes.get(key);
+        if (old && old._renderSig === sig) {
+          reused.add(key);
+          if (old !== cursor) wrap.insertBefore(old, cursor);
+          cursor = old.nextElementSibling;
+          continue;
+        }
+        if (old) {
+          if (old === cursor) cursor = old.nextElementSibling;
+          old.remove();
+        }
+        const btn = buildAcceptAll(batchCount, restCount);
+        btn._renderSig = sig;
+        if (cursor) wrap.insertBefore(btn, cursor); else wrap.appendChild(btn);
+        cursor = btn.nextElementSibling;
+        continue;
+      }
       const key = item.kind === 'stack' ? 'stack:' + item.stack.id : 'card:' + item.card.id;
       // Everything the item renders from: a change rebuilds the node.
       const sig = item.kind === 'stack'

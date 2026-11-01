@@ -13,7 +13,8 @@ dashboard's HTTP API, so the dashboard stays the single writer):
 - `harness_current_card` — which card this session implements (id, project, …)
 - `harness_list_cards` / `harness_get_card` / `harness_create_card` /
   `harness_update_card` / `harness_delete_card`
-- `harness_run_card` / `harness_stop_card` / `harness_accept_card` / `harness_card_log`
+- `harness_run_card` / `harness_stop_card` / `harness_accept_card` /
+  `harness_accept_all_cards` / `harness_card_log`
 - `harness_add_dependency` / `harness_remove_dependency` / `harness_list_dependencies` —
   link cards so one runs automatically once another is merged (accepted):
   `add_dependency(card_id=<dependent>, depends_on=<dependency>)`. The board draws

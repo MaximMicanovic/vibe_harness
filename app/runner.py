@@ -462,6 +462,11 @@ class SessionRunner:
         self._start_lock = threading.Lock()
         # Serializes live-token journal scans (API handlers may race).
         self._usage_lock = threading.Lock()
+        # "Accept all": one drain thread merges the queued Done cards one at a
+        # time (they all merge in the same main worktree, so they cannot run
+        # concurrently). Guarded by _accept_lock.
+        self._accept_lock = threading.Lock()
+        self._accept_draining = False
 
     # ------------------------------------------------------------------ run
 
@@ -931,6 +936,91 @@ class SessionRunner:
                     "reverted_at": result["reverted_at"]},
         })
         return self.annotate_card(reopened)
+
+    # ------------------------------------------------------------ accept all
+
+    def accept_all(self) -> dict:
+        """Queue every card currently in Done and merge them one at a time.
+
+        The snapshot is taken NOW: a card that reaches Done while the batch is
+        running is not added to it — it renders below the button and the next
+        click picks it up. Merges are serialized because they all happen in the
+        same main worktree, and a conflicted accept hands over to a resolver
+        that the batch waits for before starting the next card.
+        """
+        queued: list[str] = []
+        for card in self.store.list():
+            if card["status"] != "done":
+                continue
+            session = card.get("session") or {}
+            git_info = session.get("git") or {}
+            if session.get("accept_queued") or git_info.get("resolving"):
+                continue          # already in this batch, or a resolver owns it
+            self.store.patch_session(card["id"], {
+                "accept_queued": True, "accept_queued_at": now_iso(),
+                "accept_error": None})
+            queued.append(card["id"])
+        if queued:
+            self._start_accept_drain()
+        return {"queued": queued, "running": self._accept_draining}
+
+    def _start_accept_drain(self) -> None:
+        """Start the batch drain unless one is already running."""
+        with self._accept_lock:
+            if self._accept_draining:
+                return
+            self._accept_draining = True
+        threading.Thread(target=self._drain_accepts, daemon=True).start()
+
+    def _next_accept_queued(self) -> dict | None:
+        """The oldest Done card still marked accept_queued, or None."""
+        queued = [c for c in self.store.list()
+                  if c["status"] == "done"
+                  and (c.get("session") or {}).get("accept_queued")]
+        if not queued:
+            return None
+        queued.sort(key=lambda c: ((c.get("session") or {}).get("accept_queued_at") or "",
+                                   c["id"]))
+        return queued[0]
+
+    def _drain_accepts(self) -> None:
+        """Merge the queued Done cards one at a time (daemon thread)."""
+        try:
+            while True:
+                card = self._next_accept_queued()
+                if card is None:
+                    return
+                card_id = card["id"]
+                try:
+                    self.accept_card(card_id)
+                except Exception as exc:
+                    # Green gate / git problem: leave the card in Done and drop
+                    # it out of the batch so it renders below the button again.
+                    self.store.patch_session(card_id, {
+                        "accept_queued": False, "accept_queued_at": None,
+                        "accept_error": str(exc)})
+                    continue
+                # A conflicted accept hands over to a resolver: wait for it, so
+                # the next merge does not start in the same worktree.
+                self._wait_for_resolve(card_id)
+                self.store.patch_session(card_id, {
+                    "accept_queued": False, "accept_queued_at": None})
+        finally:
+            with self._accept_lock:
+                self._accept_draining = False
+
+    def _wait_for_resolve(self, card_id: str, timeout: float = 3600.0) -> None:
+        """Block until the card's conflict resolver is done (or the timeout)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                card = self.store.get(card_id)
+            except CardNotFound:
+                return
+            git_info = (card.get("session") or {}).get("git") or {}
+            if not git_info.get("resolving"):
+                return
+            time.sleep(1.0)
 
     def _start_resolver(self, card: dict, git_info: dict, reason: str) -> None:
         """Flag the card as resolving and spawn the conflict-resolver session."""
@@ -2004,6 +2094,14 @@ class SessionRunner:
             self._drain_dependents()
         except Exception:
             pass  # never let the dependency drain break startup recovery
+        # An "Accept all" batch was interrupted by the restart: the cards are
+        # still flagged accept_queued, so pick the batch back up.
+        try:
+            if any((c.get("session") or {}).get("accept_queued")
+                   for c in self.store.list()):
+                self._start_accept_drain()
+        except Exception:
+            pass  # never let the accept drain break startup recovery
 
     def log_tail(self, card_id: str, n: int = 200) -> str:
         card = self.store.get(card_id)

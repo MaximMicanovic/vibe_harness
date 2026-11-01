@@ -405,6 +405,13 @@ def create_app(config: Config | None = None,
         # runner. GitError -> 409 (dirty tree, resolver already running, ...).
         return runner.accept_card(card_id)
 
+    @app.post("/api/cards/accept-all")
+    def accept_all_cards():
+        # Snapshot the cards in Done NOW and merge them one at a time in a
+        # background drain. A card that reaches Done later is not part of this
+        # batch — it renders below the button and the next click picks it up.
+        return runner.accept_all()
+
     @app.post("/api/cards/{card_id}/revert")
     def revert_card(card_id: str):
         # Undo an accepted card: revert its merge commit and reopen it as a

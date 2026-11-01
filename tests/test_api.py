@@ -252,6 +252,92 @@ def test_accept_blocked_without_review(env):
     assert "review" in r.json()["detail"]
 
 
+def _make_done(env, title):
+    """A card sitting in Done with an approved review (no session run)."""
+    card = create_card(env.client, title=title, body="x")
+    env.store.set_status(card["id"], "running")
+    env.store.set_status(card["id"], "done",
+                         session_patch={"review": {"approved": True}})
+    return card["id"]
+
+
+def _wait_accepted(env, ids, timeout=10.0):
+    deadline = time.time() + timeout
+    statuses = []
+    while time.time() < deadline:
+        statuses = [env.client.get(f"/api/cards/{i}").json()["status"] for i in ids]
+        if all(s == "accepted" for s in statuses):
+            return statuses
+        time.sleep(0.05)
+    return statuses
+
+
+def test_accept_all_merges_every_done_card(env):
+    """Accept all snapshots the Done column and accepts each card in it."""
+    ids = [_make_done(env, f"Done {i}") for i in range(3)]
+
+    r = env.client.post("/api/cards/accept-all")
+    assert r.status_code == 200
+    assert sorted(r.json()["queued"]) == sorted(ids)
+
+    assert _wait_accepted(env, ids) == ["accepted"] * 3
+
+
+def test_accept_all_is_a_snapshot(env):
+    """A card that reaches Done after the batch started is NOT in it — it is
+    left for the next click (the UI renders it below the button)."""
+    first = _make_done(env, "First")
+    r = env.client.post("/api/cards/accept-all")
+    assert r.json()["queued"] == [first]
+
+    late = _make_done(env, "Late")
+    # The running batch does not pick the late card up.
+    assert env.client.get(f"/api/cards/{late}").json()["session"].get("accept_queued") is None
+    assert _wait_accepted(env, [first]) == ["accepted"]
+
+    # A second click takes the card that arrived meanwhile.
+    r2 = env.client.post("/api/cards/accept-all")
+    assert r2.json()["queued"] == [late]
+    assert _wait_accepted(env, [late]) == ["accepted"]
+
+
+def test_accept_all_skips_cards_already_queued(env):
+    """Clicking twice while a batch runs does not queue the same card twice."""
+    ids = [_make_done(env, f"Queued {i}") for i in range(2)]
+    env.client.post("/api/cards/accept-all")
+    second = env.client.post("/api/cards/accept-all")
+    assert second.status_code == 200
+    assert second.json()["queued"] == []
+    assert _wait_accepted(env, ids) == ["accepted"] * 2
+
+
+def test_accept_all_leaves_a_failing_card_in_done(env):
+    """A card the green gate rejects stays in Done, out of the batch, with the
+    reason recorded — the rest of the batch still goes through."""
+    good = _make_done(env, "Good")
+    bad = _make_done(env, "Bad")
+    # The gate runs the test command in the workspace; make it fail for `bad`
+    # only (both workspaces must exist, or the command fails for both).
+    env.runner.config.test_cmd = "test ! -f FAIL"
+    for cid in (good, bad):
+        (env.sessions_dir / cid / "workspace").mkdir(parents=True, exist_ok=True)
+    (env.sessions_dir / bad / "workspace" / "FAIL").write_text("x")
+
+    r = env.client.post("/api/cards/accept-all")
+    assert sorted(r.json()["queued"]) == sorted([good, bad])
+    assert _wait_accepted(env, [good]) == ["accepted"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        card = env.client.get(f"/api/cards/{bad}").json()
+        if card["session"].get("accept_error"):
+            break
+        time.sleep(0.05)
+    assert card["status"] == "done"
+    assert card["session"]["accept_queued"] is False
+    assert "test" in card["session"]["accept_error"].lower()
+
+
 def test_auto_accept_via_api(env):
     card = create_card(env.client, title="Hands-free", auto_accept=True)
     assert card["auto_accept"] is True

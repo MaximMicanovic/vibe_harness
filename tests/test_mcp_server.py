@@ -163,7 +163,9 @@ def test_tools_list_surface(harness):
     resp = mcp_server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in resp["result"]["tools"]}
     expected = {"current_card", "list_cards", "get_card", "create_card", "update_card",
-                "delete_card", "run_card", "stop_card", "accept_card", "card_log",
+                "delete_card", "run_card", "stop_card", "accept_card",
+                # Merge every card in Done, one at a time (the board's button).
+                "accept_all_cards", "card_log",
                 # Undo an accepted card: revert its merge commit, reopen it.
                 "revert_card",
                 "list_templates", "stats", "list_projects", "ask_user",

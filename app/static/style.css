@@ -1773,3 +1773,38 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
 .keys-text { display: flex; flex-direction: column; }
 .keys-label { font-size: 13px; }
 .keys-hint { font-size: 12px; opacity: 0.75; }
+
+/* ---------------- "Accept all" at the bottom of Done ---------------- */
+
+/* Sits between the cards in the running batch (above) and the ones that
+ * finished afterwards (below), so a card that lands in Done mid-batch is
+ * visibly not part of it. */
+.accept-all {
+  display: flex;
+  padding: 4px 2px 2px;
+}
+
+.accept-all-btn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--ok-ink);
+  background: var(--ok-soft);
+  border: 1px solid var(--ok-border);
+}
+
+.accept-all-btn:hover:not(:disabled) {
+  background: var(--ok-border);
+}
+
+.accept-all-btn:disabled {
+  cursor: default;
+  opacity: 0.65;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-color: var(--border-soft);
+}
