@@ -111,6 +111,17 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   So a chain of linked drafts costs the same tokens as running them by hand, in
   order, with no idle time between them — but do not link cards that should run
   independently, they would serialize.
+- **Concurrency cap: at most N sessions at once.** `VIBE_HARNESS_MAX_CONCURRENT`
+  (default 3, `0` = unlimited) or the sidebar's **Settings** panel
+  (`settings.json`, read per run — no restart). A Run that finds no free slot is
+  *queued*, not failed: the card stays in Draft with
+  `session.queued`/`queue_reason` ("waiting for a free slot (2/3 running)") and
+  `_drain_queued_runs` starts it, FIFO by `session.queued_at`, as soon as a
+  session ends (end of every session, after Stop, after a resolver concludes,
+  and at startup). One card holds one slot at a time — run → review → fixer are
+  sequential — so the cap bounds concurrent sessions, worktrees and test suites,
+  and therefore the peak spend rate. It does not reduce the tokens a single card
+  costs; it stops ten Run clicks from starting ten sessions at once.
 - **Hard guardrails on every session** (passed to `vibe`):
   - `VIBE_HARNESS_MAX_PRICE` → `--max-price <usd>`: absolute per-session cost
     cap; the session is interrupted when exceeded.

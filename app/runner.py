@@ -483,9 +483,24 @@ class SessionRunner:
                 "queue_reason": "waiting for " + ", ".join(unmet) + " to complete",
             })
             return self.store.get(card_id)
+        limit = self._max_concurrent()
+        running = self.running_count()
+        if limit > 0 and running >= limit:
+            # No free session slot: queue the run instead of spawning another
+            # session (and worktree, and test suite). _drain_queued_runs starts
+            # it, oldest queue time first, as soon as a session ends.
+            session = card.get("session") or {}
+            self.store.patch_session(card_id, {
+                "queued": True,
+                # Keep the original queue time: pressing Run again must not
+                # jump the card ahead of the ones queued before it.
+                "queued_at": session.get("queued_at") or now_iso(),
+                "queue_reason": f"waiting for a free slot ({running}/{limit} running)",
+            })
+            return self.store.get(card_id)
         git_patch = self._prepare_git(card)
         workdir = Path(git_patch["worktree"]) if git_patch else None
-        extra_patch: dict = {"queued": False, "waiting_for": None}
+        extra_patch: dict = {"queued": False, "queued_at": None, "waiting_for": None}
         if git_patch:
             extra_patch["git"] = git_patch
         if self.config.mailbox:
@@ -658,19 +673,52 @@ class SessionRunner:
         target = self._finalize_resolver if kind == "resolve" else self._finalize
         threading.Thread(target=target, args=(card_id,), daemon=True).start()
 
+    def _max_concurrent(self) -> int:
+        """Concurrent-session cap in force right now; 0 = unlimited.
+
+        The sidebar setting (settings.json) wins, Config.max_concurrent is the
+        fallback when it is unset. Read per run, so changing the setting takes
+        effect without a restart.
+        """
+        if self.settings is not None:
+            return self.settings.max_concurrent(self.config.max_concurrent)
+        return self.config.max_concurrent
+
+    def running_count(self) -> int:
+        """Live sessions holding a slot — one per card, because run -> review
+        -> fixer are sequential (a card in the review loop holds one slot)."""
+        with self._lock:
+            return len(self._registry)
+
     def _drain_queued_runs(self) -> None:
-        """Start the runs that were queued behind an in-progress merge
-        conflict, for cards whose target repo no longer has a merge in
-        progress. Called when a resolver concludes a merge (and at startup),
-        so queued drafts do not wait for another manual Run click."""
+        """Start queued runs while slots are free, oldest queue time first.
+
+        Two things queue a run: an in-progress merge conflict in the card's
+        repo, and no free session slot (the concurrency cap). FIFO by
+        `queued_at` so no card starves — `store.list()` order is
+        most-recently-updated first, which would let a fresh card jump the
+        queue. The loop stops as soon as the cap is reached. Called at the end
+        of every session, after stop(), after a resolver concludes, and at
+        startup, so queued drafts do not wait for another manual Run click.
+        """
+        queued = []
         for card in self.store.list():
             session = card.get("session") or {}
             if not session.get("queued") or card["status"] in LIVE_STATUSES:
                 continue
+            queued.append(card)
+        # Cards queued before queued_at existed sort first (empty string).
+        queued.sort(key=lambda c: ((c.get("session") or {}).get("queued_at") or "",
+                                   c["id"]))
+        for card in queued:
+            limit = self._max_concurrent()
+            if limit > 0 and self.running_count() >= limit:
+                return  # no free slot: the rest keep waiting, in order
             try:
                 if self._merge_in_progress_for(card):
                     continue  # still waiting for the merge conflict to resolve
                 self.store.patch_session(card["id"], {"queued": False,
+                                                      "queued_at": None,
                                                       "queue_reason": None})
                 self.run(card["id"])
             except Exception:
@@ -730,7 +778,8 @@ class SessionRunner:
                 if self.unmet_dependencies(card):
                     continue  # still waiting for some dependency
                 self.store.patch_session(card["id"], {
-                    "waiting_for": None, "queued": False, "queue_reason": None,
+                    "waiting_for": None, "queued": False, "queued_at": None,
+                    "queue_reason": None,
                 })
                 self.run(card["id"])
             except Exception:
@@ -1554,6 +1603,12 @@ class SessionRunner:
             self.questions.cancel(card_id)
         except Exception:
             pass  # never let question cleanup break the loop
+        # A session slot just freed: start the next queued run (capacity queue
+        # or merge-conflict queue), oldest queue time first.
+        try:
+            self._drain_queued_runs()
+        except Exception:
+            pass  # never let the queue drain break the loop
         # The card may have reached a terminal status (done/failed/stopped):
         # start any drafts that were waiting on it and are now unblocked.
         try:
@@ -1596,7 +1651,13 @@ class SessionRunner:
                 self._signal_session(proc.pid, signal.SIGKILL)
 
         threading.Thread(target=_escalate, daemon=True).start()
-        # _finalize records status "stopped" once the process exits.
+        # _finalize records status "stopped" once the process exits and drains
+        # the queue there; drain here too so a stop that races an exit already
+        # observed still releases the slot for the next queued card.
+        try:
+            self._drain_queued_runs()
+        except Exception:
+            pass  # never let the queue drain break a stop
 
     # ---------------------------------------------------------------- status
 

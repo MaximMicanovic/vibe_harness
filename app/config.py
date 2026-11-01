@@ -53,6 +53,7 @@ class Config:
     mailbox: bool = True                    # per-card MCP mailbox (worker <-> reviewer) via .vibe/config.toml
     review_diff: bool = True                # fresh reviewer only gets git diff since last review + test output
     tdd: bool = True                        # worker prompts (run + fixer rounds) instruct test-driven development
+    max_concurrent: int = 3                 # concurrent agent sessions; 0 = unlimited (sidebar setting overrides)
 
     def __post_init__(self) -> None:
         # Backward compat: accept_cmd is an alias for test_cmd.
@@ -119,4 +120,5 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         mailbox=_env_bool(env, "VIBE_HARNESS_MAILBOX", True),
         review_diff=_env_bool(env, "VIBE_HARNESS_REVIEW_DIFF", True),
         tdd=_env_bool(env, "VIBE_HARNESS_TDD", True),
+        max_concurrent=int(env.get("VIBE_HARNESS_MAX_CONCURRENT", "3")),
     )

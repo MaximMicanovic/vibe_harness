@@ -1,8 +1,10 @@
-"""Harness-wide settings the board can change: which backend runs sessions.
+"""Harness-wide settings the board can change: which backend runs sessions and
+how many sessions may run at once.
 
 Kept apart from `models.json` (per-role model choice) because it is a different
 kind of decision: the backend is *which agent CLI* the harness drives, the model
-is *which model* that CLI uses.
+is *which model* that CLI uses, and the concurrency cap is *how many* of those
+sessions may be live at the same time.
 """
 from __future__ import annotations
 
@@ -15,7 +17,8 @@ from app.backends import BACKENDS, DEFAULT_BACKEND, BackendError
 
 
 class SettingsStore:
-    """`{"backend": "vibe"}` on disk, with the default for anything unset."""
+    """`{"backend": "vibe", "max_concurrent": 3}` on disk, with the default for
+    anything unset."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -51,3 +54,29 @@ class SettingsStore:
             data["backend"] = key
             self._save(data)
         return key
+
+    def max_concurrent(self, default: int = 3) -> int:
+        """Concurrent-session cap; `default` (Config.max_concurrent) when unset.
+
+        0 means unlimited. A corrupt or negative stored value falls back to the
+        default rather than capping the board at something nonsensical.
+        """
+        raw = self._load().get("max_concurrent")
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if value >= 0 else default
+
+    def set_max_concurrent(self, value: int) -> int:
+        """Persist the cap (0 = unlimited). Raises ValueError when negative."""
+        value = int(value)
+        if value < 0:
+            raise ValueError("max_concurrent must be >= 0 (0 = unlimited)")
+        with self._lock:
+            data = self._load()
+            data["max_concurrent"] = value
+            self._save(data)
+        return value

@@ -127,6 +127,8 @@ class StackCardsIn(BaseModel):
 
 class SettingsIn(BaseModel):
     backend: str | None = None
+    # Concurrent-session cap; 0 = unlimited. None = leave it unchanged.
+    max_concurrent: int | None = Field(default=None, ge=0)
 
 
 class ModelsIn(BaseModel):
@@ -522,18 +524,30 @@ def create_app(config: Config | None = None,
         # Restore an archived card to the board, whichever archive holds it.
         return archives.restore_card(card_id)
 
-    # --- settings (which agent CLI the harness drives) -----------------------
+    # --- settings (which agent CLI the harness drives, concurrency cap) ------
+    def _settings_payload() -> dict:
+        """Everything the sidebar's Settings panel needs in one round trip.
+
+        `max_concurrent` is the effective cap (the stored setting, else
+        Config.max_concurrent; 0 = unlimited) and `running` is the current
+        occupancy, so the panel can say "2 of 3 running".
+        """
+        return {"backend": settings.backend(),
+                "backends": describe_backends(config),
+                "max_concurrent": settings.max_concurrent(config.max_concurrent),
+                "running": runner.running_count()}
+
     @app.get("/api/settings")
     def get_settings():
-        return {"backend": settings.backend(),
-                "backends": describe_backends(config)}
+        return _settings_payload()
 
     @app.put("/api/settings")
     def put_settings(payload: SettingsIn):
         if payload.backend is not None:
             settings.set_backend(payload.backend)
-        return {"backend": settings.backend(),
-                "backends": describe_backends(config)}
+        if payload.max_concurrent is not None:
+            settings.set_max_concurrent(payload.max_concurrent)
+        return _settings_payload()
 
     # --- models (per-role) ---------------------------------------------------
     # Which model each kind of session runs on: the worker (run-N), the
