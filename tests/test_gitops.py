@@ -383,3 +383,130 @@ def test_ensure_card_worktree_without_branch_returns_none(repo, tmp_path):
     bad = {"repo": str(tmp_path / "not-a-repo"), "branch": "harness/x",
            "base_branch": "main", "worktree": str(wt.resolve())}
     assert gitops.ensure_card_worktree(bad) is None
+
+
+# --------------------------------------------------------------------- revert
+# Undoing an accepted card: `git revert` of the card's merge commit. The
+# revert must be all-or-nothing — a conflict aborts and leaves the repo
+# exactly as it was (no conflicted revert left behind, no resolver spawned).
+
+
+def _accepted_card(repo: Path, tmp_path: Path, name: str = "abc123",
+                   path: str = "hello.py", content: str = "print('hi')\n") -> dict:
+    """Run one card end to end: branch in a linked worktree, commit, --no-ff
+    merge into the base. Returns the merge result (merge_commit, ...)."""
+    wt = _wt(tmp_path, name)
+    info = gitops.prepare_card_branch(repo, f"harness/{name}", wt)
+    (wt / path).write_text(content)
+    gitops.commit_workspace(wt, "vibe-harness: test")
+    return gitops.merge_card_branch(info)
+
+
+def test_revert_merge_commit_undoes_the_card(repo, tmp_path):
+    """Reverting the card's merge commit removes the change from the working
+    tree and records the revert commit."""
+    merged = _accepted_card(repo, tmp_path)
+    assert (repo / "hello.py").exists()
+    result = gitops.revert_merge_commit(repo, merged["merge_commit"])
+    # The change is gone from the working tree and from the branch tip.
+    assert not (repo / "hello.py").exists()
+    assert "hello.py" not in git(["ls-tree", "--name-only", "main"], repo)
+    # A new commit records the revert; the tree is clean afterwards.
+    assert result["revert_commit"] == git(["rev-parse", "HEAD"], repo)
+    assert result["revert_commit"] != merged["merge_commit"]
+    assert result["reverted_commit"] == merged["merge_commit"]
+    assert result["reverted_at"]
+    assert not gitops.is_dirty(repo)
+    assert not gitops.revert_in_progress(repo)
+    assert not gitops.merge_in_progress(repo)
+
+
+def test_revert_plain_commit_uses_no_m1(repo):
+    """A non-merge commit (a card accepted before --no-ff, or a hand-made
+    commit) is reverted without `-m 1` — `-m` on a non-merge commit fails."""
+    (repo / "plain.txt").write_text("x\n")
+    git(["add", "-A"], repo)
+    git(["commit", "-q", "-m", "plain change"], repo)
+    sha = git(["rev-parse", "HEAD"], repo)
+    assert not gitops.is_merge_commit(repo, sha)
+    result = gitops.revert_merge_commit(repo, sha)
+    assert not (repo / "plain.txt").exists()
+    assert result["revert_commit"] == git(["rev-parse", "HEAD"], repo)
+    assert not gitops.is_dirty(repo)
+
+
+def test_revert_refuses_dirty_tree(repo, tmp_path):
+    """Uncommitted changes block the revert: git would refuse anyway, but the
+    error must be ours (clear, 409) and nothing may be touched."""
+    merged = _accepted_card(repo, tmp_path)
+    (repo / "wip.txt").write_text("x\n")
+    with pytest.raises(GitError) as exc:
+        gitops.revert_merge_commit(repo, merged["merge_commit"])
+    assert "uncommitted" in str(exc.value)
+    assert (repo / "hello.py").exists()          # nothing reverted
+    assert (repo / "wip.txt").exists()           # the user's work is untouched
+
+
+def test_revert_refuses_merge_in_progress(repo, tmp_path):
+    """A merge already in progress (e.g. a conflicted accept awaiting its
+    resolver) blocks the revert."""
+    merged = _accepted_card(repo, tmp_path)
+    # Start a conflicting merge in the main worktree.
+    git(["checkout", "-q", "-b", "other"], repo)
+    (repo / "hello.py").write_text("other\n")
+    git(["commit", "-q", "-am", "other"], repo)
+    git(["checkout", "-q", "main"], repo)
+    (repo / "hello.py").write_text("main\n")
+    git(["commit", "-q", "-am", "main"], repo)
+    subprocess.run(["git", "merge", "other"], cwd=repo, capture_output=True)
+    assert gitops.merge_in_progress(repo)
+    with pytest.raises(GitError) as exc:
+        gitops.revert_merge_commit(repo, merged["merge_commit"])
+    assert "merge" in str(exc.value).lower()
+    # The in-progress merge is left alone (it belongs to the resolver).
+    assert gitops.merge_in_progress(repo)
+
+
+def test_revert_refuses_revert_in_progress(repo, tmp_path):
+    """A revert already in progress blocks a second one."""
+    merged = _accepted_card(repo, tmp_path)
+    (repo / ".git" / "REVERT_HEAD").write_text(merged["merge_commit"] + "\n")
+    with pytest.raises(GitError) as exc:
+        gitops.revert_merge_commit(repo, merged["merge_commit"])
+    assert "revert" in str(exc.value).lower()
+    assert (repo / "hello.py").exists()
+
+
+def test_revert_conflict_aborts_and_leaves_repo_untouched(repo, tmp_path):
+    """A conflicting revert aborts cleanly: the conflicting paths are reported,
+    no conflicted revert is left in place, and the repo is exactly as before."""
+    merged = _accepted_card(repo, tmp_path, path="README.md",
+                            content="card change\n")
+    # The user edits the same file on the base branch after the accept.
+    (repo / "README.md").write_text("later user change\n")
+    git(["commit", "-q", "-am", "later edit"], repo)
+    before = git(["rev-parse", "HEAD"], repo)
+    with pytest.raises(gitops.RevertConflict) as exc:
+        gitops.revert_merge_commit(repo, merged["merge_commit"])
+    assert exc.value.paths == ["README.md"]
+    assert "README.md" in str(exc.value)
+    # Aborted: no revert in progress, clean tree, HEAD unchanged, content kept.
+    assert not gitops.revert_in_progress(repo)
+    assert not gitops.is_dirty(repo)
+    assert git(["rev-parse", "HEAD"], repo) == before
+    assert (repo / "README.md").read_text() == "later user change\n"
+
+
+def test_revert_twice_is_refused_and_leaves_repo_clean(repo, tmp_path):
+    """Reverting the same merge commit twice is refused with a clear reason
+    (the change is already undone) and leaves no stuck revert behind."""
+    merged = _accepted_card(repo, tmp_path)
+    gitops.revert_merge_commit(repo, merged["merge_commit"])
+    head = git(["rev-parse", "HEAD"], repo)
+    with pytest.raises(gitops.RevertConflict) as exc:
+        gitops.revert_merge_commit(repo, merged["merge_commit"])
+    assert exc.value.paths == []
+    assert "already undone" in str(exc.value)
+    assert not gitops.revert_in_progress(repo)
+    assert not gitops.is_dirty(repo)
+    assert git(["rev-parse", "HEAD"], repo) == head

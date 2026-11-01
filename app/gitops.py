@@ -27,6 +27,10 @@ in the same repository can run concurrently:
    ``GitMergeConflict`` and the conflicted merge is LEFT IN PLACE in the main
    worktree (no abort) so the runner can spawn a resolver session there; the
    card branch AND the linked worktree are kept.
+5. ``revert_merge_commit`` — undo an accepted card: ``git revert`` its merge
+   commit in the MAIN worktree. All-or-nothing: a conflict ABORTS the revert
+   (nothing is left in place, no resolver is spawned) and raises
+   ``RevertConflict`` with the conflicting paths.
 
 Sandbox runs (``sessions/<id>/workspace``) do not use git: there is no project
 repository to branch from or merge into.
@@ -70,6 +74,16 @@ class GitMergeConflict(GitError):
     """Merging the card branch into its base branch conflicted. The conflicted
     merge is LEFT IN PLACE (MERGE_HEAD set) for a resolver session — or manual
     resolution."""
+
+
+class RevertConflict(GitError):
+    """Reverting the card's merge commit conflicted. Unlike a merge conflict,
+    the revert is ABORTED: nothing is left in place and no resolver is
+    spawned. ``paths`` lists the files that conflicted."""
+
+    def __init__(self, message: str, paths: list[str] | None = None):
+        super().__init__(message)
+        self.paths = list(paths or [])
 
 
 def git_available() -> bool:
@@ -238,6 +252,77 @@ def merge_in_progress(root: Path) -> bool:
     merge left in place for a resolver session."""
     return run_git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], root,
                    check=False).returncode == 0
+
+
+def revert_in_progress(root: Path) -> bool:
+    """True when a revert is in progress (REVERT_HEAD exists)."""
+    return run_git(["rev-parse", "-q", "--verify", "REVERT_HEAD"], root,
+                   check=False).returncode == 0
+
+
+def is_merge_commit(root: Path, sha: str) -> bool:
+    """True when `sha` is a merge commit (it has more than one parent).
+
+    Raises GitError when the commit cannot be read (unknown sha, not a repo).
+    """
+    proc = run_git(["rev-list", "--parents", "-n", "1", sha], root, check=False)
+    if proc.returncode != 0:
+        raise GitError(
+            f"cannot read commit {sha!r} in {root}: "
+            f"{(proc.stderr or proc.stdout).strip()}")
+    return len(proc.stdout.split()) > 2
+
+
+def _conflicted_paths(root: Path) -> list[str]:
+    """Paths left unmerged by a failed revert (empty when it failed for
+    another reason, e.g. the revert would be empty)."""
+    proc = run_git(["diff", "--name-only", "--diff-filter=U"], root, check=False)
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def revert_merge_commit(root: Path, sha: str) -> dict:
+    """Undo an accepted card: ``git revert`` its merge commit in the MAIN
+    worktree (the repo root, where the base branch is checked out) and return
+    ``{revert_commit, reverted_commit, reverted_at}``.
+
+    A merge commit is reverted with ``-m 1`` (the base branch side is the
+    mainline); any other commit is reverted plainly — ``-m`` on a non-merge
+    commit is an error.
+
+    All-or-nothing: a conflict ABORTS the revert and raises ``RevertConflict``
+    carrying the conflicting paths, so the repository is left exactly as it
+    was. No resolver session is spawned for a revert — unlike an accept-time
+    merge conflict, there is nothing here the user asked to keep.
+    """
+    root = Path(root)
+    if merge_in_progress(root):
+        raise GitError(
+            f"a merge is in progress in {root} — resolve it before reverting a card")
+    if revert_in_progress(root):
+        raise GitError(
+            f"a revert is already in progress in {root} — finish or abort it first")
+    if is_dirty(root):
+        raise GitError(f"{root} has uncommitted changes — commit or stash them first")
+    args = ["revert", "--no-edit"]
+    if is_merge_commit(root, sha):
+        args += ["-m", "1"]
+    proc = run_git([*args, sha], root, check=False)
+    if proc.returncode != 0:
+        paths = _conflicted_paths(root)
+        run_git(["revert", "--abort"], root, check=False)
+        if paths:
+            raise RevertConflict(
+                f"reverting {sha} conflicted in {', '.join(paths)} — the revert "
+                f"was aborted and the repository left untouched", paths)
+        # No conflicted paths: the revert did not apply at all (most often the
+        # change is already undone, so the revert would be empty).
+        raise RevertConflict(
+            f"reverting {sha} did not apply — the change is already undone (or "
+            f"the commit is empty); the revert was aborted and the repository "
+            f"left untouched", [])
+    head = run_git(["rev-parse", "HEAD"], root).stdout.strip()
+    return {"revert_commit": head, "reverted_commit": sha,
+            "reverted_at": datetime.now(timezone.utc).isoformat()}
 
 
 def delete_card_branch(git_info: dict) -> None:

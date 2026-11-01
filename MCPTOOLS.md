@@ -60,6 +60,7 @@ measure of whether decomposing actually pays.
 | `run_card` | Run a card now — spawns a headless vibe session. 409 while already running. | `card_id` |
 | `stop_card` | Stop the live session (SIGTERM, escalating to SIGKILL). | `card_id` |
 | `accept_card` | Accept a done card: test gate, then merge its branch into the base branch when git-backed. Needs an approved review (or an exhausted review loop). | `card_id` |
+| `revert_card` | Undo an accepted card: `git revert` the merge commit its accept recorded, then reopen the card as a draft (session history kept). 409 when the card has no recorded merge commit, when the repo is dirty or mid-merge/revert, and on a conflicting revert — which is aborted, leaving the repo untouched. | `card_id` |
 
 ### Dependencies (pipeline order)
 
@@ -178,7 +179,8 @@ was allowed, read `config.enabled_tools` in its `export.json`
   user-side action only; `create_card`/`update_card` reject `project` and
   `workdir` outright.
 - **409s are normal answers**, not crashes: `delete_card`/`run_card` while
-  running, `accept_card` without an approved review, `archive_card` on a
+  running, `accept_card` without an approved review, `revert_card` on a card
+  with no recorded merge commit (or a conflicting revert), `archive_card` on a
   non-accepted card, `add_dependency` on a cycle or a live session.
 - **`ask_user` blocks the session.** A timeout is not an error — decide and
   record the choice in `NOTES.md`.

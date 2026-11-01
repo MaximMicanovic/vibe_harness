@@ -1491,3 +1491,145 @@ def test_keys_panel_lists_every_keybinding(env):
     keys_block = js.split("const KEYBINDINGS = [")[1].split("];")[0]
     assert "'N'" in keys_block and "'Esc'" in keys_block and "'D'" in keys_block
     assert "renderKeysPanel" in js
+
+
+# --------------------------------------------------------------------- revert
+# Undo an accepted card: revert its merge commit and reopen it as a draft.
+
+@git_test
+def test_revert_accepted_card_undoes_the_merge(tmp_path):
+    """Accept a card, revert it: the working tree no longer contains the
+    change, the card is draft again, and the revert is recorded on the
+    session (which keeps the cost record of the accepted run)."""
+    with _git_card(tmp_path) as (e, card, git_info):
+        proj = Path(git_info["repo"])
+        r = e.client.post(f"/api/cards/{card['id']}/accept")
+        assert r.status_code == 200, r.text
+        merge_commit = r.json()["session"]["git"]["merge_commit"]
+        assert (proj / "hello.py").exists()
+        tokens = r.json()["session"]["tokens"]
+
+        r = e.client.post(f"/api/cards/{card['id']}/revert")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "draft"
+        assert body["accepted"] is False
+        session = body["session"]
+        assert session["revert_commit"] == _git(["rev-parse", "HEAD"], proj)
+        assert session["revert_commit"] != merge_commit
+        assert session["reverted_at"]
+        # The change is gone from the working tree and from the base branch.
+        assert not (proj / "hello.py").exists()
+        assert "hello.py" not in _git(["ls-tree", "--name-only",
+                                       git_info["base_branch"]], proj)
+        # The cost record of the accepted run survives the reopen.
+        assert session["tokens"] == tokens
+        assert session["review"]["approved"] is True
+        assert session["git"]["merge_commit"] == merge_commit
+        # The repo is clean and no revert is left in progress.
+        assert not gitops.is_dirty(proj)
+        assert not gitops.revert_in_progress(proj)
+
+
+@git_test
+def test_revert_without_merge_commit_returns_409(tmp_path):
+    """A card accepted before merge commits were recorded has nothing to
+    revert: a clear 409, and the card stays accepted."""
+    e = make_env(tmp_path)
+    with e.client:
+        card = create_card(e.client, title="Old", body="x")
+        e.store.set_status(card["id"], "running")
+        e.store.set_status(card["id"], "done",
+                           session_patch={"review": {"approved": True}})
+        e.store.accept(card["id"])
+        r = e.client.post(f"/api/cards/{card['id']}/revert")
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert "merge commit" in detail
+        assert e.store.get(card["id"])["status"] == "accepted"
+
+
+@git_test
+def test_revert_conflict_aborts_and_returns_409(tmp_path):
+    """A conflicting revert aborts cleanly: 409 naming the conflicting paths,
+    the repo untouched (clean, HEAD unchanged, no revert in progress) and the
+    card still accepted."""
+    with _git_card(tmp_path) as (e, card, git_info):
+        proj = Path(git_info["repo"])
+        r = e.client.post(f"/api/cards/{card['id']}/accept")
+        assert r.status_code == 200, r.text
+        # The user edits the same file on the base branch after the accept.
+        (proj / "hello.py").write_text("print('user edit')\n")
+        _git(["commit", "-q", "-am", "user edit"], proj)
+        before = _git(["rev-parse", "HEAD"], proj)
+
+        r = e.client.post(f"/api/cards/{card['id']}/revert")
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert "hello.py" in detail
+        assert "aborted" in detail
+        # Untouched: same HEAD, clean tree, no revert in progress.
+        assert _git(["rev-parse", "HEAD"], proj) == before
+        assert not gitops.is_dirty(proj)
+        assert not gitops.revert_in_progress(proj)
+        assert (proj / "hello.py").read_text() == "print('user edit')\n"
+        assert e.store.get(card["id"])["status"] == "accepted"
+
+
+def test_revert_requires_an_accepted_card(env):
+    """Only an accepted card can be reverted (409 for a draft)."""
+    card = create_card(env.client, title="Draft", body="x")
+    r = env.client.post(f"/api/cards/{card['id']}/revert")
+    assert r.status_code == 409, r.text
+    assert "accepted" in r.json()["detail"]
+    assert env.store.get(card["id"])["status"] == "draft"
+
+
+def test_revert_unknown_card_404(env):
+    assert env.client.post("/api/cards/deadbe/revert").status_code == 404
+
+
+@git_test
+def test_revert_archived_card_restores_it_to_the_board(tmp_path):
+    """An archived accepted card comes back to the board first (the existing
+    restore path), then the revert reopens it as a draft."""
+    archives = ArchiveStore(tmp_path / "archives", CardStore(tmp_path / "cards"))
+    with _git_card(tmp_path, archives=archives) as (e, card, git_info):
+        proj = Path(git_info["repo"])
+        assert e.client.post(f"/api/cards/{card['id']}/accept").status_code == 200
+        a = e.client.post("/api/archives",
+                          json={"name": "done", "type": "cards"}).json()
+        r = e.client.post(f"/api/archives/{a['id']}/cards/{card['id']}")
+        assert r.status_code == 200, r.text
+        assert e.client.get(f"/api/cards/{card['id']}").status_code == 404
+
+        r = e.client.post(f"/api/cards/{card['id']}/revert")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "draft"
+        assert body["archived"] is False
+        assert body["session"]["revert_commit"]
+        assert not (proj / "hello.py").exists()
+        # It is back on the board.
+        assert e.client.get(f"/api/cards/{card['id']}").status_code == 200
+
+
+def test_revert_action_wired(env):
+    """An accepted card offers a Revert action behind a confirm dialog that
+    names the merge commit being reverted; a reverted card shows a note."""
+    html = env.client.get("/").text
+    assert 'id="btn-revert"' in html
+    assert 'id="revert-note"' in html
+
+    js = env.client.get("/app.js").text
+    # Offered on accepted cards only (the API refuses anything else).
+    assert "btnRevert.hidden = card.status !== 'accepted'" in js
+    # The confirm dialog names the merge commit being reverted.
+    assert "merge commit" in js
+    assert "window.confirm(" in js
+    # The action posts to the revert endpoint.
+    assert "'/revert'" in js
+    # A reverted card carries a note (chip + editor note) with the revert.
+    assert "s.reverted_at" in js
+    assert "chip('reverted'" in js
+    assert "revertNote" in js

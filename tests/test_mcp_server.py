@@ -164,6 +164,8 @@ def test_tools_list_surface(harness):
     tools = {t["name"]: t for t in resp["result"]["tools"]}
     expected = {"current_card", "list_cards", "get_card", "create_card", "update_card",
                 "delete_card", "run_card", "stop_card", "accept_card", "card_log",
+                # Undo an accepted card: revert its merge commit, reopen it.
+                "revert_card",
                 "list_templates", "stats", "list_projects", "ask_user",
                 "add_dependency", "remove_dependency", "list_dependencies",
                 "create_archive", "list_archives", "get_archive",
@@ -750,3 +752,27 @@ def test_archive_stack_via_mcp(harness):
     assert call(harness, "list_cards")["payload"] == []
     assert call(harness, "list_stacks")["payload"] == []
     assert call(harness, "archive_stack", stack_id="st-nope")["isError"] is True
+
+
+def test_revert_card_via_mcp(harness):
+    """`revert_card` is the MCP face of POST /api/cards/<id>/revert: it reopens
+    an accepted card as a draft, and a card with no recorded merge commit
+    comes back as a clear error (409), not a crash."""
+    res = call(harness, "create_card", title="Undo me", body="x")
+    card = res["payload"]
+    # Accept it without a merge commit (a card accepted before merge commits
+    # were recorded): the revert must refuse with the API's 409 detail.
+    harness.store.set_status(card["id"], "running")
+    harness.store.set_status(card["id"], "done",
+                             session_patch={"review": {"approved": True}})
+    harness.store.accept(card["id"])
+    err = call(harness, "revert_card", card_id=card["id"])
+    assert err["isError"] is True
+    assert "409" in err["payload"] and "merge commit" in err["payload"]
+    assert harness.store.get(card["id"])["status"] == "accepted"
+
+    # With a merge commit on record the revert goes through and reopens it.
+    harness.store.patch_session(card["id"], {"git": {"repo": str(harness.tmp_path)}})
+    err = call(harness, "revert_card", card_id=card["id"])
+    assert err["isError"] is True          # not a repo -> still a clear 409
+    assert "409" in err["payload"]
