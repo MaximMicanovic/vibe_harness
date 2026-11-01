@@ -312,3 +312,50 @@ Two caveats for `claude`:
   figure, not money charged, so the board's cost column overstates what you
   actually paid.
 
+## Finding a card: search
+
+The top bar has a search box. It answers one question — *where is that card?* —
+across the board and every archive, and it is deliberately two mechanisms:
+
+- **The board is filtered in the browser.** `GET /api/cards` already returns
+  every card *including its body*, so `state.cards` is the whole board. Typing
+  filters it on title, body and id, case-insensitive, as you type — no request,
+  no backend. Matching cards stay in their columns, the rest are hidden, and a
+  `N of M cards` hint next to the box says how much is hidden. The project
+  filter and the search compose: both apply.
+- **The archives are searched on the server.** Archives load per folder
+  (`GET /api/archives/{id}`), so the browser does not hold them. `GET
+  /api/search?q=<text>` scans the board's cards and every archived card
+  linearly (`app/search.py` — no index, no dependencies) and answers
+
+  ```json
+  [{"id": "…", "title": "…", "status": "accepted",
+    "where": "Vibe Harness / Old work",
+    "snippet": {"text": "…the matching line…", "start": 12, "end": 18}}]
+  ```
+
+  `where` is `"board"` or the archive's location (`<project> / <name>`, or just
+  the name when the archive is unfiled). `snippet` is the matching body line
+  trimmed to ~120 chars around the match, with the match's offsets so the UI
+  highlights it without searching again; a card that matched only on its title
+  or id gets its title as the snippet. Matching is case-insensitive over title,
+  body and id. Unreadable card files are skipped, never fatal.
+
+  The list is capped at 50 results. The response stays a plain list, so the cap
+  is reported in headers: `X-Search-Truncated: true|false` and
+  `X-Search-Total: <uncapped count>`. The results panel says "Showing the first
+  50 of N matches" when it was cut short.
+
+The results list under the input groups hits by location — **Board** first,
+then each archive — and every row shows the card's title, status and the
+highlighted snippet. Clicking a board hit opens that card's panel; clicking an
+archived hit opens the archive browser on the folder holding it and highlights
+the card. A query that matches nothing says so explicitly rather than showing a
+blank panel.
+
+Keyboard: `/` focuses the box, `Esc` clears it. `Esc` clears the search *before*
+it closes an overlay — a live query means "show me the board again", not "close
+whatever happens to be open".
+
+Search costs no LLM tokens: it is a linear scan over markdown files plus a
+client-side filter, and it never spawns a session.

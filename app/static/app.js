@@ -17,8 +17,9 @@ const COLUMNS = [
  * drift from the handlers. */
 const KEYBINDINGS = [
   { key: 'N', label: 'New card', hint: 'opens the card editor' },
-  { key: 'Esc', label: 'Close overlay', hint: 'closes the open panel or modal' },
+  { key: 'Esc', label: 'Close overlay', hint: 'clears a live search first, else closes the open panel or modal' },
   { key: 'D', label: 'Diff', hint: 'hover a card and press D to see what it changed' },
+  { key: '/', label: 'Search', hint: 'focuses the search box — it searches the board and the archives' },
 ];
 
 const state = {
@@ -54,13 +55,21 @@ const state = {
   diffRange: 'card',     // 'card' | 'round' | 'worktree'
   prevStatuses: null,    // Map cardId -> status from the previous refresh (null = first load)
   notificationsEnabled: true,  // sidebar Settings toggle, persisted in localStorage
+  chatMode: false,             // sidebar Chat toggle: a card click opens its chat
   unreadNotifications: 0,      // finishes announced while the tab was hidden (title badge)
+  searchQuery: '',       // the live query in the top bar ('' = no search)
+  searchResults: [],     // GET /api/search hits: board cards + archived cards
+  searchTotal: 0,        // uncapped match count the server reported
+  searchTruncated: false,// the server capped the list (see X-Search-Truncated)
+  searchPending: false,  // a server search is in flight (the list shows "Searching…")
+  searchTimer: null,     // debounce timer for the server-side archive search
 };
 
 /* ---------------- DOM refs ---------------- */
 
 const $ = (id) => document.getElementById(id);
 const emptyBoard = $('empty-board');
+// The board's "nothing here" message, restored whenever a search is cleared.
 const EMPTY_BOARD_TEXT = emptyBoard.textContent;
 const errorBanner = $('error-banner');
 const errorText = $('error-text');
@@ -113,6 +122,16 @@ function loadAutoAcceptDefault() {
 }
 function saveAutoAcceptDefault(on) {
   try { localStorage.setItem(AUTO_ACCEPT_KEY, on ? '1' : '0'); } catch (_) { /* private mode */ }
+}
+
+/* Chat mode: while it is on, clicking a card opens its session chat instead of
+ * the editor. A reading mode, so it is remembered per browser. */
+const CHAT_MODE_KEY = 'vibe-harness:chat-mode';
+function loadChatMode() {
+  try { return localStorage.getItem(CHAT_MODE_KEY) === '1'; } catch (_) { return false; }
+}
+function saveChatMode(on) {
+  try { localStorage.setItem(CHAT_MODE_KEY, on ? '1' : '0'); } catch (_) { /* private mode */ }
 }
 
 /* The last used project, remembered per browser: updated whenever a card is
@@ -768,7 +787,12 @@ function buildCard(cardData, queuePos) {
   }
   if (chips.childNodes.length > 0) card.appendChild(chips);
 
-  card.addEventListener('click', () => { openEditor(cardData.id).catch(showError); });
+  card.addEventListener('click', () => {
+    // Chat mode turns the board into a reading surface: a click opens what the
+    // model said instead of the editor.
+    if (state.chatMode) openLog(cardData.id, true);
+    else openEditor(cardData.id).catch(showError);
+  });
 
   // Drag a DRAFT card onto another card to link them: the dragged draft runs
   // automatically once the card it is dropped on is merged (accepted).
@@ -1327,8 +1351,243 @@ function layoutStack(stackEl) {
   if (stackEl.style.getPropertyValue('--fan-pad-x') !== padXV) stackEl.style.setProperty('--fan-pad-x', padXV);
 }
 
-/* Cards visible under the current top-bar project filter ('' = all projects). */
-function visibleCards() {
+/* ---------------- Search: the board and the archives ---------------- */
+
+/* The board's cards are already in the browser (GET /api/cards carries every
+ * body), so filtering the board is a plain scan of state.cards — no backend.
+ * Archives load per folder, so finding an archived card by text asks the
+ * server (GET /api/search); the results list under the input shows both,
+ * grouped by where each card lives. */
+
+const searchInput = $('search-input');
+const searchHint = $('search-hint');
+const searchResultsEl = $('search-results');
+
+// A query typed quickly must not fire one request per keystroke.
+const SEARCH_DEBOUNCE_MS = 150;
+
+function searchNeedle() {
+  return (state.searchQuery || '').trim().toLowerCase();
+}
+
+/* Does a card match the query? Title, body and id, case-insensitive — the same
+ * fields the server searches in the archives. */
+function cardMatchesQuery(card, needle) {
+  if (!needle) return true;
+  return (card.title || '').toLowerCase().indexOf(needle) !== -1
+    || (card.body || '').toLowerCase().indexOf(needle) !== -1
+    || (card.id || '').toLowerCase().indexOf(needle) !== -1;
+}
+
+/* "N of M cards" while a query is active: N match, M are on the board under
+ * the project filter. */
+function renderSearchHint() {
+  const needle = searchNeedle();
+  if (!needle) {
+    searchHint.hidden = true;
+    searchHint.textContent = '';
+    return;
+  }
+  const shown = visibleCards().length;
+  const total = projectCards().length;
+  searchHint.hidden = false;
+  searchHint.textContent = shown + ' of ' + total + (total === 1 ? ' card' : ' cards');
+}
+
+/* The server's hits grouped by location: Board first, then each archive in the
+ * order the server listed them. */
+function groupSearchResults(results) {
+  const groups = [];
+  const byWhere = new Map();
+  for (const hit of results) {
+    let group = byWhere.get(hit.where);
+    if (!group) {
+      group = { where: hit.where, hits: [] };
+      byWhere.set(hit.where, group);
+      groups.push(group);
+    }
+    group.hits.push(hit);
+  }
+  return groups.sort((a, b) => (b.where === 'board' ? 1 : 0) - (a.where === 'board' ? 1 : 0));
+}
+
+/* A snippet with the match highlighted: the server sends the text plus the
+ * match's offsets, so nothing is searched twice. */
+function buildSearchSnippet(snippet) {
+  const p = el('p', 'search-snippet');
+  const text = (snippet && snippet.text) || '';
+  const start = snippet ? snippet.start : 0;
+  const end = snippet ? snippet.end : 0;
+  if (end > start) {
+    p.appendChild(document.createTextNode(text.slice(0, start)));
+    p.appendChild(el('mark', 'search-hit', text.slice(start, end)));
+    p.appendChild(document.createTextNode(text.slice(end)));
+  } else {
+    p.textContent = text;
+  }
+  return p;
+}
+
+function renderSearchResults() {
+  const needle = searchNeedle();
+  searchResultsEl.textContent = '';
+  if (!needle) {
+    searchResultsEl.hidden = true;
+    return;
+  }
+  searchResultsEl.hidden = false;
+  if (state.searchPending) {
+    searchResultsEl.appendChild(el('p', 'search-pending', 'Searching…'));
+    return;
+  }
+  const groups = groupSearchResults(state.searchResults);
+  if (!groups.length) {
+    // An explicit empty state: a blank panel reads as "still loading".
+    searchResultsEl.appendChild(el('p', 'search-empty',
+      'No cards match “' + state.searchQuery.trim() + '” — not on the board, not in the archives.'));
+    return;
+  }
+  for (const group of groups) {
+    const box = el('div', 'search-group');
+    box.appendChild(el('h4', 'search-group-head', group.where === 'board' ? 'Board' : group.where));
+    for (const hit of group.hits) {
+      const row = el('button', 'search-result');
+      row.type = 'button';
+      row.dataset.cardId = hit.id;
+      row.dataset.where = hit.where;
+      row.title = hit.where === 'board'
+        ? 'Open this card'
+        : 'Open the archive folder holding this card';
+      const head = el('span', 'search-result-head');
+      head.appendChild(el('span', 'search-result-title', hit.title || hit.id));
+      if (hit.status) head.appendChild(chip('status-' + hit.status, hit.status));
+      row.appendChild(head);
+      row.appendChild(buildSearchSnippet(hit.snippet));
+      row.addEventListener('click', () => openSearchResult(hit));
+      box.appendChild(row);
+    }
+    searchResultsEl.appendChild(box);
+  }
+  if (state.searchTruncated) {
+    searchResultsEl.appendChild(el('p', 'search-capped',
+      'Showing the first ' + state.searchResults.length + ' of ' + state.searchTotal
+      + ' matches — narrow the query to see the rest.'));
+  }
+}
+
+/* How the board names an archive's location — mirrors app/search.py. */
+function archiveWhere(a) {
+  const project = (a.project || '').trim();
+  const name = (a.name || '').trim();
+  return project ? project + ' / ' + name : name;
+}
+
+/* A board hit opens the card's panel; an archived hit opens the archive folder
+ * that holds it and highlights the card. */
+function openSearchResult(hit) {
+  if (hit.where === 'board') {
+    openEditor(hit.id).catch(showError);
+    return;
+  }
+  openArchivedResult(hit).catch(showError);
+}
+
+async function openArchivedResult(hit) {
+  // The archive list is only loaded when a panel needs it; a search result can
+  // be the first thing that needs it.
+  if (!state.archives.length) await loadArchives(false);
+  const archive = state.archives.find((a) => archiveWhere(a) === hit.where);
+  if (!archive) throw new Error('no archive named ' + hit.where);
+  // Unfold the tree down to the card: project header, then archive folder.
+  state.sidebarProjectOpen.add(archive.project || '');
+  state.sidebarArchiveOpen.add(archive.id);
+  if (!state.archiveProjects.has(archive.id)) {
+    const full = await api('/api/archives/' + encodeURIComponent(archive.id));
+    state.archiveProjects.set(archive.id, full.projects || []);
+  }
+  await openSidebarPanel('archive', true);
+  highlightArchivedCard(hit.id);
+}
+
+function highlightArchivedCard(cardId) {
+  const row = sidebarBody.querySelector('.archive-item[data-card-id="' + CSS.escape(cardId) + '"]');
+  if (!row) return;
+  row.classList.add('archive-item--hit');
+  if (row.scrollIntoView) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+/* Ask the server for the hits (board + archives). Debounced. */
+function scheduleSearch() {
+  if (state.searchTimer) clearTimeout(state.searchTimer);
+  state.searchTimer = null;
+  if (!searchNeedle()) {
+    state.searchResults = [];
+    state.searchTotal = 0;
+    state.searchTruncated = false;
+    state.searchPending = false;
+    renderSearchResults();
+    return;
+  }
+  state.searchPending = true;
+  renderSearchResults();
+  state.searchTimer = setTimeout(() => {
+    state.searchTimer = null;
+    runSearch().catch((err) => {
+      // Never leave the panel stuck on "Searching…": the board filter still
+      // works without the server, so fall back to an empty list plus the error.
+      state.searchPending = false;
+      state.searchResults = [];
+      renderSearchResults();
+      showError(err);
+    });
+  }, SEARCH_DEBOUNCE_MS);
+}
+
+async function runSearch() {
+  const needle = searchNeedle();
+  if (!needle) return;
+  const res = await fetch('/api/search?q=' + encodeURIComponent(state.searchQuery.trim()));
+  if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+  const results = await res.json();
+  if (needle !== searchNeedle()) return;  // a newer query landed first
+  state.searchResults = Array.isArray(results) ? results : [];
+  const total = res.headers && res.headers.get ? res.headers.get('X-Search-Total') : null;
+  state.searchTotal = total === null || total === undefined
+    ? state.searchResults.length : Number(total);
+  const capped = res.headers && res.headers.get ? res.headers.get('X-Search-Truncated') : null;
+  state.searchTruncated = capped === 'true';
+  state.searchPending = false;
+  renderSearchResults();
+}
+
+/* The query changed: filter the board (local, instant) and re-ask the server
+ * for the results list. */
+function setSearchQuery(q) {
+  state.searchQuery = q;
+  renderBoard();      // filters the board and refreshes the "N of M cards" hint
+  scheduleSearch();
+}
+
+function clearSearch() {
+  if (state.searchTimer) { clearTimeout(state.searchTimer); state.searchTimer = null; }
+  state.searchQuery = '';
+  state.searchResults = [];
+  state.searchTotal = 0;
+  state.searchTruncated = false;
+  state.searchPending = false;
+  searchInput.value = '';
+  for (const row of document.querySelectorAll('.archive-item--hit')) {
+    row.classList.remove('archive-item--hit');
+  }
+  renderBoard();
+  renderSearchResults();
+}
+
+searchInput.addEventListener('input', () => setSearchQuery(searchInput.value));
+
+/* Cards under the current top-bar project filter ('' = all projects) and the
+ * failure filter — the M in "N of M cards". */
+function projectCards() {
   let cards = state.selectedProject === ''
     ? state.cards
     : state.cards.filter((n) => (n.project || '') === state.selectedProject);
@@ -1340,6 +1599,13 @@ function visibleCards() {
     });
   }
   return cards;
+}
+
+/* The cards the board shows: the project filter and the search both apply. */
+function visibleCards() {
+  const needle = searchNeedle();
+  const cards = projectCards();
+  return needle ? cards.filter((n) => cardMatchesQuery(n, needle)) : cards;
 }
 
 function renderBoard() {
@@ -1510,13 +1776,18 @@ function renderBoard() {
     $('count-' + col.key).textContent = String(cards.length);
     total += cards.length;
   }
-  emptyBoard.hidden = total > 0;
-  // An empty board because of the failure filter is not an empty board.
-  const emptyText = (state.failureFilter && total === 0)
-    ? 'No card failed that way — pick “any reason” to see the whole board.'
-    : EMPTY_BOARD_TEXT;
+  // An empty board is not always an empty board: a search that hides every
+  // card, or a failure filter that matches none, says so instead.
+  let emptyText = EMPTY_BOARD_TEXT;
+  if (total === 0 && searchNeedle()) {
+    emptyText = 'No cards on the board match “' + state.searchQuery.trim() + '”.';
+  } else if (total === 0 && state.failureFilter) {
+    emptyText = 'No card failed that way — pick “any reason” to see the whole board.';
+  }
   if (emptyBoard.textContent !== emptyText) emptyBoard.textContent = emptyText;
+  emptyBoard.hidden = total > 0;
   renderStrings();
+  renderSearchHint();  // the project filter changes the M in "N of M cards"
   window.scrollTo(scrollX, scrollY);
 }
 
@@ -2068,19 +2339,22 @@ const SIDEBAR_PANELS = {
   archive: { title: 'Archive', render: renderArchivePanel },
   split: { title: 'Split', render: renderSplitPanel },
   keys: { title: 'Keys', render: renderKeysPanel },
+  chat: { title: 'Chat', render: renderChatPanel },
 };
 
-function openSidebarPanel(key) {
+function openSidebarPanel(key, force) {
   const panel = SIDEBAR_PANELS[key];
   if (!panel) return;
-  if (state.sidebarPanel === key && !sidebarPanel.hidden) { closeSidebar(); return; }
+  // `force` opens the panel even when it is already showing — a search result
+  // must lead INTO the archive browser, not toggle it shut.
+  if (!force && state.sidebarPanel === key && !sidebarPanel.hidden) { closeSidebar(); return; }
   state.sidebarPanel = key;
   sidebarTitle.textContent = panel.title;
   sidebarPanel.hidden = false;
   for (const btn of sidebarRail.querySelectorAll('.rail-btn')) {
     btn.setAttribute('aria-expanded', btn.dataset.panel === key ? 'true' : 'false');
   }
-  panel.render().catch(showError);
+  return panel.render().catch(showError);
 }
 
 function closeSidebar() {
@@ -2183,6 +2457,43 @@ async function saveMaxConcurrent(raw) {
     body: JSON.stringify({ max_concurrent: value }),
   });
   await renderSettingsPanel();
+}
+
+/* --- chat: a reading mode where a card click opens its session chat --- */
+
+async function renderChatPanel() {
+  sidebarBody.textContent = '';
+  const row = el('label', 'setting-row');
+  const box = el('input');
+  box.type = 'checkbox';
+  box.id = 'chat-mode-toggle';
+  box.checked = state.chatMode;
+  box.title = 'Click a card to open its session chat instead of the editor';
+  box.addEventListener('change', () => setChatMode(box.checked));
+  row.appendChild(box);
+  row.appendChild(el('span', 'setting-label', 'Click a card to open its chat'));
+  sidebarBody.appendChild(row);
+
+  sidebarBody.appendChild(el('p', 'sidebar-empty', state.chatMode
+    ? 'Chat mode is ON — clicking any card opens its session chat. Turn it off '
+      + 'to edit cards again.'
+    : 'Turn this on to read the board instead of editing it: a click on a card '
+      + 'opens its session chat.'));
+}
+
+function setChatMode(on) {
+  state.chatMode = !!on;
+  saveChatMode(state.chatMode);
+  applyChatMode();
+  if (state.sidebarPanel === 'chat') renderChatPanel().catch(showError);
+}
+
+/* Reflect the mode on the board and on the rail button, so it stays obvious
+ * the board is in reading mode even with the sidebar closed. */
+function applyChatMode() {
+  document.body.classList.toggle('chat-mode', state.chatMode);
+  const btn = sidebarRail.querySelector('.rail-btn[data-panel="chat"]');
+  if (btn) btn.classList.toggle('rail-btn--mode-on', state.chatMode);
 }
 
 /* --- models: which model each kind of session runs on --- */
@@ -2581,6 +2892,7 @@ function buildArchiveProjectGroupBody(g) {
 
 function archiveRow(title, id) {
   const row = el('div', 'archive-item');
+  if (id) row.dataset.cardId = id;  // a search result highlights the row by id
   row.appendChild(el('span', 'archive-item-title', title));
   if (id) row.appendChild(el('span', 'archive-item-id', id));
   return row;
@@ -3139,10 +3451,10 @@ async function fetchLog() {
   }
 }
 
-function openLog(cardId) {
+function openLog(cardId, asChat) {
   state.logCardId = cardId;
   const card = state.cards.find((n) => n.id === cardId);
-  logHeading.textContent = 'Log — ' + (card ? card.title : cardId);
+  logHeading.textContent = (asChat ? 'Chat — ' : 'Log — ') + (card ? card.title : cardId);
   logOverlay.hidden = false;
   fetchLog();
 }
@@ -3371,10 +3683,20 @@ function anyOverlayOpen() {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    // A live query is cleared first: Esc on a search means "show me the board
+    // again", not "close whatever overlay happens to be open".
+    if (state.searchQuery !== '') {
+      e.preventDefault();
+      clearSearch();
+      return;
+    }
     if (!diffOverlay.hidden) closeDiff();
     else if (!logOverlay.hidden) closeLog();
     else if (!editorOverlay.hidden) closeEditor();
     else if (!projectsOverlay.hidden) closeProjects();
+  } else if (e.key === '/' && !anyOverlayOpen() && notTyping(e)) {
+    e.preventDefault();
+    searchInput.focus();
   } else if ((e.key === 'd' || e.key === 'D') && !anyOverlayOpen() && notTyping(e)) {
     // D over a card: what that card actually changed.
     const cardId = hoveredCardId();
@@ -3412,6 +3734,10 @@ async function checkBuild() {
 renderThemeIndicator(window.VibeTheme ? window.VibeTheme.state : { dark: false, sunrise: null, sunset: null });
 // Land back on the project selected last time in this browser.
 state.selectedProject = loadSelectedProject();
+// Chat mode is a per-browser reading preference: restore it before the first
+// board render so the very first click already behaves the right way.
+state.chatMode = loadChatMode();
+applyChatMode();
 // ...and on the notification choice made in the sidebar's Settings panel.
 state.notificationsEnabled = loadNotificationsEnabled();
 // ...and on the failure filter, so a board narrowed to one reason stays that way.

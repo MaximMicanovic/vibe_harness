@@ -264,6 +264,22 @@ class ArchiveStore:
         return {**self._manifest(archive_dir), "items": items,
                 "projects": self._project_groups(archive_dir, items)}
 
+    def scan(self) -> list[tuple[dict, list[dict]]]:
+        """Every archive with its cards, in one pass, most recently updated
+        first. What search scans: manifest and cards together, so a query does
+        not re-read every manifest once per archive. A broken manifest is
+        skipped, never fatal."""
+        if not self.archives_dir.exists():
+            return []
+        found = []
+        for path in sorted(self.archives_dir.glob("*/archive.md")):
+            try:
+                found.append((self._manifest(path.parent), self._items(path.parent)))
+            except Exception:
+                continue
+        found.sort(key=lambda pair: pair[0]["updated_at"], reverse=True)
+        return found
+
     def archive_cards(self, card_ids: list[str], archive_id: str,
                       *, gate_accepted: bool = True) -> dict:
         """Move cards into an archive. With gate_accepted (the default), cards

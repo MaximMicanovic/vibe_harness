@@ -19,6 +19,14 @@
       <span>Failures</span>
       <select id="failure-filter" title="Show only cards that failed for one reason — the badge on each card says why"></select>
     </label>
+    <div class="search-box" id="search-box">
+      <span class="search-icon" aria-hidden="true">🔍</span>
+      <input id="search-input" type="search" placeholder="Search cards…" autocomplete="off"
+             spellcheck="false" aria-label="Search cards on the board and in the archives"
+             title="Search the board and the archives by title, body or id — / focuses this box, Esc clears it">
+      <span class="search-hint" id="search-hint" hidden></span>
+      <div class="search-results" id="search-results" hidden aria-label="Search results"></div>
+    </div>
     <button id="manage-projects-btn" class="btn" title="Add or remove projects">＋ Project</button>
     <button id="archives-btn" class="btn" title="The archive: a folder per archive (archives/) holding archived cards and projects">📦 Archives</button>
     <button id="restart-server-btn" class="btn" title="Hard-restart the dashboard server (picks up code changes)">⟳ Restart</button>
@@ -44,6 +52,7 @@
         <button class="rail-btn" type="button" data-panel="archive" title="Archive — the archive folders, the projects inside them and their cards" aria-controls="sidebar-panel">📦</button>
         <button class="rail-btn" type="button" data-panel="split" title="Split — do cards split into sub-cards cost less per accepted outcome?" aria-controls="sidebar-panel">⤷</button>
         <button class="rail-btn" type="button" data-panel="keys" title="Keys — every keyboard shortcut" aria-controls="sidebar-panel">⌨</button>
+        <button class="rail-btn" type="button" data-panel="chat" title="Chat — click a card to open its session chat instead of the editor" aria-controls="sidebar-panel">💬</button>
       </nav>
       <section class="sidebar-panel" id="sidebar-panel" hidden aria-label="Sidebar panel">
         <header class="sidebar-head">
