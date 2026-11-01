@@ -12,6 +12,15 @@ const COLUMNS = [
   { key: 'failed',   label: 'Failed', also: ['stopped'] },
 ];
 
+/* Every keyboard shortcut, in ONE place: the Keys panel renders this list and
+ * the global keydown handler below reads the same keys, so the panel cannot
+ * drift from the handlers. */
+const KEYBINDINGS = [
+  { key: 'N', label: 'New card', hint: 'opens the card editor' },
+  { key: 'Esc', label: 'Close overlay', hint: 'closes the open panel or modal' },
+  { key: 'D', label: 'Diff', hint: 'hover a card and press D to see what it changed' },
+];
+
 const state = {
   cards: [],
   stats: null,
@@ -39,6 +48,9 @@ const state = {
   archiveProjects: new Map(),  // archive id -> its project groups (GET /api/archives/<id>), cached for the sidebar
   models: null,          // GET /api/models: { roles, models, default_model }
   settings: null,        // GET /api/settings: { backend, backends }
+  hoverCardId: null,     // card under the pointer — D opens its diff
+  diffCardId: null,      // card whose diff panel is open
+  diffRange: 'card',     // 'card' | 'round' | 'worktree'
 };
 
 /* ---------------- DOM refs ---------------- */
@@ -82,6 +94,7 @@ const btnStop = $('btn-stop');
 const btnAccept = $('btn-accept');
 const btnArchive = $('btn-archive');
 const btnLog = $('btn-log');
+const btnDiff = $('btn-diff');
 const btnDelete = $('btn-delete');
 const acceptHint = $('accept-hint');
 
@@ -164,6 +177,13 @@ async function migrateLocalStacks() {
 const logOverlay = $('log-overlay');
 const logHeading = $('log-heading');
 const logContent = $('log-content');
+
+const diffOverlay = $('diff-overlay');
+const diffHeading = $('diff-heading');
+const diffRanges = $('diff-ranges');
+const diffVerdict = $('diff-verdict');
+const diffFiles = $('diff-files');
+const diffBody = $('diff-body');
 
 /* ---------------- Small helpers ---------------- */
 
@@ -1801,6 +1821,7 @@ const SIDEBAR_PANELS = {
   models: { title: 'Models', render: renderModelsPanel },
   archive: { title: 'Archive', render: renderArchivePanel },
   split: { title: 'Split', render: renderSplitPanel },
+  keys: { title: 'Keys', render: renderKeysPanel },
 };
 
 function openSidebarPanel(key) {
@@ -1826,6 +1847,25 @@ for (const btn of sidebarRail.querySelectorAll('.rail-btn')) {
   btn.addEventListener('click', () => openSidebarPanel(btn.dataset.panel));
 }
 $('sidebar-close').addEventListener('click', closeSidebar);
+
+/* --- keys: every keyboard shortcut, generated from KEYBINDINGS --- */
+
+async function renderKeysPanel() {
+  sidebarBody.textContent = '';
+  sidebarBody.appendChild(el('p', 'field-hint',
+    'Shortcuts work anywhere on the board (not while typing in a field).'));
+  const list = el('ul', 'keys-list');
+  for (const binding of KEYBINDINGS) {
+    const row = el('li', 'keys-row');
+    row.appendChild(el('kbd', 'keys-key', binding.key));
+    const text = el('div', 'keys-text');
+    text.appendChild(el('strong', 'keys-label', binding.label));
+    text.appendChild(el('span', 'keys-hint', binding.hint));
+    row.appendChild(text);
+    list.appendChild(row);
+  }
+  sidebarBody.appendChild(list);
+}
 
 /* --- models: which model each kind of session runs on --- */
 
@@ -2400,6 +2440,7 @@ async function openEditor(cardId) {
     // Only accepted cards can be archived.
     btnArchive.hidden = card.status !== 'accepted';
     btnLog.hidden = !card.session;
+    btnDiff.hidden = !card.session;
   } else {
     editorHeading.textContent = 'New card';
     templateField.hidden = false;
@@ -2426,6 +2467,7 @@ async function openEditor(cardId) {
     acceptHint.hidden = true;
     btnArchive.hidden = true;
     btnLog.hidden = true;
+    btnDiff.hidden = true;
     await loadTemplates();
     cardTitle.focus();
   }
@@ -2506,6 +2548,10 @@ btnLog.addEventListener('click', () => {
   if (state.editorCardId) openLog(state.editorCardId);
 });
 
+btnDiff.addEventListener('click', () => {
+  if (state.editorCardId) openDiff(state.editorCardId).catch(showError);
+});
+
 $('editor-close').addEventListener('click', closeEditor);
 editorOverlay.addEventListener('click', (e) => { if (e.target === editorOverlay) closeEditor(); });
 $('new-card-btn').addEventListener('click', () => { openEditor(null).catch(showError); });
@@ -2557,6 +2603,176 @@ function closeLog() {
 $('log-close').addEventListener('click', closeLog);
 logOverlay.addEventListener('click', (e) => { if (e.target === logOverlay) closeLog(); });
 
+/* ---------------- Diff panel: what the card actually changed ---------------- */
+
+/* The three ranges the server knows (GET /api/cards/<id>/diff?range=…). */
+const DIFF_RANGES = [
+  { key: 'card', label: 'Card', hint: 'what accept merged' },
+  { key: 'round', label: 'Round', hint: 'what the reviewer judged' },
+  { key: 'worktree', label: 'Worktree', hint: 'uncommitted changes' },
+];
+
+/* One line of a unified diff -> its kind. The file headers (+++ / ---) are
+ * checked BEFORE the +/- prefixes, or every header would look like a change. */
+function classifyDiffLine(line) {
+  if (line.startsWith('@@')) return 'hunk';
+  if (line.startsWith('+++') || line.startsWith('---')) return 'meta';
+  if (line.startsWith('diff ') || line.startsWith('index ')
+      || line.startsWith('new file') || line.startsWith('deleted file')
+      || line.startsWith('similarity index') || line.startsWith('rename ')) {
+    return 'meta';
+  }
+  if (line.startsWith('+')) return 'add';
+  if (line.startsWith('-')) return 'del';
+  return 'ctx';
+}
+
+/* The path a `diff --git a/x b/y` line introduces (null when unparseable). */
+function diffLinePath(line) {
+  const m = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+  return m ? m[2] : null;
+}
+
+function renderDiffRanges() {
+  diffRanges.textContent = '';
+  for (const range of DIFF_RANGES) {
+    const btn = el('button', 'diff-range' + (state.diffRange === range.key ? ' diff-range--on' : ''),
+                   range.label);
+    btn.type = 'button';
+    btn.dataset.range = range.key;
+    btn.title = range.hint;
+    btn.setAttribute('aria-pressed', state.diffRange === range.key ? 'true' : 'false');
+    btn.addEventListener('click', () => {
+      if (state.diffRange === range.key) return;
+      state.diffRange = range.key;
+      renderDiffRanges();
+      loadDiff().catch(showError);
+    });
+    diffRanges.appendChild(btn);
+  }
+}
+
+/* The verdict that judged this range, pinned next to the diff: approved /
+ * rejected, the reviewer's reason, the round, the model and the tokens. */
+function renderDiffVerdict(review) {
+  diffVerdict.textContent = '';
+  if (!review) {
+    diffVerdict.appendChild(el('span', 'diff-verdict-none', 'No review verdict yet'));
+    return;
+  }
+  const approved = review.approved === true;
+  diffVerdict.appendChild(el('span',
+    'diff-badge ' + (approved ? 'diff-badge--ok' : 'diff-badge--bad'),
+    approved ? '✓ approved' : '✗ rejected'));
+  const meta = el('div', 'diff-verdict-meta');
+  if (review.round !== undefined && review.round !== null) {
+    meta.appendChild(el('span', 'diff-verdict-item', 'round ' + review.round));
+  }
+  if (review.model) meta.appendChild(el('span', 'diff-verdict-item', review.model));
+  if (review.tokens !== undefined && review.tokens !== null) {
+    meta.appendChild(el('span', 'diff-verdict-item', review.tokens + ' tokens'));
+  }
+  if (review.via) meta.appendChild(el('span', 'diff-verdict-item', 'via ' + review.via));
+  diffVerdict.appendChild(meta);
+  if (review.reason) {
+    diffVerdict.appendChild(el('p', 'diff-verdict-reason', review.reason));
+  }
+}
+
+/* The changed files with their +/- counts; clicking one scrolls to it. */
+function renderDiffFiles(files) {
+  diffFiles.textContent = '';
+  if (!files || !files.length) {
+    diffFiles.appendChild(el('p', 'diff-files-empty', 'No files'));
+    return;
+  }
+  for (const file of files) {
+    const row = el('button', 'diff-file');
+    row.type = 'button';
+    row.title = file.path + ' — click to scroll to it';
+    row.appendChild(el('span', 'diff-file-path', file.path));
+    row.appendChild(el('span', 'diff-file-add', '+' + file.additions));
+    row.appendChild(el('span', 'diff-file-del', '−' + file.deletions));
+    row.addEventListener('click', () => scrollToDiffFile(file.path));
+    diffFiles.appendChild(row);
+  }
+}
+
+function scrollToDiffFile(path) {
+  const target = diffBody.querySelector('[data-path="' + CSS.escape(path) + '"]');
+  if (target) target.scrollIntoView({ block: 'start' });
+}
+
+/* The diff itself. Every line is inserted as a TEXT NODE: the content is
+ * model-written, so it must never go through innerHTML. */
+function renderDiff(data) {
+  diffBody.textContent = '';
+  renderDiffVerdict(data.review);
+  renderDiffFiles(data.files);
+  if (!data.diff) {
+    diffBody.appendChild(el('div', 'diff-line diff-line--ctx',
+      data.reason ? '(' + data.reason + ')' : '(no changes in this range)'));
+    return;
+  }
+  let path = null;
+  for (const line of data.diff.split('\n')) {
+    if (line.startsWith('diff --git ')) path = diffLinePath(line);
+    const kind = classifyDiffLine(line);
+    const row = el('div', 'diff-line diff-line--' + kind);
+    if (path && line.startsWith('diff --git ')) row.dataset.path = path;
+    row.appendChild(document.createTextNode(line === '' ? ' ' : line));
+    diffBody.appendChild(row);
+  }
+  if (data.truncated) {
+    diffBody.appendChild(el('div', 'diff-line diff-line--meta',
+      '… diff truncated — open the log or the worktree for the rest'));
+  }
+}
+
+async function loadDiff() {
+  const id = state.diffCardId;
+  if (!id) return;
+  diffBody.textContent = '…';
+  const data = await api('/api/cards/' + encodeURIComponent(id)
+    + '/diff?range=' + encodeURIComponent(state.diffRange));
+  renderDiff(data);
+}
+
+async function openDiff(cardId, range) {
+  if (!cardId) return;
+  state.diffCardId = cardId;
+  if (range) state.diffRange = range;
+  const card = state.cards.find((n) => n.id === cardId);
+  diffHeading.textContent = 'Diff — ' + (card ? card.title : cardId);
+  diffOverlay.hidden = false;
+  renderDiffRanges();
+  await loadDiff();
+}
+
+function closeDiff() {
+  state.diffCardId = null;
+  diffOverlay.hidden = true;
+}
+
+$('diff-close').addEventListener('click', closeDiff);
+diffOverlay.addEventListener('click', (e) => { if (e.target === diffOverlay) closeDiff(); });
+
+/* The card under the pointer, so D can open ITS diff. Tracked on the board
+ * (mouseover bubbles) instead of relying on :hover, which a stack of
+ * overlapping cards makes ambiguous. */
+const boardEl = $('board');
+boardEl.addEventListener('mouseover', (e) => {
+  const card = e.target && e.target.closest ? e.target.closest('.card') : null;
+  state.hoverCardId = card ? card.dataset.cardId : null;
+});
+boardEl.addEventListener('mouseleave', () => { state.hoverCardId = null; });
+
+function hoveredCardId() {
+  if (state.hoverCardId) return state.hoverCardId;
+  const card = document.querySelector('.card:hover');
+  return card ? card.dataset.cardId : null;
+}
+
 /* ------------- Theme indicator (automatic dark mode, sun-based) ------------- */
 
 // theme.js owns the dark/light decision (sun over your location when it is
@@ -2593,13 +2809,27 @@ function notTyping(e) {
     && e.target.tagName !== 'SELECT' && !e.target.isContentEditable;
 }
 
+/* The keys handled here are the ones listed in KEYBINDINGS (see the Keys
+ * panel) — keep the two in step. */
+function anyOverlayOpen() {
+  return !editorOverlay.hidden || !logOverlay.hidden || !projectsOverlay.hidden
+    || !diffOverlay.hidden;
+}
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if (!logOverlay.hidden) closeLog();
+    if (!diffOverlay.hidden) closeDiff();
+    else if (!logOverlay.hidden) closeLog();
     else if (!editorOverlay.hidden) closeEditor();
     else if (!projectsOverlay.hidden) closeProjects();
-  } else if ((e.key === 'n' || e.key === 'N') && editorOverlay.hidden && logOverlay.hidden
-             && projectsOverlay.hidden && notTyping(e)) {
+  } else if ((e.key === 'd' || e.key === 'D') && !anyOverlayOpen() && notTyping(e)) {
+    // D over a card: what that card actually changed.
+    const cardId = hoveredCardId();
+    if (cardId) {
+      e.preventDefault();
+      openDiff(cardId).catch(showError);
+    }
+  } else if ((e.key === 'n' || e.key === 'N') && !anyOverlayOpen() && notTyping(e)) {
     openEditor(null).catch(showError);
   }
 });

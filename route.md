@@ -54,6 +54,11 @@ you write a card (spec)
                VERDICT: text is only a fallback)
   → (reject → fixer run-N+1 (resumed) … capped at VIBE_HARNESS_MAX_REVIEW_ROUNDS)
   → accept     test gate once more, then merge the card branch       ← free
+               with --no-ff (one merge commit per card); the branch
+               and its worktree are KEPT so the diff stays readable
+  → inspect    GET /api/cards/<id>/diff?range=card|round|worktree    ← free
+               (the board's Diff panel: D over a card, or the Diff
+                button) — no LLM tokens, it only reads git
 ```
 
 Tokens are spent almost entirely in **run** sessions; **review** sessions are
@@ -234,6 +239,11 @@ The cheapest token is the one never spent:
   `input_tokens` / `output_tokens` / `cached_input_tokens` when the model
   reports them), the model, and the stop reason — diff these across
   cards/agents to find your expensive routes.
+- **Per-round verdicts:** `session.reviews` keeps every round's record
+  (`{approved, reason, round, tokens, model, log, export_dir, via, commit}`);
+  `session.review` is the last one. The Diff panel's `round` range reads them,
+  so you can see what each review round actually judged — and what it cost —
+  without re-running anything.
 - USD cost is intentionally not shown in the UI, but `--max-price` still caps
   real spend per session.
 

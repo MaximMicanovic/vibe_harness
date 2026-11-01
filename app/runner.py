@@ -742,8 +742,13 @@ class SessionRunner:
         A merge conflict does NOT fail the accept: the conflicted merge is left
         in place, the card stays 'done' (Done column) flagged `resolving`, and
         a resolver vibe session is spawned. When the resolver concludes the
-        merge, the accept finishes automatically (branch deleted -> accepted).
+        merge, the accept finishes automatically (merge recorded -> accepted).
         A second accept while a resolver is live raises GitBusyError (-> 409).
+
+        The merge result is recorded on the session git record
+        (``merge_commit`` / ``merge_was_ff`` / ``merged_at``) and the card
+        branch + linked worktree are KEPT, so the card's diff stays
+        inspectable after accept (``GET /api/cards/<id>/diff``).
         """
         card = self.store.check_accept(card_id)
         git_info = (card.get("session") or {}).get("git")
@@ -759,13 +764,12 @@ class SessionRunner:
             branch = git_info.get("branch")
             if branch and not gitops.branch_exists(root, branch) \
                     and not gitops.merge_in_progress(root):
-                # The card branch is already merged and deleted (e.g. pruned
-                # at startup after the merge landed): finish the accept
-                # without re-merging.
-                gitops.remove_card_worktree(git_info)
+                # Legacy card: its branch was deleted by an accept from before
+                # branches were kept. Finish the accept without re-merging.
                 self.store.patch_session(card_id, {"git": {
                     **git_info, "merged": True, "resolving": False,
-                    "merge_conflict": False, "merge_error": None}})
+                    "merge_conflict": False, "merge_error": None,
+                    "merged_at": now_iso()}})
                 accepted = self.store.accept(card_id)
                 try:
                     self._drain_dependents()
@@ -779,13 +783,16 @@ class SessionRunner:
             accepted = self.store.accept(card_id)
         else:
             try:
-                gitops.merge_card_branch(git_info)
+                merged = gitops.merge_card_branch(git_info)
             except GitMergeConflict as exc:
                 self._start_resolver(card, git_info, str(exc))
                 return self.store.get(card_id)
+            # The merge commit is what "this card" means: the diff view shows
+            # merge_commit^..merge_commit and a future revert has one commit
+            # to revert. The branch and the linked worktree are kept.
             self.store.patch_session(card_id, {"git": {
                 **git_info, "merged": True, "resolving": False,
-                "merge_conflict": False, "merge_error": None}})
+                "merge_conflict": False, "merge_error": None, **merged}})
             accepted = self.store.accept(card_id)
         # Accepted counts as completed: start drafts waiting on this card.
         try:
@@ -919,9 +926,10 @@ class SessionRunner:
     def _conclude_resolved_merge(self, card: dict,
                                  resolver_patch: dict | None = None) -> None:
         """The in-progress merge was concluded (MERGE_HEAD gone, tree clean):
-        finish the accept — post-merge green gate, remove the linked worktree,
-        delete the card branch (safe ``-d``), mark merged + resolving:false,
-        and accept the card. Used by _finalize_resolver and by startup
+        finish the accept — post-merge green gate, record the resolver's
+        commit as the card's merge commit, mark merged + resolving:false, and
+        accept the card. The card branch and its linked worktree are kept (the
+        diff view reads them). Used by _finalize_resolver and by startup
         recovery (a resolver that died after concluding the merge but before
         its finalize ran)."""
         card_id = card["id"]
@@ -939,11 +947,14 @@ class SessionRunner:
             # Post-merge green gate: tests must pass on the merged result
             # before the accept finishes.
             self._green_gate(card)
-            # The card branch is still checked out in the linked worktree:
-            # remove the worktree first, then delete the branch.
-            gitops.remove_card_worktree(git_info)
-            gitops.delete_card_branch(git_info)
-            patch({"merged": True, "merge_conflict": False, "merge_error": None})
+            # The resolver concluded the merge in the main worktree: its
+            # commit IS the card's merge commit. The card branch and its
+            # linked worktree are kept (the diff view reads them).
+            head = gitops.run_git(["rev-parse", "HEAD"],
+                                  Path(git_info["repo"])).stdout.strip()
+            patch({"merged": True, "merge_conflict": False, "merge_error": None,
+                   "merge_commit": head, "merge_was_ff": False,
+                   "merged_at": now_iso()})
             self.store.accept(card_id)
         except GitError as exc:
             patch({"merge_error": str(exc)})
@@ -1500,6 +1511,8 @@ class SessionRunner:
                 "reason": reason,
                 "round": entry["round"],
                 "tokens": tokens,
+                # The reviewer's model, shown next to the diff it judged.
+                "model": model,
                 "log": str(rdir / "session.log"),
                 "export_dir": str(rdir / "export"),
                 "via": via,
@@ -1514,6 +1527,11 @@ class SessionRunner:
             if head:
                 review_record["commit"] = head
                 review_patch["last_reviewed_commit"] = head
+            # Review history: every round's record is kept (session.review
+            # stays the LAST one for backward compatibility), so the diff
+            # panel can show what each round judged.
+            review_patch["reviews"] = [*(session.get("reviews") or []),
+                                       review_record]
             if self.config.mailbox and mdir.is_dir():
                 review_record["messages"] = len(mailbox.list_messages(mdir))
             if entry["stop_requested"]:
@@ -1738,6 +1756,8 @@ class SessionRunner:
           the linked worktree is removed (``git worktree remove --force`` +
           prune) and the card branch is deleted only when already merged
           (safe ``git branch -d``) — unmerged work is never force-deleted.
+          ACCEPTED cards are skipped: their branch and worktree are what the
+          diff view reads, and they go away only on delete/archive.
         """
         for card in self.store.list():
             status = card["status"]
@@ -1783,6 +1803,10 @@ class SessionRunner:
             if not git_info.get("worktree") or not git_info.get("repo"):
                 continue
             if card["status"] == "done" and git_info.get("resolving"):
+                continue
+            if card["status"] == "accepted" or git_info.get("merged"):
+                # An accepted card keeps its branch and worktree: they are
+                # what the diff view reads. They go away on delete/archive.
                 continue
             try:
                 gitops.remove_card_worktree(git_info)

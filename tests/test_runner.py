@@ -724,6 +724,35 @@ def test_review_reject_then_fix_loop(store, make_runner, fake_vibe, monkeypatch)
     assert "test-driven development" in fix_prompt   # fixer rounds are TDD too
 
 
+def test_review_history_keeps_every_round(store, tmp_path, fake_vibe_round,
+                                          projects, monkeypatch):
+    """Every round's verdict is appended to session.reviews (a list), so the
+    diff panel can show what each round judged; session.review stays the LAST
+    record for backward compatibility."""
+    monkeypatch.setenv("FAKE_REVIEW", "reject-once")
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe_round, projects)
+    card = store.create("History card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+
+    runner.run(card_id)
+    final = _wait_for_status(store, card_id, "done")
+
+    session = final["session"]
+    reviews = session["reviews"]
+    assert [r["round"] for r in reviews] == [1, 2]
+    assert [r["approved"] for r in reviews] == [False, True]
+    assert "fake reviewer found a bug in round 1" in reviews[0]["reason"]
+    # Each record carries the commit that round covered (the next round's diff
+    # base), so the round range can be reconstructed.
+    assert reviews[0]["commit"] and reviews[1]["commit"]
+    assert reviews[0]["commit"] != reviews[1]["commit"]
+    # Backward compatibility: session.review is the last record.
+    assert session["review"] == reviews[-1]
+
+
 def test_review_loop_cap_requires_manual_accept(store, make_runner, fake_vibe, monkeypatch):
     """After max_review_rounds rejections the loop stops: the card lands in
     'done' without an approved review (review.exhausted) and must be accepted
@@ -828,8 +857,8 @@ def _make_runner_with_projects(store, tmp_path, vibe_bin, projects, **config_kwa
 def test_git_run_merges_on_auto_accept(store, tmp_path, fake_vibe, projects):
     """A project-folder run is git-backed: the folder is auto-init'd, the card
     runs on harness/<id> in its own linked worktree (sessions/<id>/worktree),
-    and auto-accept merges the branch into the base in the main worktree,
-    then removes the worktree and the branch."""
+    and auto-accept merges the branch into the base in the main worktree with
+    --no-ff, keeping the branch and the worktree for the diff view."""
     proj = tmp_path / "my-app"
     proj.mkdir()
     projects.create("my-app", str(proj))
@@ -851,12 +880,15 @@ def test_git_run_merges_on_auto_accept(store, tmp_path, fake_vibe, projects):
     # The repo was auto-initialized; the main worktree is on the base branch.
     assert _git(["symbolic-ref", "--short", "HEAD"], proj) == git_info["base_branch"]
     assert (proj / "hello.txt").exists()
-    # The implementation commit is on the base branch; card branch + worktree gone.
-    assert "hello.txt" in _git(
-        ["show", "--name-only", "--format=", git_info["base_branch"]], proj)
-    assert not gitops.branch_exists(proj, git_info["branch"])
-    assert not wt.exists()
-    assert wt.resolve() not in gitops.registered_worktrees(proj)
+    # The implementation is on the base branch, as ONE merge commit.
+    assert "hello.txt" in _git(["ls-tree", "--name-only", git_info["base_branch"]], proj)
+    assert git_info["merge_commit"] == _git(["rev-parse", "HEAD"], proj)
+    assert git_info["merge_was_ff"] is False
+    assert git_info["merged_at"]
+    # The card branch and its linked worktree are kept after accept.
+    assert gitops.branch_exists(proj, git_info["branch"])
+    assert wt.exists()
+    assert wt.resolve() in gitops.registered_worktrees(proj)
 
 
 @git_test
@@ -1033,11 +1065,14 @@ def test_git_auto_accept_conflict_resolved_by_model(store, tmp_path, fake_vibe, 
     assert git_info["merged"] is True
     assert git_info.get("merge_conflict") is False
     assert _git(["symbolic-ref", "--short", "HEAD"], proj) == git_info["base_branch"]
-    assert not gitops.branch_exists(proj, git_info["branch"])
     assert not gitops.merge_in_progress(proj)
-    # The linked worktree was removed once the merge concluded.
-    assert not Path(git_info["worktree"]).exists()
-    assert Path(git_info["worktree"]).resolve() not in gitops.registered_worktrees(proj)
+    # The resolver's commit is the card's merge commit; branch + worktree are
+    # kept so the diff survives the accept.
+    assert git_info["merge_commit"] == _git(["rev-parse", "HEAD"], proj)
+    assert git_info["merged_at"]
+    assert gitops.branch_exists(proj, git_info["branch"])
+    assert Path(git_info["worktree"]).is_dir()
+    assert Path(git_info["worktree"]).resolve() in gitops.registered_worktrees(proj)
     # The resolver session ran and is recorded under resolve-1/ — in the MAIN
     # worktree (the project folder), where the conflicted merge was left.
     resolver = final["session"].get("resolver") or {}
@@ -1068,11 +1103,14 @@ def test_git_accept_conflict_spawns_resolver_and_finishes(store, tmp_path, fake_
     g = final["session"]["git"]
     assert g["merged"] is True
     assert g["resolving"] is False
-    assert not gitops.branch_exists(proj, g["branch"])
     assert _git(["symbolic-ref", "--short", "HEAD"], proj) == g["base_branch"]
-    # The linked worktree was removed after the resolver concluded the merge.
-    assert not Path(g["worktree"]).exists()
-    assert Path(g["worktree"]).resolve() not in gitops.registered_worktrees(proj)
+    # The resolver's commit is the card's merge commit; branch + worktree are
+    # kept so the diff survives the accept.
+    assert g["merge_commit"] == _git(["rev-parse", "HEAD"], proj)
+    assert g["merged_at"]
+    assert gitops.branch_exists(proj, g["branch"])
+    assert Path(g["worktree"]).is_dir()
+    assert Path(g["worktree"]).resolve() in gitops.registered_worktrees(proj)
 
 
 @git_test
@@ -1738,8 +1776,8 @@ def test_recover_stale_finishes_accept_when_resolver_died_after_merge(
         store, tmp_path, fake_vibe, projects):
     """Stuck `done`+resolving whose merge already landed (MERGE_HEAD gone, tree
     clean) and whose resolver pid is dead: startup finishes the accept
-    automatically — linked worktree removed, card branch deleted, merged +
-    accepted — instead of leaving the card stuck."""
+    automatically — merged + accepted, with the merge commit recorded and the
+    branch/worktree kept — instead of leaving the card stuck."""
     runner, card_id, proj, git_info, wt = _merge_setup(
         store, tmp_path, projects, fake_vibe, conflict=False)
     _mark_done_resolving(store, card_id, runner, git_info, proj, wt, _dead_pid())
@@ -1753,9 +1791,12 @@ def test_recover_stale_finishes_accept_when_resolver_died_after_merge(
     assert g["merged"] is True
     assert g["resolving"] is False
     assert g["merge_conflict"] is False
-    assert not gitops.branch_exists(proj, g["branch"])
-    assert not wt.exists()
-    assert wt.resolve() not in gitops.registered_worktrees(proj)
+    assert g["merge_commit"] == _git(["rev-parse", "HEAD"], proj)
+    assert g["merged_at"]
+    # Accepted cards keep their branch and worktree (the diff view reads them).
+    assert gitops.branch_exists(proj, g["branch"])
+    assert wt.exists()
+    assert wt.resolve() in gitops.registered_worktrees(proj)
     resolver = final["session"]["resolver"]
     assert resolver["finished_at"]
     assert resolver["exit_code"] is None
@@ -1805,8 +1846,9 @@ def test_recover_stale_adopts_live_resolver_and_finishes_on_exit(
     final = _wait_for_status(store, card_id, "accepted", timeout=10)
     g = final["session"]["git"]
     assert g["merged"] is True and g["resolving"] is False
-    assert not gitops.branch_exists(proj, g["branch"])
-    assert not wt.exists()
+    assert g["merge_commit"]
+    assert gitops.branch_exists(proj, g["branch"])
+    assert wt.exists()
     assert final["session"]["resolver"]["exit_code"] == 0
 
 
@@ -1898,12 +1940,41 @@ def test_recover_stale_prunes_orphaned_worktree_keeps_unmerged_branch(
     assert gitops.branch_exists(proj, git_info["branch"])   # unmerged -> kept
 
     # Accepting afterwards still works: the green gate re-creates the linked
-    # worktree from the card branch, the merge then cleans up.
+    # worktree from the card branch, and the merge KEEPS both (the diff of an
+    # accepted card stays inspectable).
     accepted = runner2.accept_card(card_id)
     assert accepted["status"] == "accepted"
     assert accepted["session"]["git"]["merged"] is True
-    assert not gitops.branch_exists(proj, git_info["branch"])
-    assert not wt.exists()
+    assert accepted["session"]["git"]["merge_commit"]
+    assert gitops.branch_exists(proj, git_info["branch"])
+    assert wt.exists()
+
+
+@git_test
+def test_recover_stale_keeps_accepted_card_worktree(store, tmp_path, fake_vibe,
+                                                    projects):
+    """Startup pruning must not delete the worktree of an ACCEPTED card: it is
+    what the diff view reads after accept. It goes away only on delete/archive."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    card = store.create("Accepted card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+    runner.run(card_id)
+    _wait_for_status(store, card_id, "done")
+    accepted = runner.accept_card(card_id)
+    git_info = accepted["session"]["git"]
+    wt = Path(git_info["worktree"])
+    assert wt.exists()
+
+    runner2 = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    runner2.recover_stale()
+
+    assert store.get(card_id)["status"] == "accepted"
+    assert wt.exists()
+    assert wt.resolve() in gitops.registered_worktrees(proj)
+    assert gitops.branch_exists(proj, git_info["branch"])
 
 
 @git_test

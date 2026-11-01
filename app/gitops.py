@@ -18,11 +18,15 @@ in the same repository can run concurrently:
 3. ``commit_workspace`` — after each successful implementation round, stage
    and commit vibe's result on the card branch (callers pass the worktree).
 4. ``merge_card_branch`` — on accept, merge in the MAIN worktree (repo root,
-   base branch still checked out there): fast-forward, fallback real merge;
-   on success remove the linked worktree and delete the card branch. A
-   conflict raises ``GitMergeConflict`` and the conflicted merge is LEFT IN
-   PLACE in the main worktree (no abort) so the runner can spawn a resolver
-   session there; the card branch AND the linked worktree are kept.
+   base branch still checked out there) with ``--no-ff``, so every accepted
+   card is exactly ONE merge commit (the diff view shows
+   ``merge_commit^..merge_commit`` and a future revert has one commit to
+   revert). The card branch and its linked worktree are KEPT after accept —
+   they are what the card's diff is read from — and removed only when the
+   card is deleted or archived (``remove_card_worktree``). A conflict raises
+   ``GitMergeConflict`` and the conflicted merge is LEFT IN PLACE in the main
+   worktree (no abort) so the runner can spawn a resolver session there; the
+   card branch AND the linked worktree are kept.
 
 Sandbox runs (``sessions/<id>/workspace``) do not use git: there is no project
 repository to branch from or merge into.
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 GIT_IDENTITY_NAME = "Vibe Harness"
@@ -273,16 +278,28 @@ def ensure_card_worktree(git_info: dict) -> Path | None:
     return wt
 
 
-def merge_card_branch(git_info: dict) -> None:
+def merge_card_branch(git_info: dict) -> dict:
     """Merge the card's branch into its base branch IN THE MAIN WORKTREE (the
-    repo root, where the base branch is still checked out), then remove the
-    linked worktree and delete the card branch.
+    repo root, where the base branch is still checked out) and return the
+    merge result ``{merge_commit, merge_was_ff, merged_at}``.
 
-    Fast-forward first; if the base moved, do a real merge. A conflict raises
-    ``GitMergeConflict`` and the conflicted merge is LEFT IN PLACE in the
-    main worktree (no abort) so a resolver session can fix it there; the card
-    branch AND the linked worktree are kept. Leaves the main worktree on the
-    base branch.
+    Always ``--no-ff``: every accepted card produces exactly ONE merge commit
+    whose second parent is the card branch, so "this card" is a single commit
+    — the diff view can show ``merge_commit^..merge_commit`` and a future
+    revert has something to revert. A fast-forwarded card would have no such
+    commit.
+
+    The card branch and its linked worktree are KEPT: the diff of what the
+    card changed stays inspectable after accept. They are removed only when
+    the card is deleted or archived (``remove_card_worktree``).
+
+    ``merge_was_ff`` is True only when the merge created no commit at all
+    (the branch was already contained in the base — nothing to merge).
+
+    A conflict raises ``GitMergeConflict`` and the conflicted merge is LEFT IN
+    PLACE in the main worktree (no abort) so a resolver session can fix it
+    there; the card branch AND the linked worktree are kept. Leaves the main
+    worktree on the base branch.
     """
     root = Path(git_info["repo"])
     branch = git_info["branch"]
@@ -290,12 +307,13 @@ def merge_card_branch(git_info: dict) -> None:
     if is_dirty(root):
         raise GitError(f"{root} has uncommitted changes — commit or stash them first")
     run_git(["checkout", "-q", base], root)
-    proc = run_git(["merge", "--ff-only", "--quiet", branch], root, check=False)
+    before = run_git(["rev-parse", "HEAD"], root).stdout.strip()
+    proc = run_git(["merge", "--no-ff", "--no-edit", "--quiet", branch], root,
+                   check=False)
     if proc.returncode != 0:
-        proc = run_git(["merge", "--no-edit", "--quiet", branch], root, check=False)
-        if proc.returncode != 0:
-            raise GitMergeConflict(
-                f"merging {branch} into {base} conflicted — left in place for "
-                f"resolution (branch {branch} was kept)")
-    remove_card_worktree(git_info)
-    delete_card_branch(git_info)
+        raise GitMergeConflict(
+            f"merging {branch} into {base} conflicted — left in place for "
+            f"resolution (branch {branch} was kept)")
+    head = run_git(["rev-parse", "HEAD"], root).stdout.strip()
+    return {"merge_commit": head, "merge_was_ff": head == before,
+            "merged_at": datetime.now(timezone.utc).isoformat()}

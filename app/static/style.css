@@ -1558,3 +1558,183 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
 /* Per-card ⤴ only while the pile is fanned out (it would cover the card
  * otherwise); the header's own controls are always visible. */
 .stack--open .card-unstack { display: inline-block; }
+
+/* ---------------- Diff panel (what a card actually changed) ---------------- */
+
+.diff-modal {
+  max-width: 1100px;
+  height: 90vh;
+  overflow: hidden;   /* the diff body scrolls, the verdict stays pinned */
+}
+
+/* Range selector: card (what accept merged) / round (what the reviewer
+ * judged) / worktree (uncommitted changes). */
+.diff-ranges {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.diff-range {
+  background: var(--pill-bg);
+  color: var(--ink);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.diff-range--on {
+  background: var(--accent, #6c5ce7);
+  border-color: var(--accent, #6c5ce7);
+  color: #fff;
+}
+
+/* The verdict that judged this range, pinned next to the diff. */
+.diff-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--pill-bg);
+}
+
+.diff-badge {
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.diff-badge--ok { background: #1f7a4d; color: #fff; }
+.diff-badge--bad { background: #a33; color: #fff; }
+
+.diff-verdict-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.diff-verdict-reason {
+  margin: 0;
+  flex: 1 1 100%;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.diff-verdict-none { font-size: 12px; opacity: 0.7; }
+
+.diff-panes {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* Changed files with their +/- counts; clicking one scrolls to it. */
+.diff-files {
+  flex: 0 0 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.diff-file {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.diff-file:hover { background: var(--pill-bg); }
+
+.diff-file-path {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;   /* keep the file name visible when the path is long */
+}
+
+.diff-file-add { color: #2e9e63; }
+.diff-file-del { color: #c0504d; }
+.diff-files-empty { font-size: 12px; opacity: 0.7; margin: 4px; }
+
+/* The diff itself: one row per line, classified by app.js. */
+.diff-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  margin: 0;
+  background: #1e1e2e;
+  color: #d8e0ea;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  border-radius: 8px;
+  padding: 8px 0;
+}
+
+.diff-line {
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line--hunk { color: #7aa2f7; background: rgba(122, 162, 247, 0.10); }
+.diff-line--meta { color: #8b93a7; }
+.diff-line--add { color: #9ece6a; background: rgba(158, 206, 106, 0.10); }
+.diff-line--del { color: #f7768e; background: rgba(247, 118, 142, 0.10); }
+.diff-line--ctx { color: #c0caf5; }
+
+/* ---------------- Keys panel ---------------- */
+
+.keys-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.keys-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.keys-key {
+  flex: 0 0 auto;
+  min-width: 34px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  border: 1px solid var(--border-soft);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: var(--pill-bg);
+}
+
+.keys-text { display: flex; flex-direction: column; }
+.keys-label { font-size: 13px; }
+.keys-hint { font-size: 12px; opacity: 0.75; }

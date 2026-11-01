@@ -38,6 +38,7 @@
         <button class="rail-btn" type="button" data-panel="models" title="Models — which model each kind of session runs on" aria-controls="sidebar-panel">🧠</button>
         <button class="rail-btn" type="button" data-panel="archive" title="Archive — the archive folders, the projects inside them and their cards" aria-controls="sidebar-panel">📦</button>
         <button class="rail-btn" type="button" data-panel="split" title="Split — do cards split into sub-cards cost less per accepted outcome?" aria-controls="sidebar-panel">⤷</button>
+        <button class="rail-btn" type="button" data-panel="keys" title="Keys — every keyboard shortcut" aria-controls="sidebar-panel">⌨</button>
       </nav>
       <section class="sidebar-panel" id="sidebar-panel" hidden aria-label="Sidebar panel">
         <header class="sidebar-head">
@@ -130,6 +131,7 @@
         <button class="btn btn-ok" id="btn-accept" hidden>✓ Accept</button>
         <button class="btn" id="btn-archive" hidden title="Move this accepted card into an archive">📦 Archive</button>
         <button class="btn" id="btn-log" hidden>View log</button>
+        <button class="btn" id="btn-diff" hidden title="What this card actually changed (shortcut: hover the card and press D)">Diff</button>
         <button class="btn btn-danger" id="btn-delete">Delete</button>
       </div>
     </div>
@@ -143,6 +145,23 @@
         <button class="icon-btn" id="log-close" title="Close (Esc)">×</button>
       </div>
       <pre id="log-content" class="log-content">…</pre>
+    </div>
+  </div>
+
+  <!-- Diff viewer: what the card actually changed, with the verdict that
+       approved it pinned next to the diff. -->
+  <div class="overlay" id="diff-overlay" hidden>
+    <div class="modal modal-wide diff-modal" role="dialog" aria-modal="true" aria-labelledby="diff-heading">
+      <div class="modal-head">
+        <h2 id="diff-heading">Diff</h2>
+        <button class="icon-btn" id="diff-close" title="Close (Esc)">×</button>
+      </div>
+      <div class="diff-ranges" id="diff-ranges" role="group" aria-label="Diff range"></div>
+      <div class="diff-verdict" id="diff-verdict"></div>
+      <div class="diff-panes">
+        <aside class="diff-files" id="diff-files" aria-label="Changed files"></aside>
+        <pre class="diff-body" id="diff-body"></pre>
+      </div>
     </div>
   </div>
 

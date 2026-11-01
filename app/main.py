@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -53,7 +53,7 @@ from app.questions import (
     QuestionNotPending,
     QuestionStore,
 )
-from app import routemd
+from app import diffs, gitops, routemd
 from app.runner import (
     TOKEN_BREAKDOWN_KEYS,
     NotRunningError,
@@ -407,6 +407,18 @@ def create_app(config: Config | None = None,
     def get_log(card_id: str, tail: int = Query(200, ge=1, le=5000)):
         return {"lines": runner.log_tail(card_id, n=tail)}
 
+    @app.get("/api/cards/{card_id}/diff")
+    def get_diff(card_id: str, range: str = Query(diffs.DEFAULT_RANGE)):
+        # What the card actually changed: card (what accept merged), round
+        # (what the reviewer judged) or worktree (uncommitted changes), plus
+        # the verdict record for it. A sandbox card answers "not git-backed";
+        # an unknown range is a 400.
+        card = store.get(card_id)
+        try:
+            return diffs.card_diff(card, range)
+        except diffs.DiffRangeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     # --- questions (model asks the user on the card) ------------------
     @app.post("/api/cards/{card_id}/questions", status_code=201)
     def ask_question(card_id: str, payload: QuestionIn):
@@ -489,28 +501,65 @@ def create_app(config: Config | None = None,
         # manifest + the archived cards (items)
         return archives.get(archive_id)
 
+    def _archived_git_infos(card_ids: list[str]) -> list[dict]:
+        """Snapshot the git records of cards about to be archived (they leave
+        the board, so they cannot be read afterwards)."""
+        infos = []
+        for card_id in card_ids:
+            try:
+                git_info = (store.get(card_id).get("session") or {}).get("git") or {}
+            except Exception:
+                continue
+            if git_info.get("worktree"):
+                infos.append(git_info)
+        return infos
+
+    def _drop_archived_worktrees(git_infos: list[dict]) -> None:
+        """Archiving a card removes its linked git worktree (the card branch
+        is kept): an archived card is off the board, so nothing reads the
+        worktree any more — and the disk cost of keeping every accepted card's
+        worktree is exactly what this bounds. Best effort: a broken repo must
+        never block the archive."""
+        for git_info in git_infos:
+            try:
+                gitops.remove_card_worktree(git_info)
+            except Exception:
+                pass
+
     @app.post("/api/archives/{archive_id}/cards/{card_id}")
     def archive_card(archive_id: str, card_id: str):
         # Move one card into the archive (from the board it must be accepted;
         # from another archive it is a plain move). 404 unknown, 409 gate.
-        return archives.archive_card(card_id, archive_id)
+        git_infos = _archived_git_infos([card_id])
+        result = archives.archive_card(card_id, archive_id)
+        _drop_archived_worktrees(git_infos)
+        return result
 
     @app.post("/api/archives/{archive_id}/cards")
     def archive_cards(archive_id: str, payload: ArchiveNotesIn):
         # Move a batch of cards (e.g. a whole deck/stack) into the archive.
-        return archives.archive_cards(payload.card_ids, archive_id)
+        git_infos = _archived_git_infos(list(payload.card_ids))
+        result = archives.archive_cards(payload.card_ids, archive_id)
+        _drop_archived_worktrees(git_infos)
+        return result
 
     @app.post("/api/archives/{archive_id}/stacks/{stack_id}")
     def archive_stack(archive_id: str, stack_id: str):
         # Retire a whole deck into this archive: its cards move, the deck is
         # recorded in the manifest and dissolved. 404 unknown, 409 gate.
-        return archives.archive_stack(stack_id, archive_id)
+        git_infos = _archived_git_infos(list(stacks.get(stack_id)["ids"]))
+        result = archives.archive_stack(stack_id, archive_id)
+        _drop_archived_worktrees(git_infos)
+        return result
 
     @app.post("/api/archives/stacks/{stack_id}")
     def archive_stack_into_new_archive(stack_id: str):
         # Same, but the archive is created (or reused) under the deck's title —
         # one archive per retired deck is the board's structure.
-        return archives.archive_stack(stack_id)
+        git_infos = _archived_git_infos(list(stacks.get(stack_id)["ids"]))
+        result = archives.archive_stack(stack_id)
+        _drop_archived_worktrees(git_infos)
+        return result
 
     @app.delete("/api/archives/{archive_id}/cards/{card_id}")
     def unarchive_card(archive_id: str, card_id: str):

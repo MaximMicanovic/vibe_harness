@@ -1,6 +1,7 @@
 """API tests via FastAPI TestClient. Hermetic: fake vibe binary, temp dirs."""
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from app import fsdialog, gitops
 from app.config import Config
 from app.main import create_app
+from app.archives import ArchiveStore
 from app.cards import CardStore
 from app.projects import ProjectStore
 from app.runner import SessionRunner
@@ -123,7 +125,8 @@ exit 0
 """
 
 
-def make_env(tmp_path: Path, script: str = FAKE_VIBE, **config_kwargs) -> SimpleNamespace:
+def make_env(tmp_path: Path, script: str = FAKE_VIBE, archives=None,
+             **config_kwargs) -> SimpleNamespace:
     cards_dir = tmp_path / "cards"
     sessions_dir = tmp_path / "sessions"
     store = CardStore(cards_dir)
@@ -133,7 +136,8 @@ def make_env(tmp_path: Path, script: str = FAKE_VIBE, **config_kwargs) -> Simple
     config = Config(vibe_bin=str(fake), time_limit_seconds=30, **config_kwargs)
     projects = ProjectStore(tmp_path / "projects.json")
     runner = SessionRunner(store, config, sessions_dir=sessions_dir, projects=projects)
-    app = create_app(config=config, store=store, runner=runner, projects=projects)
+    app = create_app(config=config, store=store, runner=runner, projects=projects,
+                     archives=archives)
     client = TestClient(app)
     return SimpleNamespace(client=client, store=store, runner=runner,
                            projects=projects, sessions_dir=sessions_dir, tmp_path=tmp_path)
@@ -486,17 +490,16 @@ def test_deck_view_removed(env):
     # Card 7630ae: the D-key "deck" flip view does not represent what the deck
     # feature is (drag cards onto each other to stack them, card 9f3758), so
     # the whole D-key deck view is removed — markup, JS and styles. Stacking
-    # stays (also covered by test_card_stacking_wired).
+    # stays (also covered by test_card_stacking_wired). D itself is now the
+    # diff shortcut (card b4e872), which is not a deck view.
     r = env.client.get("/")
     html = r.text
     assert "deck" not in html.lower()
 
     r = env.client.get("/app.js")
     js = r.text
-    # No deck state, functions, listeners or keyboard handling remain.
+    # No deck state, functions or listeners remain.
     assert "deck" not in js.lower()
-    assert "e.key === 'd'" not in js
-    assert "e.key === 'D'" not in js
     # ...while card stacking (the real deck feature) is still wired.
     assert "function stackCards(dragId, targetId)" in js
 
@@ -800,8 +803,8 @@ def _git(args, cwd):
 def test_accept_merges_git_branch(tmp_path):
     """A project run is git-backed: the card runs on its branch in a linked
     worktree (the project folder stays on the base branch); accept merges the
-    branch into the base IN THE MAIN WORKTREE, then removes the worktree and
-    the branch."""
+    branch into the base IN THE MAIN WORKTREE with --no-ff, and KEEPS the
+    branch and the worktree so the card's diff stays inspectable."""
     e = make_env(tmp_path)
     with e.client:
         proj = tmp_path / "proj"
@@ -825,12 +828,17 @@ def test_accept_merges_git_branch(tmp_path):
         assert r.json()["status"] == "accepted"
         assert r.json()["session"]["git"]["merged"] is True
         assert _git(["symbolic-ref", "--short", "HEAD"], proj) == git_info["base_branch"]
-        assert "hello.py" in _git(
-            ["show", "--name-only", "--format=", git_info["base_branch"]], proj)
-        assert not gitops.branch_exists(proj, git_info["branch"])
-        # The linked worktree was removed on merge.
-        assert not wt.exists()
-        assert wt.resolve() not in gitops.registered_worktrees(proj)
+        assert "hello.py" in _git(["ls-tree", "--name-only", git_info["base_branch"]], proj)
+        # One merge commit per accepted card, recorded on the session.
+        g = r.json()["session"]["git"]
+        assert g["merge_commit"] == _git(["rev-parse", "HEAD"], proj)
+        assert g["merge_was_ff"] is False
+        assert g["merged_at"]
+        assert len(_git(["rev-list", "--parents", "-n", "1", "HEAD"], proj).split()) == 3
+        # The branch and the linked worktree are kept after accept.
+        assert gitops.branch_exists(proj, git_info["branch"])
+        assert wt.exists()
+        assert wt.resolve() in gitops.registered_worktrees(proj)
 
 
 @git_test
@@ -902,10 +910,14 @@ def test_accept_spawns_resolver_on_merge_conflict(tmp_path):
         assert g["merged"] is True
         assert g["resolving"] is False
         assert _git(["symbolic-ref", "--short", "HEAD"], proj) == g["base_branch"]
-        assert "hello.py" in _git(["show", "--name-only", "--format=", g["base_branch"]], proj)
-        assert not gitops.branch_exists(proj, g["branch"])
-        assert not Path(g["worktree"]).exists()   # worktree removed after merge
-        assert Path(g["worktree"]).resolve() not in gitops.registered_worktrees(proj)
+        assert "hello.py" in _git(["ls-tree", "--name-only", g["base_branch"]], proj)
+        # The resolver's commit is the card's merge commit; branch + worktree
+        # are kept so the diff survives the accept.
+        assert g["merge_commit"] == _git(["rev-parse", "HEAD"], proj)
+        assert g["merged_at"]
+        assert gitops.branch_exists(proj, g["branch"])
+        assert Path(g["worktree"]).is_dir()
+        assert Path(g["worktree"]).resolve() in gitops.registered_worktrees(proj)
 
 
 @git_test
@@ -1258,3 +1270,167 @@ def test_app_attribute_is_built_lazily_and_cached(monkeypatch):
         assert vars(main_module)["app"] == "APP"
     finally:
         vars(main_module).pop("app", None)
+
+
+# ----------------------------------------------------------------------
+# card diff (what the card actually changed)
+# ----------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _git_card(tmp_path, body="write hello.py", archives=None):
+    """A project-backed card that ran to done, inside a live client context
+    (the lifespan's startup pruning runs before the card, not after it).
+    Yields (env, card, git_info)."""
+    e = make_env(tmp_path, archives=archives)
+    with e.client:
+        proj = tmp_path / "proj"
+        e.client.post("/api/projects", json={"name": "p", "path": str(proj)})
+        card = create_card(e.client, project="p", body=body)
+        e.client.post(f"/api/cards/{card['id']}/run")
+        final = wait_for_status(e.client, card["id"], {"done"})
+        yield e, final, final["session"]["git"]
+
+
+@git_test
+def test_diff_endpoint_card_range_before_and_after_accept(tmp_path):
+    """`range=card` is what accept merged: base_branch..harness/<id> before
+    accept, merge_commit^..merge_commit after — and it survives the accept
+    because the branch and the worktree are kept."""
+    with _git_card(tmp_path) as (e, card, git_info):
+        r = e.client.get(f"/api/cards/{card['id']}/diff")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["range"] == "card"
+        assert "hello.py" in body["diff"]
+        assert body["truncated"] is False
+        assert body["files"] == [{"path": "hello.py", "additions": 1, "deletions": 0}]
+        assert body["base"] and body["head"]
+        assert body["review"]["approved"] is True
+
+        r = e.client.post(f"/api/cards/{card['id']}/accept")
+        assert r.status_code == 200, r.text
+        g = r.json()["session"]["git"]
+        assert g["merge_commit"] and g["merged_at"]
+        assert g["merge_was_ff"] is False
+        # The branch and the linked worktree survive the accept.
+        proj = Path(git_info["repo"])
+        assert gitops.branch_exists(proj, git_info["branch"])
+        assert Path(git_info["worktree"]).exists()
+
+        r = e.client.get(f"/api/cards/{card['id']}/diff")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "hello.py" in body["diff"]
+        assert body["head"] == g["merge_commit"]
+        assert body["base"] == _git(["rev-parse", g["merge_commit"] + "^"], proj)
+        assert body["files"] == [{"path": "hello.py", "additions": 1, "deletions": 0}]
+
+
+@git_test
+def test_diff_endpoint_round_and_worktree_ranges(tmp_path):
+    """`round` is what the reviewer judged, `worktree` the uncommitted changes."""
+    with _git_card(tmp_path) as (e, card, git_info):
+        r = e.client.get(f"/api/cards/{card['id']}/diff?range=round")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["range"] == "round"
+        assert "hello.py" in body["diff"]
+        assert body["review"]["approved"] is True
+
+        # Uncommitted work in the card's worktree shows up in `worktree`
+        # (`git diff HEAD`: tracked changes, like the reviewer's own view).
+        wt = Path(git_info["worktree"])
+        (wt / "hello.py").write_text("print('hi')\nprint('uncommitted')\n")
+        r = e.client.get(f"/api/cards/{card['id']}/diff?range=worktree")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["range"] == "worktree"
+        assert "uncommitted" in body["diff"]
+        assert body["files"] == [{"path": "hello.py", "additions": 2, "deletions": 1}]
+
+        # An unknown range is a client error, not a 500.
+        r = e.client.get(f"/api/cards/{card['id']}/diff?range=nope")
+        assert r.status_code == 400
+
+
+@git_test
+def test_diff_endpoint_truncates_huge_diffs(tmp_path):
+    """The diff is capped (400 KB) and flagged, so a giant card cannot hang
+    the panel."""
+    with _git_card(tmp_path) as (e, card, git_info):
+        wt = Path(git_info["worktree"])
+        (wt / "hello.py").write_text("x" * 500_000 + "\n")
+        r = e.client.get(f"/api/cards/{card['id']}/diff?range=worktree")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["truncated"] is True
+        assert len(body["diff"]) <= 400 * 1024 + 200
+
+
+@git_test
+def test_archiving_an_accepted_card_removes_its_worktree(tmp_path):
+    """An archived card leaves the board, so its linked worktree goes away
+    (the card branch is kept) — that is what bounds the disk cost of keeping
+    every accepted card's worktree around for the diff view."""
+    archives = ArchiveStore(tmp_path / "archives", CardStore(tmp_path / "cards"))
+    with _git_card(tmp_path, archives=archives) as (e, card, git_info):
+        e.client.post(f"/api/cards/{card['id']}/accept")
+        wt = Path(git_info["worktree"])
+        assert wt.exists()
+        a = e.client.post("/api/archives",
+                          json={"name": "done", "type": "cards"}).json()
+        r = e.client.post(f"/api/archives/{a['id']}/cards/{card['id']}")
+        assert r.status_code == 200, r.text
+        assert not wt.exists()
+        assert gitops.branch_exists(Path(git_info["repo"]), git_info["branch"])
+
+
+def test_diff_endpoint_sandbox_card_is_not_git_backed(env):
+    """A sandbox (non-git) card answers clearly instead of 500ing."""
+    card = create_card(env.client, body="write hello.py")
+    env.client.post(f"/api/cards/{card['id']}/run")
+    wait_for_status(env.client, card["id"], {"done"})
+    r = env.client.get(f"/api/cards/{card['id']}/diff")
+    assert r.status_code == 200, r.text
+    assert r.json()["diff"] is None
+    assert r.json()["reason"] == "not git-backed"
+
+
+def test_diff_endpoint_unknown_card_404(env):
+    assert env.client.get("/api/cards/deadbe/diff").status_code == 404
+
+
+# ----------------------------------------------------------------------
+# front-end wiring: diff panel + keys panel
+# ----------------------------------------------------------------------
+
+def test_diff_panel_wired(env):
+    """D over a card opens the diff panel; the panel renders the diff with a
+    line classifier and inserts every line as a TEXT NODE (the content is
+    model-written — never innerHTML)."""
+    js = env.client.get("/app.js").text
+    for needle in (
+        "function openDiff(",
+        "function renderDiff(",
+        "function classifyDiffLine(",
+        "/diff?range=",
+        "createTextNode",
+        "KEYBINDINGS",
+    ):
+        assert needle in js, needle
+    # The diff body is never assigned through innerHTML.
+    assert "diffBody.innerHTML" not in js
+    assert "innerHTML" not in js.split("function renderDiff(")[1].split("function ")[0]
+    html = env.client.get("/").text
+    assert 'data-panel="keys"' in html
+    assert 'id="diff-overlay"' in html
+    assert 'id="btn-diff"' in html
+
+
+def test_keys_panel_lists_every_keybinding(env):
+    """The Keys panel is generated from one list in app.js, so it cannot drift
+    from the handlers."""
+    js = env.client.get("/app.js").text
+    keys_block = js.split("const KEYBINDINGS = [")[1].split("];")[0]
+    assert "'N'" in keys_block and "'Esc'" in keys_block and "'D'" in keys_block
+    assert "renderKeysPanel" in js

@@ -198,19 +198,58 @@ def test_commit_workspace(repo, tmp_path):
     assert git(["symbolic-ref", "--short", "HEAD"], repo) == "main"
 
 
-def test_merge_card_branch_fast_forward(repo, tmp_path):
+def test_merge_card_branch_keeps_branch_and_worktree(repo, tmp_path):
+    """Accept merges with --no-ff (one merge commit per card) and KEEPS the
+    card branch and its linked worktree, so the card's diff stays inspectable
+    after accept. The merge result is returned for the session record."""
     wt = _wt(tmp_path, "abc123")
     info = gitops.prepare_card_branch(repo, "harness/abc123", wt)
     (wt / "hello.py").write_text("print('hi')\n")
     gitops.commit_workspace(wt, "vibe-harness: test")
-    gitops.merge_card_branch(info)
+    result = gitops.merge_card_branch(info)
     assert git(["symbolic-ref", "--short", "HEAD"], repo) == "main"
     assert (repo / "hello.py").exists()
-    assert not gitops.branch_exists(repo, "harness/abc123")
-    assert "hello.py" in git(["show", "--name-only", "--format=", "main"], repo)
-    # The linked worktree is removed on a successful merge.
-    assert not wt.exists()
-    assert wt.resolve() not in gitops.registered_worktrees(repo)
+    assert "hello.py" in git(["ls-tree", "--name-only", "main"], repo)
+    # The branch and the linked worktree survive the accept.
+    assert gitops.branch_exists(repo, "harness/abc123")
+    assert wt.exists()
+    assert wt.resolve() in gitops.registered_worktrees(repo)
+    assert git(["symbolic-ref", "--short", "HEAD"], wt) == "harness/abc123"
+    # Exactly ONE merge commit, with two parents (never a fast-forward).
+    head = git(["rev-parse", "HEAD"], repo)
+    assert result["merge_commit"] == head
+    assert result["merge_was_ff"] is False
+    assert result["merged_at"]
+    assert len(git(["rev-list", "--parents", "-n", "1", "HEAD"], repo).split()) == 3
+    # The card's own commit is reachable from the merge commit's second parent.
+    assert git(["rev-parse", "HEAD^2"], repo) == git(["rev-parse", "harness/abc123"], repo)
+
+
+def test_merge_card_branch_no_ff_even_when_base_did_not_move(repo, tmp_path):
+    """A card whose base never moved would fast-forward; --no-ff still gives
+    the single merge commit that means "this card" (diff view + revert)."""
+    wt = _wt(tmp_path, "abc123")
+    info = gitops.prepare_card_branch(repo, "harness/abc123", wt)
+    (wt / "hello.py").write_text("print('hi')\n")
+    gitops.commit_workspace(wt, "vibe-harness: test")
+    before = git(["rev-parse", "HEAD"], repo)
+    result = gitops.merge_card_branch(info)
+    assert result["merge_commit"] != before
+    assert git(["rev-parse", "HEAD^1"], repo) == before
+
+
+def test_merge_card_branch_already_up_to_date(repo, tmp_path):
+    """Merging a branch that is already contained in the base creates no new
+    commit; the result says so (merge_was_ff) and reports the current HEAD."""
+    wt = _wt(tmp_path, "abc123")
+    info = gitops.prepare_card_branch(repo, "harness/abc123", wt)
+    (wt / "hello.py").write_text("print('hi')\n")
+    gitops.commit_workspace(wt, "vibe-harness: test")
+    first = gitops.merge_card_branch(info)
+    second = gitops.merge_card_branch(info)
+    assert second["merge_commit"] == first["merge_commit"]
+    assert second["merge_was_ff"] is True
+    assert second["merged_at"]
 
 
 def test_merge_card_branch_conflict_left_in_place(repo, tmp_path):
