@@ -1840,3 +1840,27 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
   background: var(--surface-2);
   border-color: var(--border-soft);
 }
+
+/* Position in the "Accept all" merge queue (1 = merging now). */
+.queue-pos {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  margin-top: 1px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  color: var(--ok-ink);
+  background: var(--ok-soft);
+  border: 1px solid var(--ok-border);
+}
+
+/* The card the drain is merging right now. */
+.queue-pos--current {
+  color: #fff;
+  background: var(--ok-ink);
+  border-color: var(--ok-ink);
+}

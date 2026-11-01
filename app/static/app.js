@@ -545,13 +545,26 @@ function buildAcceptAll(batchCount, restCount) {
   return wrap;
 }
 
-function buildCard(cardData) {
+/* Position in the "Accept all" merge queue. 1 is the card being merged now;
+ * the rest merge in that order, so the number is the promise the board makes
+ * about what happens next. */
+function buildQueuePosBadge(pos) {
+  const badge = el('span', 'queue-pos', String(pos));
+  badge.title = pos === 1
+    ? 'Merging now — first in the queue'
+    : 'Queued #' + pos + ' — merges after the cards above it';
+  if (pos === 1) badge.classList.add('queue-pos--current');
+  return badge;
+}
+
+function buildCard(cardData, queuePos) {
   const card = el('article', 'card card--' + cardData.status);
   card.dataset.cardId = cardData.id;
   card.style.setProperty('--tilt', tiltFor(cardData.id));
 
   const head = el('div', 'card-head');
   if (cardData.status === 'running' || cardData.status === 'reviewing' || isResolving(cardData) || isQueued(cardData)) head.appendChild(el('span', 'spinner'));
+  if (queuePos) head.appendChild(buildQueuePosBadge(queuePos));
   const titleText = cardData.title || '(untitled)';
   const title = el('h3', 'card-title', titleText);
   title.title = titleText;  // the full name is always reachable on hover
@@ -1147,7 +1160,7 @@ function fanAngle(i, n) {
  * The node returned is the wrapper (.stack-wrap): a header row carrying the
  * stack's name and its controls, above the pile itself (.stack). The pile keeps
  * the class name because the fan layout and the card lookups key off it. */
-function buildStack(stack, byId) {
+function buildStack(stack, byId, queuePos) {
   const wrap = el('div', 'stack-wrap');
   wrap.dataset.stackId = stack.id;
   const ids = stack.ids.filter((id) => byId.has(id));
@@ -1162,6 +1175,7 @@ function buildStack(stack, byId) {
     startRenameStack(stack, title);
   });
   head.appendChild(title);
+  if (queuePos) head.appendChild(buildQueuePosBadge(queuePos));
   wrap.appendChild(head);
 
   const pile = el('div', 'stack');
@@ -1389,6 +1403,21 @@ function renderBoard() {
         : !!((item.card.session || {}).accept_queued);
       const batch = items.filter(inBatch);
       const rest = items.filter((it) => !inBatch(it));
+      // Number the batch in the order the drain will merge it: oldest
+      // accept_queued_at first, id as the tie-break — the same rule the
+      // server's _next_accept_queued() uses, so the numbers cannot lie.
+      const queueKey = (item) => {
+        const ids = item.kind === 'stack' ? item.stack.ids : [item.card.id];
+        return ids.map((id) => ((byId.get(id) || {}).session || {}).accept_queued_at || '')
+          .sort()[0] || '';
+      };
+      const firstId = (item) => (item.kind === 'stack' ? item.stack.ids[0] : item.card.id);
+      batch.sort((a, b) => {
+        const ka = queueKey(a), kb = queueKey(b);
+        if (ka !== kb) return ka < kb ? -1 : 1;
+        return firstId(a) < firstId(b) ? -1 : firstId(a) > firstId(b) ? 1 : 0;
+      });
+      batch.forEach((item, i) => { item.queuePos = i + 1; });
       batchCount = batch.length;
       restCount = rest.length;
       // No batch running: the button is simply the last thing in the column.
@@ -1428,8 +1457,8 @@ function renderBoard() {
       const key = item.kind === 'stack' ? 'stack:' + item.stack.id : 'card:' + item.card.id;
       // Everything the item renders from: a change rebuilds the node.
       const sig = item.kind === 'stack'
-        ? item.stack.ids.join('|') + '#' + (item.stack.title || '') + '#' + item.stack.ids.map((id) => JSON.stringify(byId.get(id))).join('|')
-        : JSON.stringify(item.card) + (state.expandedTitles.has(item.card.id) ? '#expanded' : '');
+        ? item.stack.ids.join('|') + '#' + (item.stack.title || '') + '#' + item.stack.ids.map((id) => JSON.stringify(byId.get(id))).join('|') + '#q' + (item.queuePos || '')
+        : JSON.stringify(item.card) + (state.expandedTitles.has(item.card.id) ? '#expanded' : '') + '#q' + (item.queuePos || '');
       const old = oldNodes.get(key);
       if (old && old._renderSig === sig) {
         reused.add(key);
@@ -1443,7 +1472,7 @@ function renderBoard() {
         old.remove();
       }
       if (item.kind === 'stack') {
-        const stackEl = buildStack(item.stack, byId);
+        const stackEl = buildStack(item.stack, byId, item.queuePos);
         stackEl._renderSig = sig;
         // The pile is the node that carries the fan layout (--card-h, --fan-pad,
         // --fan-shift) and the height transition; the wrapper only holds the
@@ -1467,7 +1496,7 @@ function renderBoard() {
           stackCards.forEach((c) => { c.style.transition = ''; });
         });
       } else {
-        const card = buildCard(item.card);
+        const card = buildCard(item.card, item.queuePos);
         card._renderSig = sig;
         wireCardDrag(card, item.card);
         wireCardDrop(card, item.card);

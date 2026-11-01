@@ -618,7 +618,7 @@ def test_card_stacking_wired(env):
         "function wireCardDrag(card, cardData)",
         "function wireCardDrop(card, cardData)",
         "function wireColumnDrop(wrap, colKey)",
-        "function buildStack(stack, byId)",
+        "function buildStack(stack, byId, queuePos)",
         "function layoutStack(stackEl)",
         "stack--open",
         "card--drop",
