@@ -371,6 +371,105 @@ def test_spawn_refuses_a_second_live_session(store, tmp_path, slow_vibe):
             entry["proc"].wait()
 
 
+def test_two_starts_at_the_cap_start_one_session(store, tmp_path, slow_vibe,
+                                                 monkeypatch):
+    """The cap check and the slot registration must be atomic: two Run clicks
+    (or a drain racing a click) that both pass the check would start two
+    sessions at limit 1.
+
+    The window between the check and the registry insert is the start path
+    itself — in production the git prep (worktree add), which is why the race
+    reproduces with real git-backed cards. The sleep below widens exactly that
+    window so the test is deterministic.
+    """
+    runner = _make_runner(store, tmp_path, slow_vibe, max_concurrent=1)
+    cards = [store.create(f"Card {i}", "spec") for i in range(2)]
+
+    real_prepare = runner._prepare_git
+
+    def slow_prepare(card):
+        time.sleep(0.3)
+        return real_prepare(card)
+
+    monkeypatch.setattr(runner, "_prepare_git", slow_prepare)
+
+    def start(card_id):
+        try:
+            runner.run(card_id)
+        except CardRunning:
+            pass          # the card lost the race: it is already running
+
+    threads = [threading.Thread(target=start, args=(c["id"],)) for c in cards]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+
+        assert runner.running_count() == 1, (
+            f"the cap must hold: {runner.running_count()} sessions at limit 1")
+        statuses = sorted(store.get(c["id"])["status"] for c in cards)
+        assert statuses == ["draft", "running"], statuses
+        queued = [c for c in cards
+                  if (store.get(c["id"])["session"] or {}).get("queued")]
+        assert len(queued) == 1, "the card that lost the race must be queued"
+        assert (store.get(queued[0]["id"])["session"]["queue_reason"]
+                == "waiting for a free slot (1/1 running)")
+    finally:
+        for entry in list(runner._registry.values()):
+            entry["proc"].kill()
+            entry["proc"].wait()
+        deadline = time.time() + 10
+        while runner.running_count() and time.time() < deadline:
+            time.sleep(0.05)
+
+
+def test_concurrent_dependent_drains_respect_the_cap(store, tmp_path, slow_vibe,
+                                                     monkeypatch):
+    """Two sessions ending together both drain dependents. The drain must be
+    serialized (and the start atomic), or two ready drafts start at limit 1."""
+    runner = _make_runner(store, tmp_path, slow_vibe, max_concurrent=1)
+    dep = store.create("Dep", "spec")
+    store.set_status(dep["id"], "running")
+    store.set_status(dep["id"], "done")
+    cards = []
+    for i in range(2):
+        card = store.create(f"Dependent {i}", "spec")
+        store.patch_session(card["id"], {"waiting_for": [dep["id"]]})
+        cards.append(card)
+
+    real_prepare = runner._prepare_git
+
+    def slow_prepare(card):
+        time.sleep(0.3)
+        return real_prepare(card)
+
+    monkeypatch.setattr(runner, "_prepare_git", slow_prepare)
+
+    threads = [threading.Thread(target=runner._drain_dependents) for _ in range(2)]
+    try:
+        threads[0].start()
+        # Thread 1 has cleared the first card's waiting_for and is inside the
+        # slow start path; thread 2 now lists the board and finds the second
+        # card ready while the first one is not registered yet.
+        time.sleep(0.1)
+        threads[1].start()
+        for t in threads:
+            t.join(timeout=20)
+
+        assert runner.running_count() == 1, (
+            f"the cap must hold: {runner.running_count()} sessions at limit 1")
+        statuses = sorted(store.get(c["id"])["status"] for c in cards)
+        assert statuses == ["draft", "running"], statuses
+    finally:
+        for entry in list(runner._registry.values()):
+            entry["proc"].kill()
+            entry["proc"].wait()
+        deadline = time.time() + 10
+        while runner.running_count() and time.time() < deadline:
+            time.sleep(0.05)
+
+
 # ---------------------------------------------------------------------- API
 def make_env(tmp_path: Path, **config_kwargs) -> SimpleNamespace:
     cards_dir = tmp_path / "cards"

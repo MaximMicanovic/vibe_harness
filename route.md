@@ -118,9 +118,10 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   `session.queued`/`queue_reason` ("waiting for a free slot (2/3 running)") and
   `_drain_queued_runs` starts it, FIFO by `session.queued_at`, as soon as a
   session ends (end of every session, after Stop, after a resolver concludes,
-  and at startup). Drains are serialized and a session's slot is always
-  released, so two sessions ending together cannot start the same card twice or
-  shrink the cap. One card holds one slot at a time — run → review → fixer are
+  and at startup). Drains are serialized and the cap check plus the slot
+  registration are atomic, so two sessions ending together cannot start the
+  same card twice or push the board past the cap, and a session's slot is
+  always released. One card holds one slot at a time — run → review → fixer are
   sequential — so the cap bounds concurrent sessions, worktrees and test suites,
   and therefore the peak spend rate. It does not reduce the tokens a single card
   costs; it stops ten Run clicks from starting ten sessions at once.
