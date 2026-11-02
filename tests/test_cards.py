@@ -9,6 +9,7 @@ import pytest
 from app.cards import (
     SESSION_KEYS,
     STATUSES,
+    CardConflict,
     DependencyError,
     InvalidTransition,
     CardNotFound,
@@ -117,6 +118,36 @@ def test_edit_done_card_resets_to_draft(store: CardStore):
     assert updated["session"] is None
     assert updated["accepted"] is False
     assert updated["body"] == "edited body"
+
+
+def test_update_with_stale_expected_updated_at_raises(store: CardStore):
+    """Optimistic concurrency: a save that names the version it loaded is
+    refused when somebody else wrote the card in between."""
+    card = store.create("T", "original body")
+    stale = card["updated_at"]
+    store.update(card["id"], body="their edit")   # the other person saves first
+
+    with pytest.raises(CardConflict) as exc:
+        store.update(card["id"], body="my edit", expected_updated_at=stale)
+    assert "changed since you opened it" in str(exc.value)
+    # The refused save wrote nothing.
+    assert store.get(card["id"])["body"] == "their edit"
+
+
+def test_update_with_matching_expected_updated_at_succeeds(store: CardStore):
+    card = store.create("T", "original body")
+    updated = store.update(card["id"], body="my edit",
+                           expected_updated_at=card["updated_at"])
+    assert updated["body"] == "my edit"
+    assert updated["updated_at"] != card["updated_at"]
+
+
+def test_update_without_expected_updated_at_is_unconditional(store: CardStore):
+    """MCP tools and scripts send no expected_updated_at: last write wins."""
+    card = store.create("T", "original body")
+    store.update(card["id"], body="their edit")
+    updated = store.update(card["id"], body="script edit")
+    assert updated["body"] == "script edit"
 
 
 def test_edit_done_card_without_changes_keeps_status(store: CardStore):

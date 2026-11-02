@@ -107,6 +107,16 @@
         <button class="icon-btn" id="editor-close" title="Close (Esc)">×</button>
       </div>
       <p class="revert-note" id="revert-note" hidden></p>
+      <!-- A save that lost a race: the card changed since the editor loaded it.
+           The user's text stays in the fields; these two buttons are the way
+           out (reload the other person's version, or overwrite it). -->
+      <div class="edit-conflict" id="edit-conflict" hidden>
+        <p class="edit-conflict-text" id="edit-conflict-text"></p>
+        <div class="edit-conflict-actions">
+          <button class="btn" id="btn-reload-theirs" type="button" title="Discard your text and load the version on the board">↻ Reload theirs</button>
+          <button class="btn btn-danger" id="btn-overwrite" type="button" title="Save your text over the other person's edit">Overwrite anyway</button>
+        </div>
+      </div>
       <label class="field" id="template-field">
         <span class="field-label">Template</span>
         <select id="template-select"></select>

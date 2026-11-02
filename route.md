@@ -88,6 +88,13 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
 
 ## 2. Routing rules the harness applies automatically
 
+- **A lost edit race is refused, not silently overwritten.** `PUT
+  /api/cards/{id}` takes an optional `expected_updated_at`; when it is stale the
+  save is a 409 and nothing is written (the editor keeps the user's text and
+  offers reload-theirs / overwrite-anyway). Callers that send nothing — the MCP
+  `update_card` tool, scripts — stay unconditional. This is a token guard as
+  much as a data guard: a silently overwritten spec means the next paid run
+  implements the wrong card.
 - **Fail fast before review.** With `VIBE_HARNESS_TEST_CMD` set, a failing test
   suite rejects the round *before* any reviewer session is spawned — you never
   pay for a review of code that is already known to be broken. The fixer gets

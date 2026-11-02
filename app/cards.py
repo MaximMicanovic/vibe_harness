@@ -66,6 +66,7 @@ class CardNotFound(CardError): ...      # maps to HTTP 404
 class CardRunning(CardError): ...       # maps to HTTP 409
 class InvalidTransition(CardError): ... # maps to HTTP 409
 class DependencyError(CardError): ...   # maps to HTTP 409 (cycle / self-link)
+class CardConflict(CardError): ...      # maps to HTTP 409 (stale edit)
 
 
 def _slugify(title: str) -> str:
@@ -227,11 +228,22 @@ class CardStore:
                auto_accept: bool | None = None,
                project: str | None = None, workdir: str | None = None,
                parent_id: str | None = None,
-               model: str | None = None) -> dict:
+               model: str | None = None,
+               expected_updated_at: str | None = None) -> dict:
         post = self._get_post(card_id)
         card = self._card_from_post(post)
         if card["status"] in LIVE_STATUSES:
             raise CardRunning(f"card {card_id!r} is running and cannot be edited")
+        # Optimistic concurrency: a caller that names the version it loaded
+        # (the editor does) is refused when somebody else wrote the card in
+        # between, instead of silently overwriting their edit. Callers that
+        # send nothing (MCP tools, scripts) keep last-write-wins.
+        if expected_updated_at is not None and \
+                expected_updated_at != card["updated_at"]:
+            raise CardConflict(
+                f"this card changed since you opened it "
+                f"(card {card_id!r} was updated at {card['updated_at']}, "
+                f"you opened {expected_updated_at})")
 
         md = dict(post.metadata)
         # Only content edits (title/body) reset a finished card; changing
