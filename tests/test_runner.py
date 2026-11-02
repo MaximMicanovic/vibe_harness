@@ -2917,3 +2917,20 @@ def test_accept_mode_setting_overrides_the_config_default(
     assert runner.accept_mode() == "local"           # the stored choice wins
     settings.set_accept_mode("pr")
     assert runner.accept_mode() == "pr"
+
+
+# ------------------------------------------------------- the runner's signature
+
+def test_the_runner_signature_annotations_resolve():
+    """`SessionRunner.__init__` annotates `settings: SettingsStore | None`. It is
+    a string annotation (the module uses `from __future__ import annotations`),
+    so a missing import breaks nothing at runtime — but any introspection
+    (`typing.get_type_hints`, a docs generator, a type checker) raises
+    `NameError`. The import is a real one (a TYPE_CHECKING-only import would
+    not be bound at runtime, so the hints would still fail); this pins it."""
+    import typing
+
+    from app.settings import SettingsStore
+
+    hints = typing.get_type_hints(SessionRunner.__init__)
+    assert hints["settings"] == (SettingsStore | None)

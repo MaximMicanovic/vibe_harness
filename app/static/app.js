@@ -53,7 +53,7 @@ const state = {
   sidebarArchiveProjects: new Set(),  // '<archiveId>::<project>' keys the user folded away
   archiveProjects: new Map(),  // archive id -> its project groups (GET /api/archives/<id>), cached for the sidebar
   models: null,          // GET /api/models: { roles, models, default_model }
-  settings: null,        // GET /api/settings: { backend, backends }
+  settings: null,        // GET /api/settings: { backend, backends, failure_kinds, … }
   hoverCardId: null,     // card under the pointer — D opens its diff
   diffCardId: null,      // card whose diff panel is open
   diffRange: 'card',     // 'card' | 'round' | 'worktree'
@@ -458,11 +458,19 @@ function buildQueueChip(session) {
 
 /* ---------------- Why a card failed ---------------- */
 
-/* The classifier's kinds (app/failures.py) and the short label the badge shows.
- * The server attaches `session.failure = {kind, detail}` to every card that
- * failed; the detail is the one-line reason, shown as the badge's tooltip. */
+/* The short label the badge shows for each of the classifier's kinds
+ * (app/failures.py). The server attaches `session.failure = {kind, detail}` to
+ * every card that failed; the detail is the one-line reason, shown as the
+ * badge's tooltip.
+ *
+ * This object is LABELS ONLY. Which kinds exist is the classifier's business:
+ * GET /api/settings carries `failure_kinds` (failures.KINDS) and the filter is
+ * built from that, so adding a kind there reaches the board without a JS edit.
+ * The keys below double as the fallback for the first paint, before the
+ * settings fetch resolves — keep them in the classifier's order. */
 const FAILURE_LABELS = {
   stopped_by_user: 'stopped by user',
+  interrupted: 'interrupted',
   git_conflict: 'merge conflict',
   timeout: 'timed out',
   tests_failed: 'tests failed',
@@ -482,11 +490,20 @@ function failureLabel(kind) {
   return FAILURE_LABELS[kind] || String(kind || '').replace(/_/g, ' ');
 }
 
+/* Every kind the classifier can return: the server's list once it has landed,
+ * else the fallback above (same order, so the filter does not reshuffle). */
+function failureKinds() {
+  const fromServer = state.settings && state.settings.failure_kinds;
+  return Array.isArray(fromServer) && fromServer.length
+    ? fromServer
+    : Object.keys(FAILURE_LABELS);
+}
+
 function loadFailureFilter() {
   try {
     const kind = localStorage.getItem(FAILURE_FILTER_KEY) || '';
     // A kind that no longer exists (an older board) falls back to "any reason".
-    return kind in FAILURE_LABELS ? kind : '';
+    return failureKinds().indexOf(kind) !== -1 ? kind : '';
   } catch (e) { return ''; }
 }
 
@@ -501,11 +518,18 @@ function saveFailureFilter(kind) {
 function renderFailureFilter() {
   const select = $('failure-filter');
   if (!select) return;
+  const kinds = failureKinds();
+  // A stored kind the classifier no longer returns would narrow the board to
+  // nothing with no option to undo it: drop it and show everything again.
+  if (state.failureFilter && kinds.indexOf(state.failureFilter) === -1) {
+    state.failureFilter = '';
+    saveFailureFilter('');
+  }
   select.textContent = '';
   const any = el('option', '', 'any reason');
   any.value = '';
   select.appendChild(any);
-  for (const kind of Object.keys(FAILURE_LABELS)) {
+  for (const kind of kinds) {
     const opt = el('option', '', failureLabel(kind));
     opt.value = kind;
     select.appendChild(opt);
@@ -2556,6 +2580,10 @@ async function loadSettings() {
   } catch (_) {
     state.settings = null;  // assume the default backend
   }
+  // The failure filter is built from the classifier's kinds, which arrive with
+  // the settings: repaint it now that they are known (the first paint used the
+  // fallback list).
+  renderFailureFilter();
   return state.settings;
 }
 

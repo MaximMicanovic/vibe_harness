@@ -223,7 +223,8 @@ def test_create_card_stays_in_current_project(harness, monkeypatch):
     # ...and becomes a CHILD of the card the model is working on, so the board
     # shows the split tree.
     assert res["payload"]["parent_id"] == parent["id"]
-    assert [n["id"] for n in harness.store.children_of(parent["id"])] == [res["payload"]["id"]]
+    kids = [n for n in harness.store.list() if n.get("parent_id") == parent["id"]]
+    assert [n["id"] for n in kids] == [res["payload"]["id"]]
 
     # ...and explicitly refuses project/workdir arguments (no project swapping)
     res = call(harness, "create_card", title="x", body="y", project="Other")

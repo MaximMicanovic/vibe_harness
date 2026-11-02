@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from app.failures import KINDS
+
 from test_api import make_env
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -44,7 +46,9 @@ def _served_app_js(env) -> Path:
 def _run_check(env) -> dict:
     app_js = _served_app_js(env)
     proc = subprocess.run(
-        [node, str(HARNESS_JS), str(app_js)],
+        # The classifier's kinds go along, so the check compares app.js against
+        # the real contract instead of a copy of it.
+        [node, str(HARNESS_JS), str(app_js), json.dumps(list(KINDS))],
         capture_output=True, text=True, timeout=60,
     )
     try:

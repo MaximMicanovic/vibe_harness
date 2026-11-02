@@ -46,9 +46,6 @@ from app.cards import (
 from app.projects import ProjectNotFound, ProjectStore
 from app.stacks import StackStore
 
-# Suggested archive types (the UI offers these as presets); any slug is allowed.
-ARCHIVE_TYPES = ("cards", "deck", "project")
-
 # Where an archive keeps its card files. New items always go to ITEMS_DIR;
 # archives created before the notes -> cards rename still hold theirs in
 # LEGACY_ITEMS_DIR, so every read looks in both.

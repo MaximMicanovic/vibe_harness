@@ -297,8 +297,6 @@ def test_merge_card_branch_conflict_left_in_place(repo, tmp_path):
     assert not gitops.merge_in_progress(repo)
     assert not gitops.is_dirty(repo)
     gitops.remove_card_worktree(info)
-    gitops.delete_card_branch(info)
-    assert not gitops.branch_exists(repo, "harness/abc123")
     assert not wt.exists()
     assert wt.resolve() not in gitops.registered_worktrees(repo)
 

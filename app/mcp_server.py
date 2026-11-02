@@ -610,8 +610,6 @@ TOOLS: list[dict] = [
     },
 ]
 
-_TOOL_NAMES = {t["name"] for t in TOOLS}
-
 
 # --------------------------------------------------------------------------
 # tool implementations

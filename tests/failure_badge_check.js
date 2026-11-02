@@ -21,7 +21,16 @@ const fs = require('fs');
 const vm = require('vm');
 
 const APP_JS = process.argv[2];
-if (!APP_JS) { console.error('usage: failure_badge_check.js <app.js>'); process.exit(2); }
+if (!APP_JS) {
+  console.error('usage: failure_badge_check.js <app.js> [classifier-kinds-json]');
+  process.exit(2);
+}
+/* The classifier's kinds, handed over by the Python test (app/failures.py::KINDS)
+ * so this check compares app.js against the real contract, not a copy. */
+const CLASSIFIER_KINDS = process.argv[3]
+  ? JSON.parse(process.argv[3])
+  : ['stopped_by_user', 'interrupted', 'git_conflict', 'timeout', 'tests_failed',
+     'reviewer_rejected', 'no_verdict', 'crashed'];
 
 /* ---------- minimal DOM stub (enough for app.js to boot) ---------- */
 function makeClassList() {
@@ -166,8 +175,7 @@ if (badge) {
 }
 
 /* 2. Every kind has a label, and the badge shows it. */
-const KINDS = ['stopped_by_user', 'git_conflict', 'timeout', 'tests_failed',
-               'reviewer_rejected', 'no_verdict', 'crashed'];
+const KINDS = CLASSIFIER_KINDS;
 for (const kind of KINDS) {
   check(typeof X.FAILURE_LABELS[kind] === 'string' && X.FAILURE_LABELS[kind].length > 0,
     'FAILURE_LABELS has a label for ' + kind);
@@ -207,14 +215,38 @@ X.state.failureFilter = 'timeout';
 check(X.visibleCards().length === 0, 'a kind nobody failed with shows nothing');
 X.state.failureFilter = '';
 
-/* 5. The filter select offers every kind plus "any reason". */
+/* 5. Before the settings land, the filter falls back to the classifier's kinds
+ *    (the same list, in the same order) so the first paint is usable. */
+X.state.settings = null;
 X.renderFailureFilter();
 const select = getEl('failure-filter');
 const values = select.children.map((o) => o.value);
 check(values[0] === '', 'the filter starts with "any reason", got ' + JSON.stringify(values));
-for (const kind of KINDS) {
-  check(values.indexOf(kind) !== -1, 'the filter offers ' + kind + ', got ' + JSON.stringify(values));
-}
+check(JSON.stringify(values) === JSON.stringify([''].concat(KINDS)),
+  'the fallback filter offers exactly the classifier kinds, got ' + JSON.stringify(values));
+
+/* 6. Once GET /api/settings lands, its `failure_kinds` is the list — app.js
+ *    keeps no copy of its own, so a new kind shows up without a JS edit. */
+X.state.settings = { failure_kinds: ['crashed', 'timeout'] };
+X.renderFailureFilter();
+const fromApi = getEl('failure-filter').children.map((o) => o.value);
+check(JSON.stringify(fromApi) === JSON.stringify(['', 'crashed', 'timeout']),
+  'the filter offers exactly the kinds the API published, got ' + JSON.stringify(fromApi));
+X.state.settings = null;
+X.renderFailureFilter();
+
+/* 7. A stored filter for a kind the API no longer offers is dropped, not left
+ *    narrowing the board to nothing with no option to undo it. */
+X.state.settings = { failure_kinds: ['crashed'] };
+X.state.failureFilter = 'timeout';
+X.renderFailureFilter();
+check(X.state.failureFilter === '',
+  'a filter for a kind the API no longer offers is cleared, got ' + JSON.stringify(X.state.failureFilter));
+check(getEl('failure-filter').value === '',
+  'the select shows "any reason" again, got ' + JSON.stringify(getEl('failure-filter').value));
+X.state.settings = null;
+X.state.failureFilter = '';
+X.renderFailureFilter();
 
 const result = { ok: failures.length === 0, failures };
 console.log(JSON.stringify(result, null, 2));
