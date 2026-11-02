@@ -33,6 +33,34 @@ The pipeline a card goes through: implement, test gate, review, accept.
 Prompts, logs, and `export.json` for every round are kept under
 `sessions/<id>/run-N/` and `sessions/<id>/review-N/`.
 
+## Session transcripts (compressed)
+
+Each round's vibe session directory (`export/session/`: journal, chunks, tool
+results) is the only record of what the model actually did, so it is kept — but
+compressed, not as loose files. When a round finalizes (`_record_outcome`, and
+`_record_resolver_outcome` for a merge resolver), the harness tars and gzips
+`export/session/` into `transcripts.db` (SQLite, one row per `(card, round)`)
+and then removes the directory. `export.json` stays where it is: it is what the
+harness reads for tokens, model and stop reason, so the token accounting is
+unchanged.
+
+- **A failed save never fails the round.** The capture is best effort: on any
+  error it logs a warning and leaves the directory in place, so nothing is
+  lost.
+- **Backfill** imports the directories written before the store existed:
+  `POST /api/transcripts/backfill` walks `sessions/*/*/export/session/`, stores
+  each round and removes the directory. It is idempotent — a round already in
+  the store is skipped, never duplicated.
+- **Reading them back:** `GET /api/transcripts/stats` (rows, raw/gz bytes,
+  compression ratio), `GET /api/cards/<id>/transcripts` (metadata rows),
+  `GET /api/cards/<id>/transcripts/<round>` (the tar.gz as a download) and
+  `GET /api/cards/<id>/transcripts/<round>/events` (the journal parsed into the
+  same events the live activity feed shows). The MCP exposes the last two as
+  `harness_list_transcripts` and `harness_get_transcript` — a model reads the
+  parsed text, never the blob.
+- **Never published:** `transcripts.db` (and its `-wal`/`-shm` files) is in
+  `.gitignore`, like `sessions/`.
+
 ## Duplication and redundancy
 
 Correctness is not the only thing a review checks. Every card adds lines, so

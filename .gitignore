@@ -10,6 +10,11 @@ dist/
 build/
 *.egg-info/
 sessions/
+# Compressed session transcripts (app/transcripts.py): a local cache of the
+# rounds' export/session/ directories, never published.
+transcripts.db
+transcripts.db-wal
+transcripts.db-shm
 cards/
 notes/
 archives/

@@ -54,7 +54,7 @@ from app.questions import (
     QuestionNotPending,
     QuestionStore,
 )
-from app import diffs, dupes, failures, gitops, routemd
+from app import activity, diffs, dupes, failures, gitops, routemd
 from app.search import search_cards
 from app.runner import (
     TOKEN_BREAKDOWN_KEYS,
@@ -66,6 +66,7 @@ from app.runner import (
 from app.settings import SettingsError, SettingsStore, describe_accept_modes
 from app.stacks import StackError, StackNotFound, StackStore
 from app.tokens import card_token_breakdown, card_tokens
+from app.transcripts import TranscriptStore, format_events
 
 
 class CardIn(BaseModel):
@@ -178,7 +179,8 @@ def create_app(config: Config | None = None,
                archives: ArchiveStore | None = None,
                stacks: StackStore | None = None,
                models: ModelSettings | None = None,
-               settings: SettingsStore | None = None) -> FastAPI:
+               settings: SettingsStore | None = None,
+               transcripts: TranscriptStore | None = None) -> FastAPI:
     """Application factory. Tests pass temp-dir store/runner/projects + a fake vibe bin."""
     config = config or load_config()
     store = store or CardStore(CARDS_DIR)
@@ -189,6 +191,9 @@ def create_app(config: Config | None = None,
                                      models=models, settings=settings)
     if runner.settings is None:
         runner.settings = settings
+    # The compressed transcript store the runner writes on finalize; the API
+    # reads the same one (a caller may pass its own, e.g. a temp db in tests).
+    transcripts = transcripts or runner.transcripts
     # The stack store prunes against the card store, so it has to live beside
     # it: falling back to the project's STACKS_FILE would let an app built
     # with a temp card store (every test app) prune the real board against
@@ -474,6 +479,48 @@ def create_app(config: Config | None = None,
         # session, or a journal that is gone, is an empty feed — never an
         # error (the popup polls this every second while a card runs).
         return runner.activity(card_id, cursor=cursor)
+
+    # --- transcripts (compressed session transcripts) -------------------------
+    @app.get("/api/transcripts/stats")
+    def transcript_stats():
+        # How many rounds are stored and how well they compressed.
+        return transcripts.stats()
+
+    @app.post("/api/transcripts/backfill")
+    def transcript_backfill():
+        # Import the export/session/ directories that predate the store and
+        # remove them. Idempotent: an already-stored round is skipped.
+        return transcripts.backfill(runner.sessions_dir)
+
+    @app.get("/api/cards/{card_id}/transcripts")
+    def card_transcripts(card_id: str):
+        store.get(card_id)          # CardNotFound -> 404
+        return transcripts.list(card_id)
+
+    @app.get("/api/cards/{card_id}/transcripts/{round}")
+    def card_transcript(card_id: str, round: str):
+        # The raw tar.gz, for a human debugging a round offline.
+        blob = transcripts.get(card_id, round)
+        if blob is None:
+            raise HTTPException(status_code=404,
+                                detail=f"no transcript for {card_id} {round}")
+        return Response(content=blob, media_type="application/gzip",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{card_id}-{round}.tar.gz"'})
+
+    @app.get("/api/cards/{card_id}/transcripts/{round}/events")
+    def card_transcript_events(card_id: str, round: str,
+                               limit: int = Query(activity.DEFAULT_LIMIT, ge=1,
+                                                  le=activity.MAX_LIMIT)):
+        # The debugging surface a model can read: the stored journal parsed
+        # into the same events the live activity feed shows.
+        store.get(card_id)          # CardNotFound -> 404
+        if not transcripts.has(card_id, round):
+            raise HTTPException(status_code=404,
+                                detail=f"no transcript for {card_id} {round}")
+        events = transcripts.read_events(card_id, round, limit)
+        return {"card_id": card_id, "round": round, "events": events,
+                "text": format_events(events)}
 
     @app.post("/api/cards/{card_id}/messages", status_code=201)
     def post_message(card_id: str, payload: MessageIn):
