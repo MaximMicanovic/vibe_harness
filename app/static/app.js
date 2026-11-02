@@ -62,6 +62,7 @@ const state = {
   notificationsEnabled: true,  // sidebar Settings toggle, persisted in localStorage
   activityCardId: null,  // card whose live activity popup is open (one at a time)
   activityCursor: 0,     // journal lines already consumed by the popup
+  activityMessageSeq: 0, // highest mailbox seq already shown in the popup
   activityTimer: null,   // 1s activity poll, active while the popup's card is live
   activityAutoScroll: true,  // false once the user scrolls the feed up
   cKeyDown: false,       // C is held: a card click opens the activity popup
@@ -214,6 +215,10 @@ const activityStatus = $('activity-status');
 const activityTokens = $('activity-tokens');
 const activityFeed = $('activity-feed');
 const activityJump = $('activity-jump');
+const activityCompose = $('activity-compose');
+const activityInput = $('activity-input');
+const activitySend = $('activity-send');
+const activityHint = $('activity-hint');
 
 const diffOverlay = $('diff-overlay');
 const diffHeading = $('diff-heading');
@@ -3736,6 +3741,68 @@ function activityIsLive() {
   return !!card && (card.status === 'running' || card.status === 'reviewing');
 }
 
+/* ---------------- Steering: send guidance to the running session ---------------- */
+
+/* The conversation with the person watching: user -> worker and worker -> user.
+ * Reviewer <-> worker traffic is internal and stays out of the popup. */
+function isUserMessage(msg) {
+  return !!msg && (msg.from === 'user' || msg.to === 'user');
+}
+
+/* One message -> one bubble: the user's guidance on the right, the worker's
+ * reply on the left. Message text is user- and model-written, so it goes in as
+ * a TEXT NODE (el() sets textContent) — never innerHTML. */
+function activityMessageRow(msg) {
+  const from = msg.from === 'user' ? 'user' : 'worker';
+  const row = el('div', 'activity-message activity-message--' + from);
+  row.appendChild(el('span', 'activity-message-from', from === 'user' ? 'you' : 'worker'));
+  row.appendChild(el('div', 'activity-message-text', msg.text || ''));
+  return row;
+}
+
+/* Append the messages the feed has not shown yet. The poll re-reads the whole
+ * conversation, so the seq cursor is what keeps it from duplicating. */
+function renderActivityMessages(messages) {
+  const rows = [];
+  for (const msg of messages || []) {
+    if (!isUserMessage(msg)) continue;
+    const seq = Number(msg.seq) || 0;
+    if (seq <= state.activityMessageSeq) continue;
+    state.activityMessageSeq = seq;
+    const row = activityMessageRow(msg);
+    activityFeed.appendChild(row);
+    rows.push(row);
+  }
+  if (rows.length && state.activityAutoScroll) scrollActivityToLatest();
+  return rows;
+}
+
+/* The footer only works while the card is live: guidance posted to a finished
+ * card would sit in the mailbox with nobody to read it. */
+function updateActivityCompose() {
+  const live = activityIsLive();
+  activityInput.disabled = !live;
+  activitySend.disabled = !live;
+  activityHint.hidden = live;
+  activityInput.placeholder = live ? 'Send guidance…' : 'this card is not running';
+}
+
+/* Send: POST the guidance, then show the stored message immediately (the next
+ * poll would show it a second later; the user should see it land now). */
+async function sendActivityMessage() {
+  const id = state.activityCardId;
+  const text = (activityInput.value || '').trim();
+  if (!id || !text || !activityIsLive()) return null;
+  const msg = await api('/api/cards/' + encodeURIComponent(id) + '/messages', {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  });
+  if (state.activityCardId !== id) return msg;   // closed or reopened meanwhile
+  activityInput.value = '';
+  renderActivityMessages([msg]);
+  return msg;
+}
+
 /* Header: card title, status pill, live token count. */
 function updateActivityHeader() {
   const card = activityCard();
@@ -3750,6 +3817,7 @@ function updateActivityHeader() {
   activityTokens.title = tokens === null ? ''
     : 'Tokens this card has spent so far: ' + fmtTokens(tokens)
       + tokenTypesSuffix(session.live_token_breakdown || session.card_token_breakdown);
+  updateActivityCompose();
 }
 
 /* Place the panel next to the clicked card, clamped to the viewport: to its
@@ -3790,12 +3858,16 @@ async function pollActivity() {
   if (!id) return;
   let gone = false;
   try {
-    const feed = await api('/api/cards/' + encodeURIComponent(id)
-      + '/activity?cursor=' + state.activityCursor);
+    const [feed, convo] = await Promise.all([
+      api('/api/cards/' + encodeURIComponent(id)
+        + '/activity?cursor=' + state.activityCursor),
+      api('/api/cards/' + encodeURIComponent(id) + '/messages'),
+    ]);
     if (state.activityCardId !== id) return;   // closed or reopened meanwhile
     state.activityCursor = feed.cursor || 0;
     const events = feed.events || [];
     if (events.length) renderActivityEvents(events);
+    renderActivityMessages(convo && convo.messages);
     updateActivityHeader();
   } catch (err) {
     gone = !!(err && err.status === 404);      // the card was deleted
@@ -3816,6 +3888,7 @@ function openActivity(cardId, anchor) {
   closeActivity();
   state.activityCardId = cardId;
   state.activityCursor = 0;
+  state.activityMessageSeq = 0;
   state.activityAutoScroll = true;
   activityFeed.textContent = '';
   activityJump.hidden = true;
@@ -3829,12 +3902,17 @@ function closeActivity() {
   stopActivityTimer();
   state.activityCardId = null;
   state.activityCursor = 0;
+  state.activityMessageSeq = 0;
   activityPopup.hidden = true;
 }
 
 $('activity-close').addEventListener('click', closeActivity);
 activityJump.addEventListener('click', scrollActivityToLatest);
 activityFeed.addEventListener('scroll', onActivityScroll);
+activityCompose.addEventListener('submit', (e) => {
+  if (e && e.preventDefault) e.preventDefault();
+  sendActivityMessage().catch(showError);
+});
 
 /* ---------------- Diff panel: what the card actually changed ---------------- */
 

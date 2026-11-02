@@ -2995,3 +2995,47 @@ def test_the_runner_signature_annotations_resolve():
 
     hints = typing.get_type_hints(SessionRunner.__init__)
     assert hints["settings"] == (SettingsStore | None)
+
+
+# ------------------------------------------- steering: the worker checks the mailbox
+
+def test_worker_prompt_tells_the_model_to_check_the_mailbox():
+    """The worker prompt must mention the mailbox, or the worker never calls
+    `wait_for_message` and the popup's guidance is never read. The check is
+    non-blocking so a silent user never stalls a run."""
+    p = prompt_template("spec body")
+    assert "Between major steps" in p
+    assert "wait_for_message(timeout_seconds=0)" in p
+    assert 'post_message(to="user"' in p
+    # The three moments the spec names.
+    assert "before starting a new file" in p
+    assert "before running the test suite" in p
+    assert "before you finish" in p
+
+
+def test_fix_prompt_tells_the_model_to_check_the_mailbox():
+    p = fix_prompt_template("spec body", "the reviewer found a bug")
+    assert "Between major steps" in p
+    assert "wait_for_message(timeout_seconds=0)" in p
+    assert 'post_message(to="user"' in p
+
+
+def test_worker_prompt_omits_the_mailbox_rule_when_the_mailbox_is_off():
+    """VIBE_HARNESS_MAILBOX=0 attaches no mailbox server: telling the model to
+    call its tools would be a dead instruction."""
+    p = prompt_template("spec body", mailbox=False)
+    assert "wait_for_message" not in p
+    f = fix_prompt_template("spec body", "reason", mailbox=False)
+    assert "wait_for_message" not in f
+
+
+def test_run_prompt_carries_the_mailbox_rule(store, make_runner, fake_vibe):
+    """The spawned run's prompt.md is the worker prompt — the rule is really
+    in the file the model reads."""
+    runner = make_runner(fake_vibe)
+    card = store.create("Steering card", "Write a hello file.")
+    runner.run(card["id"])
+    _wait_for_status(store, card["id"], "done")
+    prompt = (runner.sessions_dir / card["id"] / "run-1" / "prompt.md").read_text()
+    assert "wait_for_message(timeout_seconds=0)" in prompt
+    assert 'post_message(to="user"' in prompt

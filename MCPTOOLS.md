@@ -113,12 +113,18 @@ per-card mailbox directory; the role comes from `VIBE_HARNESS_MAILBOX_ROLE`.
 
 | Tool | What it does | Args |
 |---|---|---|
-| `post_message` | Append a message addressed to the other side. `from` is the caller's role. | `to` (`worker` \| `reviewer`), `text` |
-| `wait_for_message` | Block until an unconsumed message for the caller's role arrives; `{"none": true}` on timeout. | `timeout_seconds` (default 60) |
+| `post_message` | Append a message addressed to the other side. `from` is the caller's role. `to="user"` replies to the person watching the run (the popup shows it). | `to` (`worker` \| `reviewer` \| `user`), `text` |
+| `wait_for_message` | Block until an unconsumed message for the caller's role arrives; `{"none": true}` on timeout. The worker prompt calls it with `timeout_seconds=0` between major steps, so a silent user never stalls a run. | `timeout_seconds` (default 60) |
 | `submit_verdict` | The reviewer's structured verdict, stored per round (`verdicts/<round>.json`) and mirrored to `verdict.json`. **Reviewer role only** — any other role gets a tool error. | `approved`, `reason` |
 
 The harness reads only the current round's verdict file, so a round that never
 calls `submit_verdict` sees no verdict rather than inheriting the previous one.
+
+The `user` target is the steering channel: the chat popup's footer posts
+guidance with `POST /api/cards/<id>/messages` (stored as `from: "user"`,
+`to: "worker"`), the worker's next non-blocking `wait_for_message` returns it,
+and the worker's `post_message(to="user", ...)` reply shows up in the popup.
+There is no `user` session, so nothing ever waits for that role.
 
 ---
 

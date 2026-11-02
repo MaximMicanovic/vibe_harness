@@ -2186,6 +2186,99 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
 
 .activity-jump[hidden] { display: none; }
 
+/* Steering: the conversation with the person watching. The user's guidance is
+ * a bubble on the right, the worker's reply on the left. */
+.activity-message {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 88%;
+  padding: 5px 9px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.activity-message--user {
+  align-self: flex-end;
+  background: var(--bg-running);
+  color: var(--edge-running);
+  border: 1px solid var(--border-soft);
+}
+
+.activity-message--worker {
+  align-self: flex-start;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--border-soft);
+}
+
+.activity-message-from {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.activity-message-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Footer: guidance input + Send. Disabled (with the hint below) while the card
+ * is not running. */
+.activity-compose {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-2);
+}
+
+.activity-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.activity-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.activity-send {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.activity-send:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.activity-hint {
+  padding: 0 10px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+  background: var(--surface-2);
+}
+
+.activity-hint[hidden] { display: none; }
+
 /* ---------------- Heartbeat: how fresh is this board? ---------------- */
 
 .heartbeat {

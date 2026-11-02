@@ -203,6 +203,19 @@ def tdd_rules() -> str:
     )
 
 
+# Rule block telling the worker to read the steering mailbox. The check is
+# NON-BLOCKING (`timeout_seconds=0`): a silent user must never stall a run, and
+# with no message it returns {"none": true} immediately.
+def mailbox_rules() -> str:
+    return (
+        "- The `harness-mailbox` MCP server is attached to this session. Between "
+        "major steps — before starting a new file, before running the test "
+        "suite, and before you finish — call "
+        "`wait_for_message(timeout_seconds=0)`. If the user sent guidance, "
+        "follow it and reply with `post_message(to=\"user\", text=...)`.\n"
+    )
+
+
 # Cap on the diff embedded in a review prompt (keeps the fresh reviewer's
 # context small — the point of diff-scoped review).
 REVIEW_DIFF_MAX_CHARS = 60_000
@@ -228,13 +241,15 @@ def now_iso() -> str:
 
 
 def prompt_template(body: str, mcp_name: str | None = "harness",
-                    *, tdd: bool = True) -> str:
+                    *, tdd: bool = True, mailbox: bool = True) -> str:
     rules = (
         "- If an `agent.md` file exists in the workspace, read it and follow its "
         "rules (it may ask you to keep `route.md` up to date).\n"
     )
     if tdd:
         rules += tdd_rules()
+    if mailbox:
+        rules += mailbox_rules()
     if mcp_name:
         rules += mcp_rules(mcp_name)
     return (
@@ -251,13 +266,16 @@ def prompt_template(body: str, mcp_name: str | None = "harness",
 
 
 def fix_prompt_template(body: str, reason: str, mcp_name: str | None = "harness",
-                        resumed: bool = False, *, tdd: bool = True) -> str:
+                        resumed: bool = False, *, tdd: bool = True,
+                        mailbox: bool = True) -> str:
     rules = (
         "- If an `agent.md` file exists in the workspace, read it and follow its "
         "rules (it may ask you to keep `route.md` up to date).\n"
     )
     if tdd:
         rules += tdd_rules()
+    if mailbox:
+        rules += mailbox_rules()
     if mcp_name:
         rules += mcp_rules(mcp_name)
     resume_card = (
@@ -564,7 +582,8 @@ class SessionRunner:
                     ws0, self.sessions_dir / card_id)
             self._spawn(card_id, kind="run",
                         prompt=prompt_template(card["body"], self._mcp_name(),
-                                               tdd=self.config.tdd),
+                                               tdd=self.config.tdd,
+                                               mailbox=self.config.mailbox),
                         extra_patch=extra_patch or None,
                         workdir=workdir)
         return self.store.get(card_id)
@@ -1928,7 +1947,8 @@ class SessionRunner:
                         prompt=fix_prompt_template(card["body"], reason,
                                                    self._mcp_name(),
                                                    resumed=bool(resume),
-                                                   tdd=self.config.tdd),
+                                                   tdd=self.config.tdd,
+                                                   mailbox=self.config.mailbox),
                         extra_patch=extra, resume=resume)
 
     # -------------------------------------------------------------- finalize
@@ -2284,6 +2304,25 @@ class SessionRunner:
             if session_id:
                 return session_id
         return (card.get("session") or {}).get("worker_session_id")
+
+    # ------------------------------------------------- steering (user -> worker)
+
+    def messages(self, card_id: str) -> list[dict]:
+        """The card's mailbox conversation, oldest first (both directions).
+
+        The popup shows the user <-> worker exchange; reviewer <-> worker
+        traffic is internal and filtered out client-side.
+        """
+        self.store.get(card_id)      # CardNotFound -> 404
+        return mailbox.list_messages(mailbox.mailbox_dir(self.sessions_dir, card_id))
+
+    def post_message(self, card_id: str, text: str) -> dict:
+        """Append the user's guidance to the card's mailbox, addressed to the
+        worker. The worker's next `wait_for_message(timeout_seconds=0)` returns
+        it. Empty text is a ValueError (the API maps it to 400)."""
+        self.store.get(card_id)      # CardNotFound -> 404
+        return mailbox.post_message(
+            mailbox.mailbox_dir(self.sessions_dir, card_id), "user", "worker", text)
 
     # ------------------------------------------------------- live token usage
 
