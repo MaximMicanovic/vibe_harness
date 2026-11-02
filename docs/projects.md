@@ -3,17 +3,18 @@
 The dashboard is project-centric: a project is a folder the harness may run
 cards in, and registering one sets it up for agents.
 
-The dashboard is **project-centric**. Register a project with the **＋ Project**
-button (name + folder — on macOS, **Browse…** opens the native folder picker and
-fills in the path; the folder is created if missing), then pick it in
-the **Project** dropdown in the top bar. The board and the stats bar then show
-only that project's cards, and the top-bar selection is remembered per browser,
-so a reload lands back on the project you were working in. The **last used
-project** is likewise remembered per browser — updated when you save a card
-with a project (or without one) and when you pick a concrete project in the
-top bar — and when you press **+ New card**, the editor's **Project**
-dropdown lets you pick the project and automatically defaults to it
-(the top-bar selection is the fallback when nothing was used yet).
+The dashboard is **project-centric**. Register a project with the **＋ Add
+project…** entry at the bottom of the **Project** dropdown in the top bar (name
+and folder — on macOS, **Browse…** opens the native folder picker and fills in
+the path; the folder is created if missing), then pick it in that same
+dropdown. The board and the stats bar then show only that project's cards, and
+the top-bar selection is remembered per browser, so a reload lands back on the
+project you were working in. The **last used project** is likewise remembered
+per browser — updated when you save a card with a project (or without one) and
+when you pick a concrete project in the top bar — and when you press **+ New
+card**, the editor's **Project** dropdown lets you pick the project and
+automatically defaults to it (the top-bar selection is the fallback when
+nothing was used yet).
 
 When you run a card, Vibe works in the project's folder (runs are auto-approved,
 so it edits that project directly). A card's **Work folder override** field

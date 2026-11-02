@@ -48,8 +48,8 @@ uv pip install -e ".[dev]"
 uvicorn app.main:app --reload --reload-dir app --port 8734
 ```
 
-Open <http://127.0.0.1:8734>, register a project with **＋ Project**, write a
-card, and press **Run with Vibe**.
+Open <http://127.0.0.1:8734>, register a project from the **Project** dropdown
+(**＋ Add project…** at the bottom), write a card, and press **Run with Vibe**.
 
 Always pass `--reload-dir app`: card worktrees live under `sessions/`, and
 watching those makes every agent edit restart the server.

@@ -1310,12 +1310,6 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
   max-width: 200px;
 }
 
-#manage-projects-btn {
-  padding: 4px 10px;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
 /* ---------------- Search (top bar) ----------------
  * The input filters the board as you type; the results panel under it lists
  * the hits grouped by location (Board, then each archive). It is a drop-down,
