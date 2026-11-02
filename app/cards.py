@@ -53,6 +53,9 @@ SESSION_KEYS = (
     "model", "tokens", "stop_reason", "workdir", "log", "export_dir",
     "review", "reviews", "review_rounds", "git", "resolver", "test_output",
     "mailbox", "worker_session_id", "last_reviewed_commit",
+    # The growth signal: lines added / removed by the card branch against its
+    # base, recorded when a run finalizes ({"files", "added", "removed"}).
+    "diff_stat",
     # Revert bookkeeping: when an accepted card's merge commit was undone and
     # which commit undid it (the card is a draft again, the session is kept).
     "reverted_at", "revert_commit",

@@ -50,7 +50,9 @@ you write a card (spec)
                <last-reviewed-commit>..HEAD` (round 1: from the
                MERGE-BASE of the card branch and its base, so a branch
                that is merely behind its base is not read as a revert)
-               + the test output, and it
+               + the test output + the mechanical duplication report
+               for the files the diff touches (`app/dupes.py`; the whole
+               app when there is no diff), and it
                can ask the persistent worker via the per-card MCP mailbox
                (`harness-mailbox`: post_message / wait_for_message /
                submit_verdict — the verdict is read from submit_verdict,
@@ -113,6 +115,23 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   (green), refactor while green, full suite green before finishing. It costs a
   few dozen prompt tokens per round and pairs with the test gate above; disable
   with `VIBE_HARNESS_TDD=0`.
+- **Growth is checked, not just correctness.** Every worker prompt also carries
+  the reuse rule — *before adding a helper, search for an existing one
+  (`grep -rn`); reuse or extend it; do not copy a block — extract it; do not add
+  code nothing calls* — and every review prompt carries a **Duplication and
+  redundancy** section: the mechanical clone report for the files the diff
+  touches (`app/dupes.py`, blocks of ≥6 normalized lines appearing in two or
+  more places) plus four criteria (re-implements something existing? copies a
+  block? adds code nothing calls / a flag nothing reads / a one-caller
+  abstraction / a duplicate file? proportionate to the spec?). The reviewer must
+  REJECT when the diff increases the clone count without a stated justification,
+  and name the duplicate. Prevention is cheaper than a rejection round: the rule
+  costs ~40 prompt tokens, a rejection costs a whole fixer round. The same
+  report is on the board at `GET /api/duplication` (`{count, clones}`), and each
+  finalized run records `session.diff_stat` (`{files, added, removed}` from
+  `git diff --stat <base>...<branch>`) so the card shows a `+412 −38` chip — a
+  900-line card for a small spec is visible at a glance instead of only in
+  review.
 - **Dead code is a test failure, not a review finding.** `tests/test_no_dead_code.py`
   runs `ruff check app/` (the `dev` extra installs ruff; the test skips without
   it) with a deliberately minimal config — `F401` unused import, `F841` unused
@@ -334,7 +353,13 @@ The cheapest token is the one never spent:
 - **Per-card chips:** each card shows its total cost (worker + review +
   resolver rounds) and model; hovering a token chip shows the matching type
   breakdown (`session.card_token_breakdown`, or `session.live_token_breakdown`
-  while live).
+  while live). A git-backed card also shows its **growth**: `session.diff_stat`
+  (`{files, added, removed}`, from `git diff --stat <base>...<branch>`, recorded
+  when a run finalizes) renders as a `+412 −38` chip with the file count on
+  hover. It costs nothing — one git call per finalized run, no LLM tokens — and
+  it is the cheapest way to spot a card that spent 900 lines on a 50-line spec.
+  `GET /api/duplication` is the matching project-wide number: `{count, clones}`
+  from the same detector the reviewer reads.
 - **Live while running:** while a session is live, the card chip and the
   stats-bar total update in place (`session.live_tokens` on the card,
   `live_tokens` in `/api/stats`; the top-bar pill pulses while > 0). The

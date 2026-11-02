@@ -210,3 +210,38 @@ def diff_stat(git_info: dict) -> str:
     if proc.returncode != 0:
         return ""
     return (proc.stdout or "").strip()
+
+
+# The summary line `git diff --stat` ends with: "3 files changed, 412
+# insertions(+), 38 deletions(-)". Either count is omitted when it is zero.
+_DIFF_STAT_SUMMARY_RE = re.compile(
+    r"(\d+) files? changed"
+    r"(?:, (\d+) insertions?\(\+\))?"
+    r"(?:, (\d+) deletions?\(-\))?")
+
+
+def parse_diff_stat(text: str | None) -> dict:
+    """``{"files": N, "added": A, "removed": D}`` from a `git diff --stat`.
+
+    The card's growth signal: a spec that needs 50 lines and a diff of 500 is
+    visible at a glance instead of only in review. A text with no summary line
+    (an empty diff, a git failure) is all zeros.
+    """
+    match = _DIFF_STAT_SUMMARY_RE.search(text or "")
+    if not match:
+        return {"files": 0, "added": 0, "removed": 0}
+    return {"files": int(match.group(1)),
+            "added": int(match.group(2) or 0),
+            "removed": int(match.group(3) or 0)}
+
+
+def diff_stat_counts(git_info: dict) -> dict | None:
+    """The branch's added/removed line counts, or None when git cannot say.
+
+    None (not zeros) on failure: a card with no answer must not render a
+    "+0 −0" chip that looks like a measured result.
+    """
+    text = diff_stat(git_info)
+    if not text:
+        return None
+    return parse_diff_stat(text)

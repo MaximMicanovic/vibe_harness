@@ -54,7 +54,7 @@ from app.questions import (
     QuestionNotPending,
     QuestionStore,
 )
-from app import diffs, failures, gitops, routemd
+from app import diffs, dupes, failures, gitops, routemd
 from app.search import search_cards
 from app.runner import (
     TOKEN_BREAKDOWN_KEYS,
@@ -839,6 +839,19 @@ def create_app(config: Config | None = None,
                 for n in sorted(split, key=lambda n: n.get("created_at") or "")
             ],
         }
+
+    @app.get("/api/duplication")
+    def duplication():
+        """The mechanical duplication report for this project's source.
+
+        The same detector the reviewer is handed (`app/dupes.py`), so "the
+        project is growing" is a number instead of an impression: every entry
+        is a block of at least six normalized lines that appears in two or more
+        places, with the file and line of each occurrence. Paths are relative
+        to the project root (`app/runner.py`), the same form a diff uses.
+        """
+        clones = dupes.find_clones(BASE_DIR)
+        return {"count": len(clones), "clones": clones}
 
     @app.get("/api/stats")
     def stats(project: str | None = Query(None)):

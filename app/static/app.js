@@ -785,6 +785,17 @@ function buildCard(cardData, queuePos) {
         chips.appendChild(rc);
       }
     }
+    if (s.diff_stat && (s.diff_stat.added || s.diff_stat.removed)) {
+      // The growth signal: how much this card added and removed against its
+      // base branch. A card that adds 900 lines for a small spec is visible at
+      // a glance here instead of only in review.
+      const ds = chip('diff-stat', '+' + s.diff_stat.added + ' \u2212' + s.diff_stat.removed);
+      const files = s.diff_stat.files || 0;
+      ds.title = 'This card changed ' + files + (files === 1 ? ' file' : ' files')
+        + ': +' + s.diff_stat.added + ' \u2212' + s.diff_stat.removed
+        + ' lines against its base branch';
+      chips.appendChild(ds);
+    }
     if (s.git && s.git.branch) {
       if (s.git.merged === true) {
         chips.appendChild(chip('git-merged', '✓ merged into ' + (s.git.base_branch || '?')));

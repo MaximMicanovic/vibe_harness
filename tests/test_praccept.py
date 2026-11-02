@@ -232,6 +232,54 @@ def test_diff_stat_is_empty_when_git_fails(monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# the growth signal: lines added / removed, recorded on the card
+# ----------------------------------------------------------------------
+
+def test_parse_diff_stat_reads_the_summary_line():
+    """`git diff --stat` ends with "N files changed, A insertions(+), D
+    deletions(-)" — that summary is the card's growth signal."""
+    text = (" app/one.py | 10 +++++-----\n"
+            " app/two.py |  2 ++\n"
+            " 2 files changed, 7 insertions(+), 5 deletions(-)\n")
+    assert praccept.parse_diff_stat(text) == {"files": 2, "added": 7, "removed": 5}
+
+
+def test_parse_diff_stat_handles_a_one_sided_change():
+    assert praccept.parse_diff_stat(" 1 file changed, 1 insertion(+)") == {
+        "files": 1, "added": 1, "removed": 0}
+    assert praccept.parse_diff_stat(" 1 file changed, 3 deletions(-)") == {
+        "files": 1, "added": 0, "removed": 3}
+
+
+def test_parse_diff_stat_of_nothing_is_all_zero():
+    assert praccept.parse_diff_stat("") == {"files": 0, "added": 0, "removed": 0}
+    assert praccept.parse_diff_stat(None) == {"files": 0, "added": 0, "removed": 0}
+
+
+def test_diff_stat_counts_reads_the_branch_against_its_base(monkeypatch):
+    seen = []
+
+    def fake_run(cmd, cwd=None):
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, DIFF_STAT, "")
+
+    monkeypatch.setattr(praccept, "_run", fake_run)
+    assert praccept.diff_stat_counts(GIT_INFO) == {"files": 1, "added": 1, "removed": 0}
+    assert seen == [["git", "diff", "--stat", "main...harness/abc123"]]
+
+
+def test_diff_stat_counts_is_none_when_git_fails(monkeypatch):
+    """No git answer means no growth signal — not a fake "+0 −0"."""
+    monkeypatch.setattr(praccept, "_run", lambda cmd, cwd=None: subprocess.CompletedProcess(
+        cmd, 128, "", "fatal: bad revision"))
+    assert praccept.diff_stat_counts(GIT_INFO) is None
+
+
+def test_diff_stat_counts_is_none_without_a_branch_or_base():
+    assert praccept.diff_stat_counts({"repo": "/tmp/repo"}) is None
+
+
+# ----------------------------------------------------------------------
 # the setting: local (default) or pr
 # ----------------------------------------------------------------------
 

@@ -1519,6 +1519,38 @@ def test_server_startup_survives_broken_resolving_card(tmp_path):
     e.client.close()
 
 
+def test_duplication_endpoint_reports_clones_with_file_and_line(env):
+    """GET /api/duplication is the mechanical duplication report: the same
+    detector the reviewer sees, served as `{count, clones}` with a file and a
+    1-based line number per occurrence."""
+    r = env.client.get("/api/duplication")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"count", "clones"}
+    assert body["count"] == len(body["clones"])
+    for clone in body["clones"]:
+        assert clone["length"] >= 6
+        assert len(clone["occurrences"]) >= 2
+        for occ in clone["occurrences"]:
+            # Paths are relative to the scanned `app/` folder.
+            assert occ["file"].startswith("app/"), occ
+            assert isinstance(occ["start"], int) and occ["start"] >= 1
+
+
+def test_duplication_endpoint_serves_the_detector_report(env, monkeypatch):
+    """The endpoint is a thin wrapper: whatever the detector finds is what the
+    board shows (no second, divergent notion of a duplicate)."""
+    from app import dupes
+
+    clone = {"length": 7,
+             "occurrences": [{"file": "app/one.py", "start": 3},
+                             {"file": "app/two.py", "start": 9}]}
+    monkeypatch.setattr(dupes, "find_clones", lambda root, min_lines=6: [clone])
+
+    body = env.client.get("/api/duplication").json()
+    assert body == {"count": 1, "clones": [clone]}
+
+
 def test_version_endpoint_fingerprints_front_end_assets(env):
     # The dashboard is a long-lived tab: without a build fingerprint the browser
     # keeps running whatever app.js it loaded days ago, so every front-end fix
