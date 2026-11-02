@@ -1790,12 +1790,12 @@ def test_diff_endpoint_unknown_card_404(env):
 
 
 # ----------------------------------------------------------------------
-# front-end wiring: diff panel + keys panel
+# front-end wiring: diff popup + keys panel
 # ----------------------------------------------------------------------
 
 def test_diff_panel_wired(env):
-    """D over a card opens the diff panel; the panel renders the diff with a
-    line classifier and inserts every line as a TEXT NODE (the content is
+    """D + click opens the diff popup; the panel renders the diff with a line
+    classifier and inserts every line as a TEXT NODE (the content is
     model-written — never innerHTML)."""
     js = env.client.get("/app.js").text
     for needle in (
@@ -1812,7 +1812,7 @@ def test_diff_panel_wired(env):
     assert "innerHTML" not in js.split("function renderDiff(")[1].split("function ")[0]
     html = env.client.get("/").text
     assert 'data-panel="keys"' in html
-    assert 'id="diff-overlay"' in html
+    assert 'id="diff-popup"' in html
     assert 'id="btn-diff"' in html
 
 
@@ -1821,7 +1821,8 @@ def test_keys_panel_lists_every_keybinding(env):
     from the handlers."""
     js = env.client.get("/app.js").text
     keys_block = js.split("const KEYBINDINGS = [")[1].split("];")[0]
-    assert "'N'" in keys_block and "'Esc'" in keys_block and "'D'" in keys_block
+    assert "'N'" in keys_block and "'Esc'" in keys_block
+    assert "'D + click'" in keys_block and "'C + click'" in keys_block
     assert "renderKeysPanel" in js
 
 

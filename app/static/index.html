@@ -160,7 +160,7 @@
         <button class="btn" id="btn-revert" hidden title="Undo this accepted card: revert its merge commit and reopen it as a draft">↩ Revert</button>
         <button class="btn" id="btn-archive" hidden title="Move this accepted card into an archive">📦 Archive</button>
         <button class="btn" id="btn-log" hidden>View log</button>
-        <button class="btn" id="btn-diff" hidden title="What this card actually changed (shortcut: hover the card and press D)">Diff</button>
+        <button class="btn" id="btn-diff" hidden title="What this card actually changed (shortcut: hold D and click the card)">Diff</button>
         <button class="btn btn-danger" id="btn-delete">Delete</button>
       </div>
     </div>
@@ -179,9 +179,9 @@
 
   <!-- Live activity popup: hold C and click a card to watch the model work.
        A small floating panel, NOT an overlay — the board stays usable. -->
-  <aside class="activity-popup" id="activity-popup" hidden aria-label="Live activity">
-    <header class="activity-head">
-      <h2 class="activity-title" id="activity-title">Activity</h2>
+  <aside class="floating-panel activity-popup" id="activity-popup" hidden aria-label="Live activity">
+    <header class="floating-panel-head activity-head">
+      <h2 class="floating-panel-title" id="activity-title">Activity</h2>
       <span class="activity-status" id="activity-status"></span>
       <span class="activity-tokens" id="activity-tokens"></span>
       <button class="icon-btn" id="activity-close" type="button" title="Close (Esc)">×</button>
@@ -197,22 +197,23 @@
     <div class="activity-hint" id="activity-hint" hidden>this card is not running</div>
   </aside>
 
-  <!-- Diff viewer: what the card actually changed, with the verdict that
-       approved it pinned next to the diff. -->
-  <div class="overlay" id="diff-overlay" hidden>
-    <div class="modal modal-wide diff-modal" role="dialog" aria-modal="true" aria-labelledby="diff-heading">
-      <div class="modal-head">
-        <h2 id="diff-heading">Diff</h2>
-        <button class="icon-btn" id="diff-close" title="Close (Esc)">×</button>
+  <!-- Diff popup: hold D and click a card to see what it actually changed,
+       with the verdict that approved it pinned next to the diff. A floating
+       panel, NOT an overlay — the board stays usable behind it. -->
+  <aside class="floating-panel diff-popup" id="diff-popup" hidden aria-label="Diff">
+    <header class="floating-panel-head diff-popup-head" id="diff-popup-head">
+      <div class="diff-popup-bar">
+        <h2 class="floating-panel-title" id="diff-heading">Diff</h2>
+        <div class="diff-ranges" id="diff-ranges" role="group" aria-label="Diff range"></div>
+        <button class="icon-btn" id="diff-close" type="button" title="Close (Esc)">×</button>
       </div>
-      <div class="diff-ranges" id="diff-ranges" role="group" aria-label="Diff range"></div>
       <div class="diff-verdict" id="diff-verdict"></div>
-      <div class="diff-panes">
-        <aside class="diff-files" id="diff-files" aria-label="Changed files"></aside>
-        <pre class="diff-body" id="diff-body"></pre>
-      </div>
+    </header>
+    <div class="diff-panes">
+      <aside class="diff-files" id="diff-files" aria-label="Changed files"></aside>
+      <pre class="diff-body" id="diff-body"></pre>
     </div>
-  </div>
+  </aside>
 
   <!-- Archives modal -->
   <div class="overlay" id="archives-overlay" hidden>

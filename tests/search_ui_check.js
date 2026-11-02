@@ -157,7 +157,7 @@ const store = {};
  * markup, so mirror them here (an overlay that starts "visible" would swallow
  * the keyboard shortcuts). */
 for (const id of ['search-hint', 'search-results', 'error-banner', 'sidebar-panel',
-                  'empty-board', 'editor-overlay', 'log-overlay', 'diff-overlay',
+                  'empty-board', 'editor-overlay', 'log-overlay', 'diff-popup',
                   'archives-overlay', 'projects-overlay', 'depends-field', 'accept-hint',
                   'btn-stop', 'btn-accept', 'btn-archive', 'btn-log']) {
   getEl(id).hidden = true;

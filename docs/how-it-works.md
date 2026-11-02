@@ -326,11 +326,17 @@ as a **draft**, so the loop closes without a hand-run `git revert`:
 ## Seeing what a card changed (the diff view)
 
 A reviewer session approves a change you never look at; the diff view is how you
-inspect it. Hover a card and press **D** (or use the **Diff** button in the card
-panel) to open the panel. It shows the range selector, the verdict that judged
-that range (approved/rejected, the reviewer's reason, the round, the model and
-the token count) pinned next to the diff, the changed files with their +/-
-counts (click one to scroll to it), and the diff itself — rendered line by line
+inspect it. Hold **D** and click a card (or use the **Diff** button in the card
+panel) to open it. The diff is a floating popup, not a full-screen modal: about
+720x640, opened next to the clicked card and clamped to the viewport, draggable
+by its header, closed with **Esc** or the ×. The board stays visible and usable
+behind it, and only one popup is open at a time — opening the diff closes the
+live activity popup (**C** + click) and vice versa.
+
+The header carries the card title, the range selector and the verdict that
+judged that range (approved/rejected, the reviewer's reason, the round, the
+model and the token count). The body holds the changed files with their +/-
+counts (click one to scroll to it) and the diff itself — rendered line by line
 (hunk header / addition / deletion / context), every line inserted as a text
 node because the content is model-written.
 
