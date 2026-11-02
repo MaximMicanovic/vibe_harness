@@ -102,10 +102,13 @@ def test_chat_mode_is_gone(env):
 
 def test_activity_popup_styles_are_floating(env):
     css = env.client.get("/style.css").text
-    assert ".activity-popup" in css
-    # Fixed positioning, no backdrop: the board stays usable behind it.
-    block = css[css.index(".activity-popup"):]
+    # Fixed positioning, no backdrop: the board stays usable behind it. That
+    # chrome is the shared .floating-panel base (see test_diff_panel.py); the
+    # activity popup only adds its own size.
+    base = css[css.index(".floating-panel {"):]
+    base = base[: base.index("}")]
+    assert "position: fixed" in base
+    block = css[css.index(".activity-popup {"):]
     block = block[: block.index("}")]
-    assert "position: fixed" in block
     assert "420px" in block
     assert "520px" in block

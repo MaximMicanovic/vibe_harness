@@ -1804,19 +1804,18 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
  * otherwise); the header's own controls are always visible. */
 .stack--open .card-unstack { display: inline-block; }
 
-/* ---------------- Diff popup (what a card actually changed) ---------------- */
+/* ---------------- Floating panels (hold a key + click a card) ---------------- */
 
-/* A floating panel, NOT an overlay: it sits next to the clicked card and the
- * board stays usable behind it (no backdrop, no focus trap). Wider than the
- * activity popup — a diff needs room. app.js sets left/top/width/height on
- * open, clamped to the viewport, and the header drags it. */
-.diff-popup {
+/* Both popups are the same idea: a small panel pinned next to the clicked
+ * card, clamped to the viewport, never a full-screen overlay (no backdrop, no
+ * focus trap — the board stays usable behind it). This is the one base they
+ * share; each popup adds only its own size. app.js sets left/top/width/height
+ * on open. */
+.floating-panel {
   position: fixed;
   z-index: 40;
   display: flex;
   flex-direction: column;
-  width: 720px;
-  height: 640px;
   max-width: calc(100vw - 24px);
   max-height: calc(100vh - 24px);
   background: var(--surface);
@@ -1827,17 +1826,39 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
   overflow: hidden;
 }
 
-.diff-popup[hidden] { display: none; }
+.floating-panel[hidden] { display: none; }
 
-/* The header is the drag handle: title, range selector, close, verdict. */
-.diff-popup-head {
+.floating-panel-head {
   display: flex;
-  flex-direction: column;
   gap: 8px;
   flex: 0 0 auto;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border-soft);
   background: var(--surface-2);
+}
+
+.floating-panel-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------- Diff popup (what a card actually changed) ---------------- */
+
+/* A diff needs room: the shared floating panel, wider than the activity
+ * popup. The header is the drag handle. */
+.diff-popup {
+  width: 720px;
+  height: 640px;
+}
+
+.diff-popup-head {
+  flex-direction: column;
   cursor: grab;
   user-select: none;
 }
@@ -1848,17 +1869,6 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.diff-popup-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* A long reviewer reason must not push the diff out of the panel. */
@@ -2105,46 +2115,14 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
 
 /* ---------------- Live activity popup (hold C + click a card) ---------------- */
 
-/* A small floating panel, NOT an overlay: it sits next to the clicked card and
- * the board stays usable behind it (no backdrop, no focus trap). app.js sets
- * left/top/width/height on open, clamped to the viewport. */
+/* The shared floating panel (see above), sized for the activity feed. */
 .activity-popup {
-  position: fixed;
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
   width: 420px;
   height: 520px;
-  max-width: calc(100vw - 24px);
-  max-height: calc(100vh - 24px);
-  background: var(--surface);
-  color: var(--ink);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
-  overflow: hidden;
 }
-
-.activity-popup[hidden] { display: none; }
 
 .activity-head {
-  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-soft);
-  background: var(--surface-2);
-}
-
-.activity-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .activity-status {

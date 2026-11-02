@@ -104,13 +104,65 @@ def test_hover_then_press_d_gesture_is_gone(env):
     assert "cKeyDown" in js
 
 
+def _css_rule(css: str, selector: str) -> str:
+    """The declarations of one CSS rule (the first exact `selector {` match)."""
+    at = css.index(selector + " {")
+    return css[at + len(selector) + 2: css.index("}", at)]
+
+
 def test_diff_popup_styles_are_floating(env):
     css = env.client.get("/style.css").text
-    assert ".diff-popup" in css
-    block = css[css.index(".diff-popup {"):]
-    block = block[: block.index("}")]
-    assert "position: fixed" in block
+    # The floating behaviour lives in the shared base...
+    base = _css_rule(css, ".floating-panel")
+    assert "position: fixed" in base
+    # ...and the diff popup only adds its own size on top of it.
+    block = _css_rule(css, ".diff-popup")
     assert "720px" in block
     assert "640px" in block
     # The old full-screen modal sizing is gone.
     assert ".diff-modal" not in css
+
+
+def test_floating_panels_share_one_base(env):
+    """The diff popup is the activity popup's sibling, not a second copy of it.
+
+    Both carry the `.floating-panel` base; each rule adds only what differs
+    (its size), so a change to the panel chrome lands in one place.
+    """
+    html = env.client.get("/").text
+    assert 'class="floating-panel activity-popup"' in html
+    assert 'class="floating-panel diff-popup"' in html
+    assert 'class="floating-panel-head activity-head"' in html
+    assert 'class="floating-panel-head diff-popup-head"' in html
+    assert 'class="floating-panel-title"' in html
+
+    css = env.client.get("/style.css").text
+    base = _css_rule(css, ".floating-panel")
+    for prop in ("position: fixed", "display: flex", "flex-direction: column",
+                 "background: var(--surface)", "border-radius: 10px",
+                 "box-shadow:", "overflow: hidden"):
+        assert prop in base, prop
+    # Each popup adds its size and nothing the base already says.
+    for selector, size in ((".activity-popup", "420px"), (".diff-popup", "720px")):
+        block = _css_rule(css, selector)
+        assert size in block, selector
+        for prop in ("position: fixed", "background:", "border-radius",
+                     "box-shadow", "overflow:"):
+            assert prop not in block, f"{selector} repeats {prop} from .floating-panel"
+    # The header chrome is shared too; each head only says how it lays out.
+    head = _css_rule(css, ".floating-panel-head")
+    for prop in ("display: flex", "gap: 8px", "padding: 8px 10px",
+                 "border-bottom: 1px solid var(--border-soft)",
+                 "background: var(--surface-2)"):
+        assert prop in head, prop
+    for selector in (".activity-head", ".diff-popup-head"):
+        block = _css_rule(css, selector)
+        for prop in ("padding:", "border-bottom", "background:"):
+            assert prop not in block, f"{selector} repeats {prop} from .floating-panel-head"
+    # The title truncation is shared too — no per-popup copy of it.
+    title = _css_rule(css, ".floating-panel-title")
+    for prop in ("white-space: nowrap", "text-overflow: ellipsis",
+                 "font-weight: 600"):
+        assert prop in title, prop
+    for clone in (".activity-title {", ".diff-popup-title {"):
+        assert clone not in css, clone
