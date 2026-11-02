@@ -1077,8 +1077,15 @@ body {
 .chip-tokens { background: var(--chip-tokens-bg); }
 
 /* Live token chip on a card with a running session: same look, gently pulsing
- * border so it reads as "updating", not static. */
-.chip-tokens-live {
+ * border so it reads as "updating", not static.
+ *
+ * The selector is `.chip-tokens.tokens-live`, NOT `.chip-tokens-live`: chip()
+ * builds `'chip chip-' + className`, and the live chip is created as
+ * chip('tokens tokens-live', …) — so the element carries `chip-tokens` and
+ * `tokens-live` as two separate classes. A single `.chip-tokens-live` class
+ * never existed on any element, which is why this rule (and the keyframes
+ * below) silently did nothing. */
+.chip-tokens.tokens-live {
   background: var(--chip-tokens-bg);
   outline: 1px solid var(--edge-running);
   animation: chip-live-pulse 2s ease-in-out infinite;
