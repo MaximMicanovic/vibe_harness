@@ -38,6 +38,7 @@ from app.config import (
 from app.gitops import GitError
 from app.cards import (
     STATUSES,
+    CardConflict,
     DependencyError,
     InvalidTransition,
     CardNotFound,
@@ -85,6 +86,10 @@ class CardUpdate(BaseModel):
     project: str | None = None
     workdir: str | None = None
     parent_id: str | None = None
+    # Optimistic concurrency: the updated_at the editor loaded. When present
+    # and stale the update is refused with 409 instead of overwriting somebody
+    # else's edit. Absent (MCP tools, scripts) = last write wins.
+    expected_updated_at: str | None = None
 
 
 class ProjectIn(BaseModel):
@@ -254,6 +259,10 @@ def create_app(config: Config | None = None,
     async def _dependency_error(request, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
+    @app.exception_handler(CardConflict)
+    async def _card_conflict(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     @app.exception_handler(NotRunningError)
     async def _not_running(request, exc):
         return JSONResponse(status_code=404, content={"detail": str(exc)})
@@ -368,7 +377,8 @@ def create_app(config: Config | None = None,
                             body=payload.body, auto_run=payload.auto_run,
                             auto_accept=payload.auto_accept,
                             project=payload.project, workdir=payload.workdir,
-                            parent_id=payload.parent_id)
+                            parent_id=payload.parent_id,
+                            expected_updated_at=payload.expected_updated_at)
         if card["auto_run"] and card["status"] == "draft":
             try:
                 runner.run(card_id)

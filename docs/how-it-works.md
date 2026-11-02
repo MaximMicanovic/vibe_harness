@@ -312,6 +312,30 @@ Two caveats for `claude`:
   figure, not money charged, so the board's cost column overstates what you
   actually paid.
 
+## Two people editing the same card
+
+`PUT /api/cards/{id}` is optimistic-concurrency guarded, so a second save cannot
+silently erase the first person's edit:
+
+- `CardUpdate` takes an optional `expected_updated_at`. When it is present and
+  does not match the card's current `updated_at`, the update is refused with
+  **409** and a detail saying *"this card changed since you opened it"* — nothing
+  is written.
+- When it is absent the update is unconditional (last write wins), exactly as
+  before. The MCP tools (`update_card`) and scripts send no
+  `expected_updated_at`, so they keep working unchanged.
+- The editor (`app/static/app.js::openEditor`) remembers the `updated_at` it
+  loaded (`state.editorUpdatedAt`) and sends it on save. On a 409 it keeps the
+  user's text in the fields and shows a conflict box with two ways out:
+  **Reload theirs** (re-fetch the card and replace the fields with the version
+  on the board) and **Overwrite anyway** (re-send without
+  `expected_updated_at`, which wins). The editor stays open until one is chosen;
+  **Run with Vibe** takes the same path, so a lost race never runs the other
+  person's spec.
+
+Editing a card nobody else touched is unaffected: the version the editor loaded
+is still the current one, so the save goes through.
+
 ## Finding a card: search
 
 The top bar has a search box. It answers one question — *where is that card?* —

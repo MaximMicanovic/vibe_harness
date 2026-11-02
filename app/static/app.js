@@ -33,6 +33,7 @@ const state = {
   logTimer: null,       // 2s log refresh, active while the viewed card is running
   logCardId: null,
   editorCardId: null,   // null => editor is creating a new card
+  editorUpdatedAt: null, // updated_at the editor loaded — sent back as expected_updated_at
   templates: [],
   templatesLoaded: false,
   projects: [],
@@ -116,6 +117,10 @@ const btnDiff = $('btn-diff');
 const btnDelete = $('btn-delete');
 const acceptHint = $('accept-hint');
 const revertNote = $('revert-note');
+const editConflict = $('edit-conflict');
+const editConflictText = $('edit-conflict-text');
+const btnReloadTheirs = $('btn-reload-theirs');
+const btnOverwrite = $('btn-overwrite');
 const cardPrLink = $('card-pr-link');
 
 /* The auto-accept checkbox remembers the last setting used (per browser). */
@@ -309,7 +314,9 @@ async function api(path, options) {
         detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
       }
     } catch (_) { /* body was not JSON */ }
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = res.status;   // callers branch on 409 (a lost edit race)
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();
@@ -3331,9 +3338,14 @@ function renderDependsList(card, live) {
 
 async function openEditor(cardId) {
   state.editorCardId = cardId || null;
+  state.editorUpdatedAt = null;
   hideError();
+  hideEditConflict();
   if (cardId) {
     const card = await api('/api/cards/' + encodeURIComponent(cardId));
+    // The version this editor loaded: sent back on save so a save that lost a
+    // race is refused (409) instead of silently overwriting the other edit.
+    state.editorUpdatedAt = card.updated_at || null;
     editorHeading.textContent = 'Edit card';
     templateField.hidden = true;
     cardTitle.value = card.title || '';
@@ -3445,7 +3457,35 @@ function closeEditor() {
   state.editorCardId = null;
 }
 
-async function saveCard() {
+/* A save that lost a race: the card changed since this editor loaded it. The
+ * user's text stays in the fields; these two buttons are the way out. */
+function showEditConflict(detail) {
+  editConflictText.textContent = '⚠ ' + (detail || 'This card changed since you opened it.');
+  editConflict.hidden = false;
+}
+
+function hideEditConflict() {
+  editConflict.hidden = true;
+  editConflictText.textContent = '';
+}
+
+/* Save the open card. A lost race (409) shows the conflict box and returns
+ * null, so the caller leaves the editor open with the user's text intact. */
+async function saveCardOrConflict(opts) {
+  hideEditConflict();
+  try {
+    return await saveCard(opts);
+  } catch (err) {
+    if (err && err.status === 409) {
+      showEditConflict(err.message);
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function saveCard(opts) {
+  const force = !!(opts && opts.force);
   const title = cardTitle.value.trim();
   const body = cardBody.value;
   const autoRun = cardAutoRun.checked;
@@ -3457,10 +3497,17 @@ async function saveCard() {
   // last used one — the default for the next new card ('' = no project).
   saveLastProjectDefault(project || '');
   if (state.editorCardId) {
-    return api('/api/cards/' + encodeURIComponent(state.editorCardId), {
+    const payload = { title: title, body: body, auto_run: autoRun, auto_accept: autoAccept, project: project, workdir: workdir };
+    // Optimistic concurrency: name the version this editor loaded. "Overwrite
+    // anyway" (force) leaves it out, which is the unconditional last-write-wins
+    // save the MCP tools and scripts use.
+    if (!force && state.editorUpdatedAt) payload.expected_updated_at = state.editorUpdatedAt;
+    const saved = await api('/api/cards/' + encodeURIComponent(state.editorCardId), {
       method: 'PUT',
-      body: JSON.stringify({ title: title, body: body, auto_run: autoRun, auto_accept: autoAccept, project: project, workdir: workdir }),
+      body: JSON.stringify(payload),
     });
+    state.editorUpdatedAt = saved.updated_at || null;
+    return saved;
   }
   const payload = { title: title, body: body, auto_run: autoRun, auto_accept: autoAccept, project: project, workdir: workdir };
   if (templateSelect.value) payload.template = templateSelect.value;
@@ -3471,8 +3518,22 @@ async function saveCard() {
 cardAutoAccept.addEventListener('change', () => saveAutoAcceptDefault(cardAutoAccept.checked));
 
 btnSave.addEventListener('click', () => action(async () => {
-  await saveCard();
+  const saved = await saveCardOrConflict();
+  if (!saved) return;   // a lost race: the editor stays open with the conflict box
   closeEditor();
+}));
+
+// "Overwrite anyway": re-send without expected_updated_at — the user chose to
+// replace the other person's edit.
+btnOverwrite.addEventListener('click', () => action(async () => {
+  await saveCard({ force: true });
+  hideEditConflict();
+  closeEditor();
+}));
+
+// "Reload theirs": discard the local text and load the version on the board.
+btnReloadTheirs.addEventListener('click', () => action(async () => {
+  if (state.editorCardId) await openEditor(state.editorCardId);
 }));
 
 // Archive the open card (only offered for accepted cards): pick an archive.
@@ -3484,7 +3545,8 @@ btnArchive.addEventListener('click', () => {
 
 btnRun.addEventListener('click', () => action(async () => {
   // Save first: edits are persisted, and a changed spec resets the card to draft.
-  const saved = await saveCard();
+  const saved = await saveCardOrConflict();
+  if (!saved) return;   // a lost race: don't run the other person's version
   // With auto_run on, the save above already queued the run (the card is now
   // "running") — don't POST /run again, that would just 409 "already running"
   // while the run is in fact starting.

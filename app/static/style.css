@@ -1606,6 +1606,27 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
   margin: 0 0 10px;
 }
 
+/* Editor: a save that lost a race — the card changed since it was opened.
+   The user's text stays in the fields; these buttons are the way out. */
+.edit-conflict {
+  font-size: 12px;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 8px;
+  margin: 0 0 10px;
+}
+
+.edit-conflict-text {
+  margin: 0 0 8px;
+}
+
+.edit-conflict-actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* The pull request an accepted card was shipped as (editor footer link). */
 .pr-link {
   font-size: 12px;

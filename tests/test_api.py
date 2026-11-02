@@ -209,6 +209,60 @@ def test_update_card(env):
     assert r.json()["body"] == "new body"
 
 
+def test_update_card_with_stale_expected_updated_at_is_409(env):
+    """Two clients open the same card; the first saves; the second gets a 409
+    and its text is not written."""
+    card = create_card(env.client, body="original")
+    opened_at = card["updated_at"]
+
+    # Client A saves first (it sends the version it loaded).
+    r = env.client.put(f"/api/cards/{card['id']}",
+                       json={"body": "A's text", "expected_updated_at": opened_at})
+    assert r.status_code == 200, r.text
+
+    # Client B still holds the version it opened: refused, loudly.
+    r = env.client.put(f"/api/cards/{card['id']}",
+                       json={"body": "B's text", "expected_updated_at": opened_at})
+    assert r.status_code == 409, r.text
+    assert "changed since you opened it" in r.json()["detail"]
+    assert env.client.get(f"/api/cards/{card['id']}").json()["body"] == "A's text"
+
+
+def test_update_card_overwrite_anyway_succeeds(env):
+    """\"Overwrite anyway\" re-sends without expected_updated_at: it wins."""
+    card = create_card(env.client, body="original")
+    opened_at = card["updated_at"]
+    env.client.put(f"/api/cards/{card['id']}",
+                   json={"body": "A's text", "expected_updated_at": opened_at})
+    r = env.client.put(f"/api/cards/{card['id']}",
+                       json={"body": "B's text", "expected_updated_at": opened_at})
+    assert r.status_code == 409, r.text
+
+    r = env.client.put(f"/api/cards/{card['id']}", json={"body": "B's text"})
+    assert r.status_code == 200, r.text
+    assert r.json()["body"] == "B's text"
+    assert env.client.get(f"/api/cards/{card['id']}").json()["body"] == "B's text"
+
+
+def test_update_card_without_expected_updated_at_still_works(env):
+    """MCP tools and scripts send no expected_updated_at: unchanged behavior."""
+    card = create_card(env.client, body="original")
+    env.client.put(f"/api/cards/{card['id']}", json={"body": "someone else"})
+    r = env.client.put(f"/api/cards/{card['id']}", json={"body": "script edit"})
+    assert r.status_code == 200, r.text
+    assert r.json()["body"] == "script edit"
+
+
+def test_update_card_with_matching_expected_updated_at_succeeds(env):
+    """Nobody else touched the card: the editor's save goes through."""
+    card = create_card(env.client, body="original")
+    r = env.client.put(f"/api/cards/{card['id']}",
+                       json={"body": "my edit",
+                             "expected_updated_at": card["updated_at"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["body"] == "my edit"
+
+
 def test_delete_card_removes_session_dir(env):
     card = create_card(env.client)
     env.client.post(f"/api/cards/{card['id']}/run")
@@ -686,8 +740,10 @@ def test_last_used_project_remembered_in_browser_and_on_cards(env):
     # A card save remembers its project on BOTH paths — the remember call sits
     # before the edit (PUT) branch, not only in a create-only .then callback.
     # Scoped to saveCard(): other PUTs elsewhere in app.js (e.g. the sidebar's
-    # per-role model picker) must not decide this.
-    save_fn = js[js.index("async function saveCard()"):]
+    # per-role model picker) must not decide this. (saveCard takes an options
+    # object since card 960bec — "overwrite anyway" saves without the
+    # expected_updated_at guard — so the slice matches the opening paren.)
+    save_fn = js[js.index("async function saveCard("):]
     save_fn = save_fn[:save_fn.index("\n}\n")]
     remember = save_fn.index("saveLastProjectDefault(project || '')")
     assert js.count("saveLastProjectDefault(project || '')") == 1
