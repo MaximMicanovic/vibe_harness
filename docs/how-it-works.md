@@ -333,12 +333,39 @@ by its header, closed with **Esc** or the ×. The board stays visible and usable
 behind it, and only one popup is open at a time — opening the diff closes the
 live activity popup (**C** + click) and vice versa.
 
-The header carries the card title, the range selector and the verdict that
-judged that range (approved/rejected, the reviewer's reason, the round, the
-model and the token count). The body holds the changed files with their +/-
-counts (click one to scroll to it) and the diff itself — rendered line by line
-(hunk header / addition / deletion / context), every line inserted as a text
-node because the content is model-written.
+The header carries the card title, the range selector, the layout toggle
+(Unified / Side by side) and the palette toggle, plus the verdict that judged
+that range (approved/rejected, the reviewer's reason, the round, the model and
+the token count). The body holds the changed files with their +/- counts
+(click one to scroll to it) and the diff itself.
+
+The diff is **parsed**, not just coloured: files -> hunks -> rows, each row
+carrying its kind (`ctx` / `add` / `del` / `meta` / `hunk`), its old and new
+line numbers, and its text. That is what makes the rest possible:
+
+- **Line numbers** for both sides in a fixed-width, dimmed gutter, counted
+  from each hunk header so they stay right across hunks.
+- **Unified mode** (the default on a narrow panel): one column, `+`/`-`
+  markers, old and new line numbers.
+- **Side-by-side mode** (the default when the panel is wide enough,
+  toggleable): old on the left, new on the right, aligned row by row within
+  each hunk, with a 2px rule between the columns.
+- **Word-level highlighting**: each run of `-` rows is paired with the
+  following `+` run and a small LCS over tokens (refined to characters inside
+  each changed block) marks the changed span with a stronger tint than the
+  rest of the line. A one-character change shows the character.
+- **Collapsed context**: a run of more than 6 unchanged lines becomes a
+  "⋯ N unchanged lines" row; clicking it expands the rows in place.
+- **File headers**: path and `+N -M`, collapsible, sticky while that file
+  scrolls.
+- **Restrained palette**: the diff hue is on the gutter rule and a faint row
+  fill; the code stays in normal ink. The palette toggle switches to a
+  colourblind-safe blue/orange palette and is persisted in `localStorage`
+  (`vibe.diff.palette`).
+
+Every piece of model-written text is still inserted as a **text node** — the
+diff never goes through `innerHTML`. The `truncated` flag still shows its
+notice.
 
 `GET /api/cards/<id>/diff?range=card|round|worktree` (default `card`):
 

@@ -205,13 +205,16 @@
       <div class="diff-popup-bar">
         <h2 class="floating-panel-title" id="diff-heading">Diff</h2>
         <div class="diff-ranges" id="diff-ranges" role="group" aria-label="Diff range"></div>
+        <div class="diff-views" id="diff-views" role="group" aria-label="Diff layout"></div>
+        <button class="diff-tool diff-palette" id="diff-palette" type="button"
+                aria-pressed="false" title="Colourblind-safe palette (blue/orange)">◐</button>
         <button class="icon-btn" id="diff-close" type="button" title="Close (Esc)">×</button>
       </div>
       <div class="diff-verdict" id="diff-verdict"></div>
     </header>
     <div class="diff-panes">
       <aside class="diff-files" id="diff-files" aria-label="Changed files"></aside>
-      <pre class="diff-body" id="diff-body"></pre>
+      <div class="diff-body" id="diff-body"></div>
     </div>
   </aside>
 

@@ -57,6 +57,9 @@ const state = {
   settings: null,        // GET /api/settings: { backend, backends, failure_kinds, … }
   diffCardId: null,      // card whose diff popup is open
   diffRange: 'card',     // 'card' | 'round' | 'worktree'
+  diffMode: null,        // null = auto (split when the panel is wide enough)
+  diffPalette: 'default',// 'default' | 'colorblind', persisted in localStorage
+  diffLast: null,        // last diff payload, so a layout toggle re-renders without a fetch
   prevStatuses: null,    // Map cardId -> status from the previous refresh (null = first load)
   notificationsEnabled: true,  // sidebar Settings toggle, persisted in localStorage
   activityCardId: null,  // card whose live activity popup is open (one at a time)
@@ -223,6 +226,8 @@ const diffPopup = $('diff-popup');
 const diffPopupHead = $('diff-popup-head');
 const diffHeading = $('diff-heading');
 const diffRanges = $('diff-ranges');
+const diffViews = $('diff-views');
+const diffPaletteBtn = $('diff-palette');
 const diffVerdict = $('diff-verdict');
 const diffFiles = $('diff-files');
 const diffBody = $('diff-body');
@@ -3994,6 +3999,44 @@ const DIFF_RANGES = [
   { key: 'worktree', label: 'Worktree', hint: 'uncommitted changes' },
 ];
 
+/* Layout: side-by-side needs roughly twice the width, so it is the default
+ * only when the panel is wide enough; unified wins on a narrow panel. */
+const DIFF_MODES = [
+  { key: 'unified', label: 'Unified' },
+  { key: 'split', label: 'Side by side' },
+];
+const DIFF_SPLIT_MIN_WIDTH = 640;
+const DIFF_COLLAPSE_AFTER = 6;
+const DIFF_PALETTE_KEY = 'vibe.diff.palette';
+
+/* The panel's real width: positionFloatingPanel clamps it to the viewport, so
+ * a narrow window gets unified even though the CSS asks for 720px. */
+function diffPanelWidth() {
+  const w = parseFloat(diffPopup.style.width);
+  return Number.isFinite(w) && w > 0 ? w : DIFF_WIDTH;
+}
+
+function effectiveDiffMode() {
+  return state.diffMode
+    || (diffPanelWidth() >= DIFF_SPLIT_MIN_WIDTH ? 'split' : 'unified');
+}
+
+/* The colourblind-safe palette is a per-browser choice, so it survives a
+ * reload; a private-mode localStorage failure just falls back to the default. */
+function loadDiffPalette() {
+  try {
+    return localStorage.getItem(DIFF_PALETTE_KEY) === 'colorblind' ? 'colorblind' : 'default';
+  } catch (_) {
+    return 'default';
+  }
+}
+
+function saveDiffPalette(palette) {
+  try { localStorage.setItem(DIFF_PALETTE_KEY, palette); } catch (_) { /* private mode */ }
+}
+
+state.diffPalette = loadDiffPalette();
+
 /* One line of a unified diff -> its kind. The file headers (+++ / ---) are
  * checked BEFORE the +/- prefixes, or every header would look like a change. */
 function classifyDiffLine(line) {
@@ -4001,7 +4044,10 @@ function classifyDiffLine(line) {
   if (line.startsWith('+++') || line.startsWith('---')) return 'meta';
   if (line.startsWith('diff ') || line.startsWith('index ')
       || line.startsWith('new file') || line.startsWith('deleted file')
-      || line.startsWith('similarity index') || line.startsWith('rename ')) {
+      || line.startsWith('similarity index') || line.startsWith('dissimilarity index')
+      || line.startsWith('rename ') || line.startsWith('copy ')
+      || line.startsWith('old mode') || line.startsWith('new mode')
+      || line.startsWith('Binary files') || line.startsWith('\\')) {
     return 'meta';
   }
   if (line.startsWith('+')) return 'add';
@@ -4013,6 +4059,279 @@ function classifyDiffLine(line) {
 function diffLinePath(line) {
   const m = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
   return m ? m[2] : null;
+}
+
+/* Inside a hunk the first character is the marker, so a deleted `--` line
+ * (`---`) is a deletion, not a file header. The `---`/`+++` headers only
+ * appear before the first hunk, where classifyDiffLine handles them. */
+function classifyHunkLine(line) {
+  if (line.startsWith('@@')) return 'hunk';
+  if (line.startsWith('\\')) return 'meta';
+  if (line.startsWith('+')) return 'add';
+  if (line.startsWith('-')) return 'del';
+  return 'ctx';
+}
+
+/* A hunk header: `@@ -oldStart,oldCount +newStart,newCount @@`. */
+const DIFF_HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+/* One parsed row. `oldLine`/`newLine` are null on the side the row does not
+ * exist; `text` has the +/-/space marker stripped (the gutter shows it). */
+function diffRow(kind, oldLine, newLine, text) {
+  return { kind, oldLine, newLine, text };
+}
+
+/* Parse a unified diff into files -> blocks -> rows. A block is either a
+ * `meta` line (the file header, `index`, `---`, `+++`) or a `hunk` with its
+ * header and rows. Line numbers restart from each hunk header, so they stay
+ * right across hunks. */
+function parseDiff(text) {
+  const files = [];
+  let file = null;
+  let block = null;
+  let oldNo = 0;
+  let newNo = 0;
+  const startFile = (path) => {
+    file = { path, blocks: [], additions: 0, deletions: 0 };
+    files.push(file);
+    block = null;
+  };
+  const lines = text.split('\n');
+  // A diff ends with a newline; the empty tail is not a context line (it would
+  // add a phantom row and bump the last line number).
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  for (const raw of lines) {
+    if (raw.startsWith('diff --git ')) {
+      startFile(diffLinePath(raw));
+      file.blocks.push({ type: 'meta', row: diffRow('meta', null, null, raw) });
+      continue;
+    }
+    if (!file) startFile(null);
+    const kind = block ? classifyHunkLine(raw) : classifyDiffLine(raw);
+    if (kind === 'hunk') {
+      const m = DIFF_HUNK_RE.exec(raw);
+      oldNo = m ? Number(m[1]) : 0;
+      newNo = m ? Number(m[2]) : 0;
+      block = { type: 'hunk', header: diffRow('hunk', null, null, raw), rows: [] };
+      file.blocks.push(block);
+      continue;
+    }
+    if (kind === 'meta') {
+      const row = diffRow('meta', null, null, raw);
+      if (block) block.rows.push(row);
+      else file.blocks.push({ type: 'meta', row });
+      continue;
+    }
+    const row = diffRow(kind, null, null, raw.slice(1));
+    if (kind === 'add') {
+      row.newLine = newNo++;
+      file.additions++;
+    } else if (kind === 'del') {
+      row.oldLine = oldNo++;
+      file.deletions++;
+    } else {
+      row.oldLine = oldNo++;
+      row.newLine = newNo++;
+    }
+    if (!block) {
+      block = { type: 'hunk', header: null, rows: [] };
+      file.blocks.push(block);
+    }
+    block.rows.push(row);
+  }
+  for (const f of files) {
+    for (const b of f.blocks) {
+      if (b.type === 'hunk') annotateWordDiff(b.rows);
+    }
+  }
+  return files;
+}
+
+/* Tokens for the word-level pass: words, whitespace runs and single
+ * punctuation characters. Splitting punctuation separately keeps `foo(a)` and
+ * `foo(b)` from looking like one changed word. */
+const DIFF_TOKEN_RE = /[A-Za-z0-9_]+|\s+|[^\sA-Za-z0-9_]/g;
+
+/* The char-level refinement is capped: a minified line would otherwise make
+ * the O(n*m) table enormous. Past the cap the changed block stays whole. */
+const DIFF_CHAR_MAX = 400;
+
+/* The table is O(n*m); a minified line would otherwise allocate a huge one.
+ * Past the cap the whole block is marked changed instead. */
+const DIFF_LCS_MAX_CELLS = 250000;
+
+/* Longest common subsequence over two token arrays -> eq/del/add ops. */
+function lcsOps(a, b) {
+  const n = a.length;
+  const m = b.length;
+  if (!n || !m || n * m > DIFF_LCS_MAX_CELLS) {
+    return [
+      ...a.map((text) => ({ op: 'del', text })),
+      ...b.map((text) => ({ op: 'add', text })),
+    ];
+  }
+  const dp = [];
+  for (let i = 0; i <= n; i++) dp.push(new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      ops.push({ op: 'eq', text: a[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ op: 'del', text: a[i] });
+      i++;
+    } else {
+      ops.push({ op: 'add', text: b[j] });
+      j++;
+    }
+  }
+  while (i < n) ops.push({ op: 'del', text: a[i++] });
+  while (j < m) ops.push({ op: 'add', text: b[j++] });
+  return ops;
+}
+
+/* Word-level diff, refined to characters inside each changed block: the line
+ * is marked changed, and the changed span inside it is marked harder. */
+function diffWords(a, b) {
+  const ops = lcsOps(a.match(DIFF_TOKEN_RE) || [], b.match(DIFF_TOKEN_RE) || []);
+  const out = [];
+  let i = 0;
+  while (i < ops.length) {
+    if (ops[i].op === 'eq') {
+      out.push(ops[i]);
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < ops.length && ops[j].op !== 'eq') j++;
+    const block = ops.slice(i, j);
+    const del = block.filter((o) => o.op === 'del').map((o) => o.text).join('');
+    const add = block.filter((o) => o.op === 'add').map((o) => o.text).join('');
+    if (del && add && del.length <= DIFF_CHAR_MAX && add.length <= DIFF_CHAR_MAX) {
+      out.push(...lcsOps(Array.from(del), Array.from(add)));
+    } else {
+      out.push(...block);
+    }
+    i = j;
+  }
+  return out;
+}
+
+/* The ops for one side of a pair: keep eq + this side's changes, drop the
+ * other side. Adjacent segments with the same flag are merged so the DOM has
+ * one span per changed run, not one per token. */
+function segmentsFor(ops, side) {
+  const out = [];
+  for (const op of ops) {
+    if (op.op !== 'eq' && op.op !== side) continue;
+    const changed = op.op !== 'eq';
+    const last = out[out.length - 1];
+    if (last && last.changed === changed) last.text += op.text;
+    else out.push({ text: op.text, changed });
+  }
+  return out;
+}
+
+/* Pair each run of `-` rows with the following `+` run and annotate both sides
+ * with word-level segments. Extra rows on either side stay whole-line. */
+function annotateWordDiff(rows) {
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].kind !== 'del') {
+      i++;
+      continue;
+    }
+    const dels = [];
+    while (i < rows.length && rows[i].kind === 'del') dels.push(rows[i++]);
+    const adds = [];
+    while (i < rows.length && rows[i].kind === 'add') adds.push(rows[i++]);
+    const pairs = Math.min(dels.length, adds.length);
+    for (let k = 0; k < pairs; k++) {
+      const ops = diffWords(dels[k].text, adds[k].text);
+      dels[k].segments = segmentsFor(ops, 'del');
+      adds[k].segments = segmentsFor(ops, 'add');
+    }
+  }
+}
+
+/* Side-by-side alignment: a context row is one pair; a run of `-` rows is
+ * paired with the following `+` run row by row; the longer side keeps empty
+ * cells. Meta/hunk rows span both columns. */
+function alignHunkRows(rows) {
+  const out = [];
+  let i = 0;
+  while (i < rows.length) {
+    const row = rows[i];
+    if (row.kind === 'ctx') {
+      out.push({ left: row, right: row });
+      i++;
+      continue;
+    }
+    if (row.kind === 'del') {
+      const dels = [];
+      while (i < rows.length && rows[i].kind === 'del') dels.push(rows[i++]);
+      const adds = [];
+      while (i < rows.length && rows[i].kind === 'add') adds.push(rows[i++]);
+      const n = Math.max(dels.length, adds.length);
+      for (let k = 0; k < n; k++) out.push({ left: dels[k] || null, right: adds[k] || null });
+      continue;
+    }
+    if (row.kind === 'add') {
+      const adds = [];
+      while (i < rows.length && rows[i].kind === 'add') adds.push(rows[i++]);
+      for (const add of adds) out.push({ left: null, right: add });
+      continue;
+    }
+    out.push({ left: row, right: null, full: true });
+    i++;
+  }
+  return out;
+}
+
+/* A run of more than DIFF_COLLAPSE_AFTER unchanged items becomes one
+ * "⋯ N unchanged lines" row; the items themselves are rendered hidden so a
+ * click expands them without a re-render. */
+function collapseRuns(items, isContext, makeItem, makeCollapsed) {
+  const out = [];
+  let i = 0;
+  while (i < items.length) {
+    if (!isContext(items[i])) {
+      out.push(makeItem(items[i++]));
+      continue;
+    }
+    let j = i;
+    while (j < items.length && isContext(items[j])) j++;
+    const run = items.slice(i, j);
+    if (run.length > DIFF_COLLAPSE_AFTER) out.push(makeCollapsed(run));
+    else for (const item of run) out.push(makeItem(item));
+    i = j;
+  }
+  return out;
+}
+
+function collapseContext(rows) {
+  return collapseRuns(rows,
+    (row) => row.kind === 'ctx',
+    (row) => ({ type: 'row', row }),
+    (run) => ({ type: 'collapsed', rows: run }));
+}
+
+/* The same collapse over aligned pairs (both sides context). */
+function collapsePairs(pairs) {
+  return collapseRuns(pairs,
+    (pair) => pair.left && pair.right && pair.left.kind === 'ctx' && pair.right.kind === 'ctx',
+    (pair) => ({ type: 'pair', pair }),
+    (run) => ({ type: 'collapsed', pairs: run }));
 }
 
 function renderDiffRanges() {
@@ -4085,28 +4404,205 @@ function scrollToDiffFile(path) {
   if (target) target.scrollIntoView({ block: 'start' });
 }
 
-/* The diff itself. Every line is inserted as a TEXT NODE: the content is
- * model-written, so it must never go through innerHTML. */
+/* The layout toggle: unified on a narrow panel, side-by-side when there is
+ * room. The choice is per-session; the palette below is the persisted one. */
+function renderDiffViews() {
+  diffViews.textContent = '';
+  const mode = effectiveDiffMode();
+  for (const view of DIFF_MODES) {
+    const btn = el('button', 'diff-tool diff-view' + (mode === view.key ? ' diff-tool--on' : ''),
+                   view.label);
+    btn.type = 'button';
+    btn.dataset.mode = view.key;
+    btn.setAttribute('aria-pressed', mode === view.key ? 'true' : 'false');
+    btn.addEventListener('click', () => {
+      if (effectiveDiffMode() === view.key) return;
+      state.diffMode = view.key;
+      if (state.diffLast) renderDiff(state.diffLast);
+      else renderDiffViews();
+    });
+    diffViews.appendChild(btn);
+  }
+}
+
+/* The palette is a data attribute on the body; the CSS variables do the rest,
+ * so toggling it never re-renders the diff. */
+function applyDiffPalette() {
+  diffBody.dataset.palette = state.diffPalette;
+  const on = state.diffPalette === 'colorblind';
+  diffPaletteBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  diffPaletteBtn.classList.toggle('diff-tool--on', on);
+}
+
+function lineNumber(n) {
+  return n === null || n === undefined ? '' : String(n);
+}
+
+function diffMarker(kind) {
+  if (kind === 'add') return '+';
+  if (kind === 'del') return '-';
+  return ' ';
+}
+
+/* The code cell: unchanged text is a bare TEXT NODE, a changed run is a span
+ * around one. Either way the model-written text never goes through innerHTML. */
+function appendDiffCode(container, row) {
+  if (row.segments && row.segments.length) {
+    for (const segment of row.segments) {
+      if (segment.changed) {
+        const span = el('span', 'diff-word diff-word--' + row.kind);
+        span.appendChild(document.createTextNode(segment.text));
+        container.appendChild(span);
+      } else {
+        container.appendChild(document.createTextNode(segment.text));
+      }
+    }
+    return;
+  }
+  container.appendChild(document.createTextNode(row.text === '' ? ' ' : row.text));
+}
+
+/* A meta or hunk line spans the full width: no line numbers, no marker. */
+function renderFullRow(row) {
+  const div = el('div', 'diff-row diff-row--' + row.kind);
+  div.appendChild(document.createTextNode(row.text === '' ? ' ' : row.text));
+  return div;
+}
+
+/* A run of unchanged lines: the button stays, the rows are rendered hidden so
+ * a click expands them without a re-render. */
+function collapsedRow(count, group) {
+  const btn = el('button', 'diff-collapsed');
+  btn.type = 'button';
+  btn.setAttribute('aria-expanded', 'false');
+  btn.appendChild(document.createTextNode('⋯ ' + count + ' unchanged lines'));
+  btn.addEventListener('click', () => {
+    const open = group.hidden;
+    group.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.classList.toggle('diff-collapsed--open', open);
+  });
+  return btn;
+}
+
+function renderUnifiedRow(row) {
+  const div = el('div', 'diff-row diff-row--' + row.kind);
+  const gutter = el('span', 'diff-gutter');
+  gutter.appendChild(el('span', 'diff-ln diff-ln--old', lineNumber(row.oldLine)));
+  gutter.appendChild(el('span', 'diff-ln diff-ln--new', lineNumber(row.newLine)));
+  gutter.appendChild(el('span', 'diff-marker', diffMarker(row.kind)));
+  div.appendChild(gutter);
+  const code = el('span', 'diff-code');
+  appendDiffCode(code, row);
+  div.appendChild(code);
+  return div;
+}
+
+/* The collapsed button and its hidden rows, shared by both layouts. */
+function appendCollapsed(container, count, items, renderItem) {
+  const group = el('div', 'diff-collapsed-rows');
+  group.hidden = true;
+  for (const item of items) group.appendChild(renderItem(item));
+  container.appendChild(collapsedRow(count, group));
+  container.appendChild(group);
+}
+
+function renderUnifiedRows(container, rows) {
+  for (const item of collapseContext(rows)) {
+    if (item.type === 'collapsed') {
+      appendCollapsed(container, item.rows.length, item.rows, renderUnifiedRow);
+    } else if (item.row.kind === 'meta' || item.row.kind === 'hunk') {
+      container.appendChild(renderFullRow(item.row));
+    } else {
+      container.appendChild(renderUnifiedRow(item.row));
+    }
+  }
+}
+
+function renderSplitCell(row, side) {
+  const kind = row ? row.kind : 'empty';
+  const cell = el('span', 'diff-cell diff-cell--' + kind + ' diff-cell--' + side);
+  const gutter = el('span', 'diff-gutter');
+  const line = row ? (side === 'old' ? row.oldLine : row.newLine) : null;
+  gutter.appendChild(el('span', 'diff-ln', lineNumber(line)));
+  gutter.appendChild(el('span', 'diff-marker', row ? diffMarker(row.kind) : ' '));
+  cell.appendChild(gutter);
+  const code = el('span', 'diff-code');
+  if (row) appendDiffCode(code, row);
+  cell.appendChild(code);
+  return cell;
+}
+
+function renderSplitRow(pair) {
+  if (pair.full) return renderFullRow(pair.left);
+  const div = el('div', 'diff-row diff-row--split');
+  div.appendChild(renderSplitCell(pair.left, 'old'));
+  div.appendChild(renderSplitCell(pair.right, 'new'));
+  return div;
+}
+
+function renderSplitRows(container, rows) {
+  for (const item of collapsePairs(alignHunkRows(rows))) {
+    if (item.type === 'collapsed') {
+      appendCollapsed(container, item.pairs.length, item.pairs, renderSplitRow);
+    } else {
+      container.appendChild(renderSplitRow(item.pair));
+    }
+  }
+}
+
+/* One file: a sticky, collapsible header (path, +N -M) over its hunks. */
+function renderDiffFile(file) {
+  const section = el('section', 'diff-file-block');
+  if (file.path) section.dataset.path = file.path;
+  const head = el('button', 'diff-file-head');
+  head.type = 'button';
+  head.title = 'Collapse or expand this file';
+  head.setAttribute('aria-expanded', 'true');
+  head.appendChild(el('span', 'diff-file-caret', '▾'));
+  head.appendChild(el('span', 'diff-file-name', file.path || '(unknown file)'));
+  head.appendChild(el('span', 'diff-file-add', '+' + file.additions));
+  head.appendChild(el('span', 'diff-file-del', '−' + file.deletions));
+  const rowsEl = el('div', 'diff-file-rows');
+  head.addEventListener('click', () => {
+    rowsEl.hidden = !rowsEl.hidden;
+    head.setAttribute('aria-expanded', rowsEl.hidden ? 'false' : 'true');
+    head.classList.toggle('diff-file-head--collapsed', rowsEl.hidden);
+    head.querySelector('.diff-file-caret').textContent = rowsEl.hidden ? '▸' : '▾';
+  });
+  section.appendChild(head);
+  section.appendChild(rowsEl);
+  for (const block of file.blocks) {
+    if (block.type === 'meta') {
+      rowsEl.appendChild(renderFullRow(block.row));
+      continue;
+    }
+    if (block.header) rowsEl.appendChild(renderFullRow(block.header));
+    if (effectiveDiffMode() === 'split') renderSplitRows(rowsEl, block.rows);
+    else renderUnifiedRows(rowsEl, block.rows);
+  }
+  return section;
+}
+
+/* The diff itself. Every piece of model-written text is inserted as a TEXT
+ * NODE (el() sets textContent; segments use createTextNode) — never innerHTML. */
 function renderDiff(data) {
+  state.diffLast = data;
   diffBody.textContent = '';
   renderDiffVerdict(data.review);
   renderDiffFiles(data.files);
+  renderDiffViews();
+  applyDiffPalette();
   if (!data.diff) {
-    diffBody.appendChild(el('div', 'diff-line diff-line--ctx',
+    diffBody.appendChild(el('div', 'diff-row diff-row--ctx',
       data.reason ? '(' + data.reason + ')' : '(no changes in this range)'));
     return;
   }
-  let path = null;
-  for (const line of data.diff.split('\n')) {
-    if (line.startsWith('diff --git ')) path = diffLinePath(line);
-    const kind = classifyDiffLine(line);
-    const row = el('div', 'diff-line diff-line--' + kind);
-    if (path && line.startsWith('diff --git ')) row.dataset.path = path;
-    row.appendChild(document.createTextNode(line === '' ? ' ' : line));
-    diffBody.appendChild(row);
+  for (const file of parseDiff(data.diff)) {
+    diffBody.appendChild(renderDiffFile(file));
   }
   if (data.truncated) {
-    diffBody.appendChild(el('div', 'diff-line diff-line--meta',
+    diffBody.appendChild(el('div', 'diff-row diff-row--meta diff-truncated',
       '… diff truncated — open the log or the worktree for the rest'));
   }
 }
@@ -4132,6 +4628,9 @@ async function openDiff(cardId, range, anchor) {
   diffPopup.hidden = false;
   positionFloatingPanel(diffPopup, anchor, DIFF_WIDTH, DIFF_HEIGHT);
   renderDiffRanges();
+  state.diffLast = null;
+  renderDiffViews();
+  applyDiffPalette();
   await loadDiff();
 }
 
@@ -4141,6 +4640,11 @@ function closeDiff() {
 }
 
 $('diff-close').addEventListener('click', closeDiff);
+diffPaletteBtn.addEventListener('click', () => {
+  state.diffPalette = state.diffPalette === 'colorblind' ? 'default' : 'colorblind';
+  saveDiffPalette(state.diffPalette);
+  applyDiffPalette();
+});
 makePanelDraggable(diffPopup, diffPopupHead);
 
 /* ------------- Theme indicator (automatic dark mode, sun-based) ------------- */
