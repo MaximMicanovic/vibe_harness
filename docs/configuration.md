@@ -28,6 +28,7 @@ All optional, via environment variables:
 | `VIBE_HARNESS_ASK_USER_TIMEOUT` | `600` | Default seconds `harness_ask_user` waits for your answer on the card (per question; the tool caps it at 3600) |
 | `VIBE_HARNESS_TDD` | `1` | Worker prompts (run + fixer rounds) instruct the model to work test-driven: failing test first (red), smallest fix (green), refactor while green, full suite green before finishing; `0` omits the rule |
 | `VIBE_HARNESS_MAX_CONCURRENT` | `3` | How many agent sessions may run at once; `0` = unlimited. A Run over the cap is queued (not failed) and starts automatically, oldest queue time first, when a session ends. The sidebar's **Settings** panel overrides this per harness (`settings.json`) and applies without a restart |
+| `VIBE_HARNESS_PREVENT_SLEEP` | `1` | Hold an idle-sleep inhibitor (`caffeinate -i` on macOS, `systemd-inhibit` on Linux) while any session is live or any card is queued. A sleeping machine suspends the session process and the CLI reports `interrupted` (exit 3) — a card that looks failed but was only paused. `0` disables it; the sidebar's **Settings** panel has the same toggle |
 
 > **Reducing token usage:** see [`route.md`](route.md) — how work is routed
 > through run → test gate → review → accept, which knobs cap spend

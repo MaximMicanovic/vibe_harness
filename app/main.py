@@ -131,6 +131,8 @@ class SettingsIn(BaseModel):
     # Concurrent-session cap; 0 = unlimited. None = leave it unchanged.
     max_concurrent: int | None = Field(default=None, ge=0)
     accept_mode: str | None = None
+    # Hold an idle-sleep inhibitor while cards run or wait. None = unchanged.
+    prevent_sleep: bool | None = None
 
 
 class ModelsIn(BaseModel):
@@ -205,7 +207,19 @@ def create_app(config: Config | None = None,
             print(f"WARNING: startup recovery failed: {exc!r}")
         # Auto-create/auto-update the managed route.md in every project folder.
         routemd.sync_all_projects(projects)
+        # Keep the machine awake while cards run or wait. A sleeping machine
+        # suspends the session process, the CLI gives up and reports
+        # `interrupted` (exit 3) — a card that looks failed but was only
+        # paused. The inhibitor is a child process, so it dies with the server.
+        try:
+            runner.sleep_guard.start(runner.has_pending_work)
+        except Exception as exc:
+            print(f"WARNING: could not start the sleep guard: {exc!r}")
         yield
+        try:
+            runner.sleep_guard.stop()
+        except Exception:
+            pass
 
     app = FastAPI(title="vibe-harness", lifespan=lifespan)
 
@@ -626,7 +640,12 @@ def create_app(config: Config | None = None,
                 "max_concurrent": settings.max_concurrent(config.max_concurrent),
                 "running": runner.running_count(),
                 "accept_mode": settings.accept_mode(config.accept_mode),
-                "accept_modes": describe_accept_modes()}
+                "accept_modes": describe_accept_modes(),
+                # Sleep guard: whether the machine is currently being kept
+                # awake, and whether this platform can do it at all.
+                "prevent_sleep": runner.sleep_guard.enabled,
+                "sleep_held": runner.sleep_guard.held(),
+                "sleep_supported": runner.sleep_guard.supported()}
 
     @app.get("/api/settings")
     def get_settings():
@@ -640,6 +659,10 @@ def create_app(config: Config | None = None,
             settings.set_max_concurrent(payload.max_concurrent)
         if payload.accept_mode is not None:
             settings.set_accept_mode(payload.accept_mode)
+        if payload.prevent_sleep is not None:
+            runner.sleep_guard.enabled = bool(payload.prevent_sleep)
+            if not runner.sleep_guard.enabled:
+                runner.sleep_guard.release()
         return _settings_payload()
 
     # --- models (per-role) ---------------------------------------------------

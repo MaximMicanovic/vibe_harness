@@ -2448,6 +2448,41 @@ async function renderSettingsPanel() {
         ? 'This browser has no Notification API, so a short beep plays instead.'
         : 'A card that finishes while you are in another window pops up a desktop notification. '
           + 'The browser asks for permission on your first click.'));
+
+  /* Sleep guard: the server holds an idle-sleep inhibitor while cards run or
+   * wait. A sleeping machine suspends the session process and the CLI reports
+   * `interrupted` — a card that looks failed but was only paused. */
+  const sleepRow = el('label', 'setting-row');
+  const sleepBox = el('input');
+  sleepBox.type = 'checkbox';
+  sleepBox.id = 'prevent-sleep-toggle';
+  sleepBox.checked = !!settings.prevent_sleep;
+  sleepBox.disabled = !settings.sleep_supported;
+  sleepBox.title = 'Keep the machine awake while cards run or wait';
+  sleepBox.addEventListener('change',
+    () => savePreventSleep(sleepBox.checked).catch(showError));
+  sleepRow.appendChild(sleepBox);
+  sleepRow.appendChild(el('span', 'setting-label',
+    'Keep the computer awake while cards run'));
+  sidebarBody.appendChild(sleepRow);
+
+  sidebarBody.appendChild(el('p', 'sidebar-empty',
+    !settings.sleep_supported
+      ? 'This platform has no idle-sleep inhibitor the harness can hold, so the '
+        + 'machine may sleep mid-run and the card comes back as "interrupted".'
+      : settings.sleep_held
+        ? 'Holding the machine awake right now — a card is running or waiting.'
+        : 'While a card is running or queued, the harness stops the machine from '
+          + 'going to sleep. A sleeping machine suspends the session and the card '
+          + 'comes back as "interrupted".'));
+}
+
+async function savePreventSleep(on) {
+  state.settings = await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ prevent_sleep: !!on }),
+  });
+  await renderSettingsPanel();
 }
 
 async function saveMaxConcurrent(raw) {

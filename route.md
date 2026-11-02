@@ -153,6 +153,17 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   So a chain of linked drafts costs the same tokens as running them by hand, in
   order, with no idle time between them — but do not link cards that should run
   independently, they would serialize.
+- **The machine is kept awake while there is work.** While any session is
+  live or any card is queued (a slot wait, an accept batch, a resolver),
+  the server holds an idle-sleep inhibitor — `caffeinate -i` on macOS,
+  `systemd-inhibit` on Linux — and releases it when the work is done.
+  Without it a sleeping machine suspends the session process, the CLI
+  gives up and reports `interrupted` (exit 3), which the board shows as a
+  failed card even though nothing was wrong with the work. The inhibitor
+  is a child process, so it dies with the server. `VIBE_HARNESS_PREVENT_SLEEP=0`
+  (or the sidebar Settings toggle) turns it off. A card merely waiting on
+  an unmerged dependency does NOT count as work — nothing would happen
+  until the user merges it, so it would keep the machine awake forever.
 - **Concurrency cap: at most N sessions at once.** `VIBE_HARNESS_MAX_CONCURRENT`
   (default 3, `0` = unlimited) or the sidebar's **Settings** panel
   (`settings.json`, read per run — no restart). A Run that finds no free slot is

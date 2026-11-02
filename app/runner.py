@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app import failures, gitops, liveusage, mailbox, praccept
+from app.sleepguard import SleepGuard
 from app.backends import Backend, get_backend
 from app.config import BASE_DIR, SESSIONS_DIR, Config, resolve_path
 from app.gitops import GitBusyError, GitError, GitMergeConflict
@@ -467,6 +468,9 @@ class SessionRunner:
         # concurrently). Guarded by _accept_lock.
         self._accept_lock = threading.Lock()
         self._accept_draining = False
+        # Keeps the machine awake while cards run or wait: a sleeping machine
+        # suspends the session process and the CLI reports `interrupted`.
+        self.sleep_guard = SleepGuard(enabled=config.prevent_sleep)
 
     # ------------------------------------------------------------------ run
 
@@ -712,6 +716,27 @@ class SessionRunner:
         if self.settings is not None:
             return self.settings.max_concurrent(self.config.max_concurrent)
         return self.config.max_concurrent
+
+    def has_pending_work(self) -> bool:
+        """True when a session is live or a card is waiting to start.
+
+        Drives the sleep guard: while this is true the machine must not sleep,
+        or the session process is suspended and the CLI reports `interrupted`
+        (exit 3) — a card that looks failed but was only paused.
+
+        `waiting_for` (a dependency that has not been merged yet) is NOT work:
+        nothing happens until the user merges that dependency, so holding the
+        machine awake for it would keep it awake indefinitely.
+        """
+        if self.running_count() > 0:
+            return True
+        for card in self.store.list():
+            session = card.get("session") or {}
+            if session.get("queued") or session.get("accept_queued"):
+                return True
+            if (session.get("git") or {}).get("resolving"):
+                return True
+        return False
 
     def running_count(self) -> int:
         """Live sessions holding a slot — one per card, because run -> review
