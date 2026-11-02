@@ -331,6 +331,44 @@ That is what lets the `round` range reconstruct what each round judged — the
 harness advances `last_reviewed_commit` to HEAD when a round ends, so the
 literal `last_reviewed_commit..HEAD` is empty right after a review.
 
+## Watching a card work (hold C and click it)
+
+The session **log** is the CLI's final output: for a headless run it stays
+almost empty until the session ends, so it cannot answer "what is it doing
+right now". The vibe **journal** can — it is appended *while* the session runs.
+
+Hold **C** and left-click a card to open a small floating panel (~420x520) next
+to it. It is not an overlay: the board stays usable behind it, and only one
+popup is open at a time. The header shows the card title, its status pill and
+the live token count; the body is the activity feed, newest at the bottom,
+auto-scrolled unless you scrolled up (then a **↓ jump to latest** button
+appears). The model's thinking is collapsed behind a **thinking…** toggle. Esc
+or the **×** closes it. A plain click still opens the editor.
+
+`GET /api/cards/<id>/activity?cursor=<int>` returns
+`{cursor, events: [{kind, at, …}]}` with `kind` one of:
+
+| kind | source in the journal | fields |
+|---|---|---|
+| `text` | `payload.delta[].entry.content[].text` (an assistant `message`) | `text` |
+| `reasoning` | `payload.delta[].entry.text` (id `reasoning-…`) | `text` |
+| `tool` | `payload.request` with `kind: "tool"` | `tool`, `summary` |
+| `result` | `payload.result` (`tool_succeeded` / `tool_failed`) | `ok`, `summary` |
+| `status` | `payload.delta[].entry.detail.display.statusText` | `text` |
+
+`cursor` is the number of journal lines already consumed; the client passes it
+back and gets only what was appended since. A first call (no cursor) returns
+the last 200 events, so opening the popup on a finished card shows its tail
+instead of replaying everything. Each `text`/`summary` is capped at 2000
+characters and one call returns at most 200 events.
+
+The journal is found the same way live token usage finds it
+(`app/liveusage.py`): the card's live registry entry pid maps to the session
+via `logs/session/active/<id>.lock.json`. A card with no live session falls
+back to its last worker session's journal; a card with neither, or a journal
+that is gone, is an empty feed — never an error. The popup polls once a second
+while the card is running/reviewing and stops when it leaves those states.
+
 ## Backends: Vibe or Claude
 
 The harness is a board, not an agent — it drives a headless CLI and reads back

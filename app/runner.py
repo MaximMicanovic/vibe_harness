@@ -56,7 +56,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app import failures, gitops, liveusage, mailbox, praccept
+from app import activity, failures, gitops, liveusage, mailbox, praccept
 from app.sleepguard import SleepGuard
 from app.backends import Backend, get_backend
 from app.config import BASE_DIR, SESSIONS_DIR, Config
@@ -2239,6 +2239,51 @@ class SessionRunner:
         with self._lock:
             entry = self._registry.get(card_id)
         return entry is not None and entry["proc"].poll() is None
+
+    # ---------------------------------------------------------- live activity
+
+    def activity(self, card_id: str, cursor: int = 0,
+                 limit: int = activity.DEFAULT_LIMIT) -> dict:
+        """The card's live activity feed: what the model is doing right now.
+
+        `cursor` is the number of journal lines the client already consumed
+        (0 = the last `limit` events). The journal is the vibe session's, found
+        the same way live token usage finds it: the live registry entry's pid
+        maps to the session, and a card with no live session falls back to its
+        last worker session. A card with neither, or a journal that is gone,
+        is an empty feed — never an error (see app/activity.py).
+        """
+        card = self.store.get(card_id)      # CardNotFound -> 404
+        session_id = self._activity_session_id(card)
+        if not session_id:
+            return {"cursor": 0, "events": []}
+        journal = (liveusage.vibe_home() / "logs" / "session" / "unified"
+                   / session_id / "journal")
+        return activity.read_activity(journal, cursor=cursor, limit=limit)
+
+    def _activity_session_id(self, card: dict) -> str | None:
+        """The vibe session whose journal carries this card's activity.
+
+        The live session wins (its journal is being appended right now); a
+        card with no live registry entry falls back to the worker session
+        recorded when the last round ended.
+        """
+        with self._lock:
+            entry = self._registry.get(card["id"])
+        if entry is not None:
+            session_id = entry.get("vibe_session_id")
+            proc = entry.get("proc")
+            if not session_id and proc is not None:
+                try:
+                    session_id = liveusage.find_session_id_by_pid(
+                        liveusage.vibe_home(), proc.pid)
+                except Exception:
+                    session_id = None
+                if session_id:
+                    entry["vibe_session_id"] = session_id
+            if session_id:
+                return session_id
+        return (card.get("session") or {}).get("worker_session_id")
 
     # ------------------------------------------------------- live token usage
 

@@ -350,6 +350,16 @@ The cheapest token is the one never spent:
   browser (it rides the existing 2 s poll) and no LLM spend. Best effort: if
   the journal is missing or changes schema, the card falls back to the last
   recorded `export.json` count.
+- **Watching a live session costs nothing.** Hold **C** and click a card to
+  open the activity popup: it polls `GET /api/cards/<id>/activity?cursor=<n>`
+  once a second while the card is running/reviewing, and that endpoint only
+  reads the same vibe journal the live token counter reads
+  (`app/activity.py`, cursor = journal lines already consumed, ≤ 200 events and
+  2000 chars per event per call). No LLM call, no session spawned, no extra
+  request when no popup is open — the popup is the only caller. It replaced the
+  chat-mode toggle, whose 💬 panel opened the session LOG (the CLI's final
+  output, empty until the run ends) and therefore answered nothing while a
+  session was live.
 - **Per-round artifacts:** `sessions/<id>/run-N/export/export.json`,
   `review-N/export/export.json` and `resolve-N/export/export.json` hold
   `usage.total_tokens` (plus

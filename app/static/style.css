@@ -2035,21 +2035,156 @@ html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
   border-color: var(--ok-ink);
 }
 
-/* ---------------- Chat mode ---------------- */
+/* ---------------- Live activity popup (hold C + click a card) ---------------- */
 
-/* The rail button stays lit while the board is in reading mode, so it is
- * obvious why a card click opens a chat instead of the editor. */
-.rail-btn--mode-on {
-  background: var(--ok-soft);
-  box-shadow: inset 0 0 0 2px var(--ok-border);
+/* A small floating panel, NOT an overlay: it sits next to the clicked card and
+ * the board stays usable behind it (no backdrop, no focus trap). app.js sets
+ * left/top/width/height on open, clamped to the viewport. */
+.activity-popup {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: 420px;
+  height: 520px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
 }
 
-body.chat-mode .card { cursor: pointer; }
+.activity-popup[hidden] { display: none; }
 
-/* In chat mode the whole card is a click target: the model picker in the
- * middle of the card would otherwise swallow the click (it stops
- * propagation), so it goes inert while reading. */
-body.chat-mode .card-model { pointer-events: none; }
+.activity-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-2);
+}
+
+.activity-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-status {
+  flex: 0 0 auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--heading-muted);
+}
+
+.activity-status--running { background: var(--bg-running); color: var(--edge-running); }
+.activity-status--reviewing { background: var(--bg-running); color: var(--edge-running); }
+.activity-status--done { background: var(--bg-done); color: var(--edge-done); }
+.activity-status--accepted { background: var(--bg-accepted); color: var(--edge-accepted); }
+.activity-status--failed,
+.activity-status--stopped { background: var(--bg-failed); color: var(--edge-failed); }
+
+.activity-tokens {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-feed {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.activity-event {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.activity-event--text { background: transparent; padding: 2px 0; }
+.activity-event--reasoning { background: transparent; padding: 2px 0; }
+.activity-event--status { background: transparent; padding: 0; }
+
+.activity-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.activity-thinking {
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.activity-tool {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--edge-running);
+}
+
+.activity-summary {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--card-muted);
+}
+
+.activity-ok { color: var(--ok-ink); }
+.activity-event--failed .activity-ok { color: var(--danger-ink); }
+.activity-event--failed .activity-summary { color: var(--danger-ink); }
+
+.activity-status-text {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.activity-jump {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+.activity-jump[hidden] { display: none; }
 
 /* ---------------- Heartbeat: how fresh is this board? ---------------- */
 
