@@ -54,7 +54,7 @@ from app.questions import (
     QuestionNotPending,
     QuestionStore,
 )
-from app import diffs, gitops, routemd
+from app import diffs, failures, gitops, routemd
 from app.search import search_cards
 from app.runner import (
     TOKEN_BREAKDOWN_KEYS,
@@ -647,9 +647,12 @@ def create_app(config: Config | None = None,
         Config.max_concurrent; 0 = unlimited) and `running` is the current
         occupancy, so the panel can say "2 of 3 running". `accept_mode` is the
         effective mode (the stored setting, else Config.accept_mode) and
-        `accept_modes` the choices the panel offers.
+        `accept_modes` the choices the panel offers. `failure_kinds` is
+        `failures.KINDS` — the board builds its failure filter from it, so a
+        new kind reaches the UI without a second copy to keep in sync.
         """
         return {"backend": settings.backend(),
+                "failure_kinds": list(failures.KINDS),
                 "backends": describe_backends(config),
                 "max_concurrent": settings.max_concurrent(config.max_concurrent),
                 "running": runner.running_count(),

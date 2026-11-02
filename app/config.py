@@ -39,7 +39,10 @@ class Config:
     enabled_tools: list[str] = field(default_factory=list)  # allowlist -> repeated --enabled-tools
     test_cmd: str | None = None             # test command run in the workspace; gates review + accept
     test_timeout_seconds: int = 600         # timeout for the test command (separate from vibe's time limit)
-    accept_cmd: str | None = None           # deprecated alias for test_cmd (VIBE_HARNESS_ACCEPT_CMD)
+    # Compat shim: the deprecated VIBE_HARNESS_ACCEPT_CMD alias for test_cmd
+    # (docs/configuration.md). No app code reads it — __post_init__ folds it
+    # into test_cmd — so it stays only for configs written before the rename.
+    accept_cmd: str | None = None
     review_agent: str = "ask"               # read-only builtin agent for the review pass
     max_review_rounds: int = 5              # cap on review/fix loop rounds per card
     git_branch_prefix: str = "harness"      # per-card git branch prefix (<prefix>/<card_id>)

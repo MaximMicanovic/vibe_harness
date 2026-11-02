@@ -334,6 +334,15 @@ def test_api_successful_card_has_no_failure(tmp_path):
         assert "failure" not in final["session"]
 
 
+def test_api_publishes_the_kinds_the_classifier_can_return(tmp_path):
+    """The board's failure filter is built from this list, so it must be the
+    classifier's own `KINDS` — not a copy that drifts when a kind is added."""
+    e = make_env(tmp_path)
+    with e.client:
+        data = e.client.get("/api/settings").json()
+    assert data["failure_kinds"] == list(KINDS)
+
+
 # ------------------------------------------- what the runner records for us
 
 FAKE_CLAUDE_SLOW = """#!/bin/sh

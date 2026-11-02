@@ -93,6 +93,8 @@ class GitPreflightError(GitError):
 
 
 def git_available() -> bool:
+    # No app caller: tests/test_mailbox.py uses it in a pytest.mark.skipif, so
+    # removing it would make those tests unconditional and fail without git.
     return shutil.which("git") is not None
 
 
@@ -340,11 +342,6 @@ def revert_merge_commit(root: Path, sha: str) -> dict:
     head = run_git(["rev-parse", "HEAD"], root).stdout.strip()
     return {"revert_commit": head, "reverted_commit": sha,
             "reverted_at": datetime.now(timezone.utc).isoformat()}
-
-
-def delete_card_branch(git_info: dict) -> None:
-    """Delete the card's branch (safe delete: only if already merged)."""
-    run_git(["branch", "-q", "-d", git_info["branch"]], Path(git_info["repo"]))
 
 
 def remove_card_worktree(git_info: dict) -> None:

@@ -57,9 +57,6 @@ INTERRUPTED_STOP_REASONS = frozenset({
 #: shipped card — whatever went wrong on the way is history, not a failure.
 NOT_FAILED_STATUSES = frozenset({"draft", "running", "reviewing", "accepted"})
 
-#: The runner's wording when a review round produced no verdict at all.
-NO_VERDICT_REASON = "reviewer did not produce a verdict"
-
 
 def _failure(kind: str, detail: str) -> dict:
     return {"kind": kind, "detail": detail}

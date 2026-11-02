@@ -310,12 +310,6 @@ class CardStore:
             except CardNotFound:
                 break
 
-    def children_of(self, card_id: str) -> list[dict]:
-        """The cards split out of `card_id`, oldest first."""
-        kids = [n for n in self.list() if n.get("parent_id") == card_id]
-        kids.sort(key=lambda n: n.get("created_at") or "")
-        return kids
-
     def drop_dependency_refs(self, card_id: str) -> None:
         """Drop references to card_id from every other card's depends_on, so
         dependents do not wait on a card that no longer exists on the board

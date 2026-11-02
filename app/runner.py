@@ -59,7 +59,7 @@ from pathlib import Path
 from app import failures, gitops, liveusage, mailbox, praccept
 from app.sleepguard import SleepGuard
 from app.backends import Backend, get_backend
-from app.config import BASE_DIR, SESSIONS_DIR, Config, resolve_path
+from app.config import BASE_DIR, SESSIONS_DIR, Config
 from app.gitops import GitBusyError, GitError, GitMergeConflict
 from app.tokens import (
     TOKEN_BREAKDOWN_KEYS,
@@ -79,6 +79,11 @@ from app.cards import (
 from app.projects import ProjectStore
 from app.models import ModelSettings
 from app.questions import QuestionStore
+# Imported for real, not under `if TYPE_CHECKING:`: the module uses
+# `from __future__ import annotations`, so `settings: SettingsStore | None` is a
+# string that `typing.get_type_hints()` resolves against this module's globals —
+# a TYPE_CHECKING-only import would leave it raising NameError.
+from app.settings import SettingsStore
 
 # Grace period between SIGTERM and SIGKILL when stopping a session.
 STOP_GRACE_SECONDS = 10

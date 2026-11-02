@@ -37,18 +37,26 @@ def test_a_card_starts_without_a_parent(store):
     assert card["parent_id"] is None
 
 
+def children_of(store, card_id):
+    """The cards split out of `card_id`, oldest first — what the board reads
+    off `parent_id` (the store keeps no helper for it)."""
+    kids = [n for n in store.list() if n.get("parent_id") == card_id]
+    kids.sort(key=lambda n: n.get("created_at") or "")
+    return kids
+
+
 def test_create_with_a_parent(store):
     parent = store.create("Parent", "spec")
     child = store.create("Child", "sub", parent_id=parent["id"])
     assert child["parent_id"] == parent["id"]
-    assert [n["id"] for n in store.children_of(parent["id"])] == [child["id"]]
-    assert store.children_of(child["id"]) == []
+    assert [n["id"] for n in children_of(store, parent["id"])] == [child["id"]]
+    assert children_of(store, child["id"]) == []
 
 
 def test_children_are_oldest_first(store):
     parent = store.create("Parent", "spec")
     kids = [store.create("Child " + str(i), "sub", parent_id=parent["id"]) for i in range(3)]
-    assert [n["id"] for n in store.children_of(parent["id"])] == [k["id"] for k in kids]
+    assert [n["id"] for n in children_of(store, parent["id"])] == [k["id"] for k in kids]
 
 
 def test_unknown_parent_is_rejected(store):
@@ -79,7 +87,7 @@ def test_reparenting_and_detaching(store):
     child = store.create("Child", "sub", parent_id=a["id"])
     store.update(child["id"], parent_id=b["id"])
     assert store.get(child["id"])["parent_id"] == b["id"]
-    assert store.children_of(a["id"]) == []
+    assert children_of(store, a["id"]) == []
     # "" detaches it again.
     store.update(child["id"], parent_id="")
     assert store.get(child["id"])["parent_id"] is None

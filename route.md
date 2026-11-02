@@ -113,6 +113,11 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   (green), refactor while green, full suite green before finishing. It costs a
   few dozen prompt tokens per round and pairs with the test gate above; disable
   with `VIBE_HARNESS_TDD=0`.
+- **Dead code is a test failure, not a review finding.** `tests/test_no_dead_code.py`
+  runs `ruff check app/` (the `dev` extra installs ruff; the test skips without
+  it) with a deliberately minimal config — `F401` unused import, `F841` unused
+  local — so leftovers fail the suite instead of costing a reviewer round to
+  spot. It is not a style linter: nothing else is enabled.
 - **Reviewer is always the cheap read-only agent.** The review pass always runs
   with `--agent <VIBE_HARNESS_REVIEW_AGENT>` (default `ask`) — never the
   configured worker agent — and the prompt forbids modifying files, so the
@@ -376,11 +381,19 @@ session record into `{kind, detail}`, `annotate_card` attaches it as
 kind as a badge with the detail on hover, and the top bar's **Failures** filter
 narrows the board to one kind.
 
+**One source of truth for the kinds.** `failures.KINDS` is the contract, and
+`GET /api/settings` publishes it as `failure_kinds`; `app/static/app.js` builds
+the filter from that response (falling back to its label table for the first
+paint, before the fetch resolves). Adding a kind to the classifier therefore
+reaches the UI with no JS edit — the filter used to keep its own copy and
+silently drift.
+
 Kinds, in priority order — each one points at a different knob:
 
 | kind | what it means | what to change |
 |---|---|---|
 | `stopped_by_user` | you pressed Stop | nothing — it was you |
+| `interrupted` | the session was signalled from outside (a sleeping machine suspends it) | re-run — the work was never judged |
 | `git_conflict` | the accept merge conflicted / a resolver was involved | resolve the conflict, then Accept again |
 | `timeout` | the session hit its limit (`stop_reason`, or the harness watchdog) | raise `VIBE_HARNESS_TIME_LIMIT`, or split the card |
 | `tests_failed` | the test gate rejected it | fix the spec or `VIBE_HARNESS_TEST_CMD`; the fixer already got the output |
