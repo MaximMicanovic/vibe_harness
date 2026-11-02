@@ -394,7 +394,10 @@ The cheapest token is the one never spent:
   output, empty until the run ends) and therefore answered nothing while a
   session was live. The popup's own layout (size and place, shared with the
   diff popup) lives in the browser's `localStorage` under
-  `vibe-harness:panel:<key>` — no server round-trip, no token cost.
+  `vibe-harness:panel:<key>` — no server round-trip, no token cost. The diff
+  popup's layout mode (unified / side by side) and its colourblind-safe palette
+  are browser state too (`vibe.diff.palette`), so re-reading a diff costs
+  nothing extra.
 - **Steering costs one non-blocking tool call per checkpoint.** The popup's
   footer sends guidance to the running worker (`POST /api/cards/<id>/messages`)
   and shows the worker's replies; the same poll also reads

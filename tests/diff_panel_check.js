@@ -85,6 +85,13 @@ function makeEl(tag) {
   node.appendChild = (c) => { c.parentNode = node; node.children.push(c); node.childNodes.push(c); return c; };
   node.removeChild = (c) => { node.children = node.children.filter((x) => x !== c); node.childNodes = node.childNodes.filter((x) => x !== c); };
   node.remove = () => { if (node.parentNode) node.parentNode.removeChild(node); };
+  Object.defineProperty(node, 'nextSibling', {
+    get() {
+      if (!node.parentNode) return null;
+      const i = node.parentNode.children.indexOf(node);
+      return i >= 0 ? node.parentNode.children[i + 1] || null : null;
+    },
+  });
   Object.defineProperty(node, 'textContent', {
     get() { return node._text || ''; },
     set(v) { node._text = String(v); if (v === '') { node.children = []; node.childNodes = []; } },
@@ -108,63 +115,77 @@ function makeEl(tag) {
   return node;
 }
 
-const byId = {};
-const getEl = (id) => { if (!byId[id]) { byId[id] = makeEl('div'); byId[id].id = id; } return byId[id]; };
-const store = {};
-const docListeners = {};
-/* What GET /api/cards answers (the board's own poll). Mutated in place: a poll
- * already in flight holds a reference to the array. */
-const boardCards = [];
-const fetched = [];
-
-const sandbox = {
-  console,
-  document: {
-    getElementById: getEl,
-    createElement: (t) => makeEl(t),
-    createElementNS: (ns, t) => makeEl(t),
-    createTextNode: (t) => { const n = makeEl('#text'); n.textContent = t; return n; },
-    addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); },
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    body: makeEl('body'),
-  },
-  localStorage: {
-    getItem: (k) => (k in store ? store[k] : null),
-    setItem: (k, v) => { store[k] = String(v); },
-    removeItem: (k) => { delete store[k]; },
-  },
-  fetch: async (url) => {
-    fetched.push(String(url));
-    const path = String(url).split('?')[0];
-    // The board's own poll must get a LIST back, or it would overwrite
-    // state.cards with an object mid-test.
-    const body = path === '/api/cards' ? boardCards
-      : ['/api/stacks', '/api/projects', '/api/templates', '/api/archives'].includes(path) ? []
-      : {};
-    return { ok: true, status: 200, statusText: 'OK', json: async () => body, text: async () => '' };
-  },
-  requestAnimationFrame: (fn) => fn(),
-  getComputedStyle: () => ({ fontSize: '15px' }),
-  CSS: { escape: (s) => String(s) },
-  navigator: { platform: 'test', userAgentData: null },
-  setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
-  innerWidth: 1280, innerHeight: 800,
-  Date, Math, JSON, Promise, Set, Map, Array, Object, String, Number, Boolean, parseFloat, parseInt, isNaN, RegExp, Error,
-};
-sandbox.addEventListener = () => {};
-sandbox.confirm = () => true;
-sandbox.window = sandbox;
-sandbox.globalThis = sandbox;
-vm.createContext(sandbox);
-
 const src = fs.readFileSync(APP_JS, 'utf8');
-vm.runInContext(src + '\n;globalThis.__x = { state, classifyDiffLine, renderDiff, '
-  + 'renderDiffVerdict, renderKeysPanel, KEYBINDINGS, DIFF_RANGES, '
-  + 'openDiff, closeDiff, openActivity, closeActivity, buildCard, closeEditor, '
-  + 'DIFF_WIDTH, DIFF_HEIGHT };', sandbox,
-  { filename: 'app.js' });
-const X = sandbox.__x;
+
+/* Boot the served app.js in a fresh sandbox. `store` is the localStorage
+ * backing, so a second boot with the same store is a reload. */
+function bootApp(store) {
+  const byId = {};
+  const getEl = (id) => { if (!byId[id]) { byId[id] = makeEl('div'); byId[id].id = id; } return byId[id]; };
+  const docListeners = {};
+  /* What GET /api/cards answers (the board's own poll). Mutated in place: a
+   * poll already in flight holds a reference to the array. */
+  const boardCards = [];
+  const fetched = [];
+  const sandbox = {
+    console,
+    document: {
+      getElementById: getEl,
+      createElement: (t) => makeEl(t),
+      createElementNS: (ns, t) => makeEl(t),
+      createTextNode: (t) => { const n = makeEl('#text'); n.textContent = t; return n; },
+      addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); },
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      body: makeEl('body'),
+    },
+    localStorage: {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); },
+      removeItem: (k) => { delete store[k]; },
+    },
+    fetch: async (url) => {
+      fetched.push(String(url));
+      const path = String(url).split('?')[0];
+      // The board's own poll must get a LIST back, or it would overwrite
+      // state.cards with an object mid-test.
+      const body = path === '/api/cards' ? boardCards
+        : ['/api/stacks', '/api/projects', '/api/templates', '/api/archives'].includes(path) ? []
+        : {};
+      return { ok: true, status: 200, statusText: 'OK', json: async () => body, text: async () => '' };
+    },
+    requestAnimationFrame: (fn) => fn(),
+    getComputedStyle: () => ({ fontSize: '15px' }),
+    CSS: { escape: (s) => String(s) },
+    navigator: { platform: 'test', userAgentData: null },
+    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
+    innerWidth: 1280, innerHeight: 800,
+    Date, Math, JSON, Promise, Set, Map, Array, Object, String, Number, Boolean, parseFloat, parseInt, isNaN, RegExp, Error,
+  };
+  sandbox.addEventListener = () => {};
+  sandbox.confirm = () => true;
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(src + '\n;globalThis.__x = { state, classifyDiffLine, parseDiff, '
+    + 'diffWords, alignHunkRows, collapseContext, collapsePairs, effectiveDiffMode, '
+    + 'loadDiffPalette, saveDiffPalette, DIFF_MODES, DIFF_COLLAPSE_AFTER, '
+    + 'DIFF_SPLIT_MIN_WIDTH, renderDiff, '
+    + 'renderDiffVerdict, renderKeysPanel, KEYBINDINGS, DIFF_RANGES, '
+    + 'openDiff, closeDiff, openActivity, closeActivity, buildCard, closeEditor, '
+    + 'DIFF_WIDTH, DIFF_HEIGHT };', sandbox,
+    { filename: 'app.js' });
+  return { sandbox, X: sandbox.__x, getEl, store, docListeners, boardCards, fetched };
+}
+
+const app = bootApp({});
+const X = app.X;
+const getEl = app.getEl;
+const store = app.store;
+const docListeners = app.docListeners;
+const boardCards = app.boardCards;
+const fetched = app.fetched;
+const sandbox = app.sandbox;
 if (!X || typeof X.renderDiff !== 'function' || typeof X.classifyDiffLine !== 'function') {
   console.error('could not load renderDiff/classifyDiffLine from app.js');
   process.exit(2);
@@ -216,6 +237,103 @@ for (const [line, kind] of cases) {
   check(got === kind, 'classifyDiffLine(' + JSON.stringify(line) + ') should be ' + kind + ', got ' + got);
 }
 
+/* 1a. The parser: files -> hunks -> rows, each row carrying its old/new line
+ *     number. The numbers must be right across hunks, not just in the first. */
+const parsed = X.parseDiff([
+  'diff --git a/hello.py b/hello.py',
+  'index 1111111..2222222 100644',
+  '--- a/hello.py',
+  '+++ b/hello.py',
+  '@@ -1,3 +1,4 @@',
+  ' one',
+  '-two',
+  '+TWO',
+  '+three',
+  ' four',
+  '@@ -10,2 +11,2 @@',
+  ' ten',
+  '-eleven',
+  '+ELEVEN',
+].join('\n'));
+check(parsed.length === 1, 'one file parsed, got ' + parsed.length);
+const parsedFile = parsed[0];
+check(parsedFile.path === 'hello.py', 'the file path is parsed, got ' + JSON.stringify(parsedFile.path));
+const hunkBlocks = parsedFile.blocks.filter((b) => b.type === 'hunk');
+check(hunkBlocks.length === 2, 'two hunks parsed, got ' + hunkBlocks.length);
+const firstRows = hunkBlocks[0].rows;
+const secondRows = hunkBlocks[1].rows;
+const lineOf = (rows, kind, text) => rows.find((r) => r.kind === kind && r.text === text);
+check(lineOf(firstRows, 'ctx', 'one').oldLine === 1 && lineOf(firstRows, 'ctx', 'one').newLine === 1,
+  'the first context line is 1/1');
+check(lineOf(firstRows, 'del', 'two').oldLine === 2 && lineOf(firstRows, 'del', 'two').newLine === null,
+  'the deletion is old line 2');
+check(lineOf(firstRows, 'add', 'TWO').newLine === 2 && lineOf(firstRows, 'add', 'TWO').oldLine === null,
+  'the addition is new line 2');
+check(lineOf(firstRows, 'add', 'three').newLine === 3, 'the second addition is new line 3');
+check(lineOf(firstRows, 'ctx', 'four').oldLine === 3 && lineOf(firstRows, 'ctx', 'four').newLine === 4,
+  'the trailing context is 3/4');
+check(lineOf(secondRows, 'ctx', 'ten').oldLine === 10 && lineOf(secondRows, 'ctx', 'ten').newLine === 11,
+  'the second hunk starts at 10/11');
+check(lineOf(secondRows, 'del', 'eleven').oldLine === 11, 'the second deletion is old line 11');
+check(lineOf(secondRows, 'add', 'ELEVEN').newLine === 12, 'the second addition is new line 12');
+
+/* 1b. Word-level diff: a one-character change marks the character, not the
+ *     whole line. */
+const wordOps = X.diffWords('cat', 'cut');
+const opText = (op) => wordOps.filter((o) => o.op === op).map((o) => o.text).join('');
+check(opText('del') === 'a', 'the deleted character is a, got ' + JSON.stringify(opText('del')));
+check(opText('add') === 'u', 'the added character is u, got ' + JSON.stringify(opText('add')));
+check(opText('eq') === 'ct', 'the unchanged characters are ct, got ' + JSON.stringify(opText('eq')));
+
+/* 1c. A trailing newline is not a phantom context line. */
+const trailing = X.parseDiff([
+  'diff --git a/t.txt b/t.txt',
+  '--- a/t.txt',
+  '+++ b/t.txt',
+  '@@ -1 +1 @@',
+  '-a',
+  '+b',
+  '',
+].join('\n'));
+const trailingRows = trailing[0].blocks.find((b) => b.type === 'hunk').rows;
+check(trailingRows.length === 2, 'the trailing newline adds no row, got ' + trailingRows.length);
+check(trailingRows[1].newLine === 1, 'the last line number is not bumped, got ' + trailingRows[1].newLine);
+
+/* 1d. `\ No newline at end of file` is meta, not a context line. */
+const noNewlineText = [
+  'diff --git a/n.txt b/n.txt',
+  '--- a/n.txt',
+  '+++ b/n.txt',
+  '@@ -1 +1 @@',
+  '-a',
+  '\\ No newline at end of file',
+  '+b',
+  '\\ No newline at end of file',
+].join('\n');
+const noNewline = X.parseDiff(noNewlineText);
+const noNewlineRows = noNewline[0].blocks.find((b) => b.type === 'hunk').rows;
+check(noNewlineRows.length === 4, 'the no-newline markers are rows, got ' + noNewlineRows.length);
+check(noNewlineRows[1].kind === 'meta' && noNewlineRows[3].kind === 'meta',
+  'the no-newline markers are meta');
+check(noNewlineRows[2].newLine === 1,
+  'the marker does not bump the line number, got ' + noNewlineRows[2].newLine);
+
+/* 1e. Inside a hunk, `---` is a deleted line, not a file header. */
+const dashes = X.parseDiff([
+  'diff --git a/doc.md b/doc.md',
+  '--- a/doc.md',
+  '+++ b/doc.md',
+  '@@ -1,2 +1,2 @@',
+  '----',
+  '++++',
+  ' text',
+].join('\n'));
+const dashRows = dashes[0].blocks.find((b) => b.type === 'hunk').rows;
+check(dashRows[0].kind === 'del' && dashRows[0].text === '---',
+  'a deleted --- line is a deletion, got ' + JSON.stringify(dashRows[0]));
+check(dashRows[1].kind === 'add' && dashRows[1].text === '+++',
+  'an added +++ line is an addition, got ' + JSON.stringify(dashRows[1]));
+
 /* 2. Rendering: one row per line, classified, every line a TEXT NODE. */
 const diff = [
   'diff --git a/hello.py b/hello.py',
@@ -227,6 +345,7 @@ const diff = [
   '+print("world")',
   '-print("old")',
 ].join('\n');
+X.state.diffMode = 'unified';
 X.renderDiff({
   range: 'card', base: 'aaa', head: 'bbb', diff, truncated: false,
   files: [{ path: 'hello.py', additions: 1, deletions: 1 }],
@@ -234,21 +353,57 @@ X.renderDiff({
             tokens: 42, via: 'submit_verdict' },
 });
 const body = getEl('diff-body');
-const rows = body.children.filter((c) => c.classList.contains('diff-line'));
+const rows = body.querySelectorAll('.diff-row');
 check(rows.length === 8, 'one row per diff line, got ' + rows.length);
-const kinds = rows.map((r) => (r.className.match(/diff-line--(\w+)/) || [])[1]);
+const kinds = rows.map((r) => (r.className.match(/diff-row--(\w+)/) || [])[1]);
 check(JSON.stringify(kinds) === JSON.stringify(['meta', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'add', 'del']),
   'rows are classified in order, got ' + JSON.stringify(kinds));
-// Every row's content is a text node, never markup.
+// Every row's content is a text node (or a word span around one), never markup.
 for (const row of rows) {
-  check(row.children.length === 1 && row.children[0].tagName === '#TEXT',
-    'each diff line is a single TEXT NODE, got ' + JSON.stringify(row.children.map((c) => c.tagName)));
+  const code = row.querySelector('.diff-code');
+  const target = code || row;
+  for (const child of target.children) {
+    if (child.tagName === '#TEXT') continue;
+    check(child.classList.contains('diff-word')
+          && child.children.length === 1 && child.children[0].tagName === '#TEXT',
+      'each diff line is TEXT NODEs (or a word span around one), got ' + child.tagName);
+  }
 }
-check(rows[6].children[0].textContent === '+print("world")',
-  'the addition row carries the raw line, got ' + JSON.stringify(rows[6].children[0].textContent));
-// The file header row is anchored, so the file list can scroll to it.
-check(rows[0].dataset.path === 'hello.py',
-  'the diff --git row carries the file path, got ' + JSON.stringify(rows[0].dataset.path));
+check(textOf(rows[6].querySelector('.diff-code')) === 'print("world")',
+  'the addition row carries the line without its marker, got '
+  + JSON.stringify(textOf(rows[6].querySelector('.diff-code'))));
+// The file block is anchored, so the file list can scroll to it.
+const fileBlock = body.querySelector('.diff-file-block');
+check(fileBlock.dataset.path === 'hello.py',
+  'the file block carries the file path, got ' + JSON.stringify(fileBlock.dataset.path));
+
+/* 2a0. The file header shows the path and +N -M, and collapses its rows. */
+const fileHead = fileBlock.querySelector('.diff-file-head');
+check(textOf(fileHead).indexOf('hello.py') !== -1, 'the file header shows the path');
+check(textOf(fileHead).indexOf('+1') !== -1 && textOf(fileHead).indexOf('−1') !== -1,
+  'the file header shows +N -M, got ' + JSON.stringify(textOf(fileHead)));
+const fileRowsEl = fileBlock.querySelector('.diff-file-rows');
+check(fileRowsEl.hidden === false, 'the file rows start visible');
+fileHead.listeners.click[0]();
+check(fileRowsEl.hidden === true, 'clicking the file header collapses it');
+check(fileHead.getAttribute('aria-expanded') === 'false', 'the collapsed header says so');
+fileHead.listeners.click[0]();
+check(fileRowsEl.hidden === false, 'clicking again expands it');
+
+/* 2a. Line numbers: both sides, in a fixed-width gutter, correct across hunks. */
+const ctxRow = rows[5];
+const ctxLns = ctxRow.querySelectorAll('.diff-ln');
+check(ctxLns.length === 2, 'a unified row has two line numbers, got ' + ctxLns.length);
+check(ctxLns[0].textContent === '1' && ctxLns[1].textContent === '1',
+  'the context row shows old 1 / new 1, got ' + JSON.stringify(ctxLns.map((n) => n.textContent)));
+const addRow = rows[6];
+const addLns = addRow.querySelectorAll('.diff-ln');
+check(addLns[0].textContent === '' && addLns[1].textContent === '2',
+  'the addition row shows only the new line number, got ' + JSON.stringify(addLns.map((n) => n.textContent)));
+const delRow = rows[7];
+const delLns = delRow.querySelectorAll('.diff-ln');
+check(delLns[0].textContent === '2' && delLns[1].textContent === '',
+  'the deletion row shows only the old line number, got ' + JSON.stringify(delLns.map((n) => n.textContent)));
 
 /* 3. The verdict is pinned next to the diff. */
 const verdict = getEl('diff-verdict');
@@ -272,7 +427,176 @@ const fileText = textOf(fileRows[0]);
 check(fileText.indexOf('hello.py') !== -1 && fileText.indexOf('+1') !== -1 && fileText.indexOf('1') !== -1,
   'the file row shows the path and the +/- counts, got ' + JSON.stringify(fileText));
 fileRows[0].listeners.click[0]();
-check(rows[0].scrolledIntoView === true, 'clicking a file scrolls to its first row');
+check(fileBlock.scrolledIntoView === true, 'clicking a file scrolls to its block');
+
+/* 2b. A one-character change marks the character inside the line. */
+X.renderDiff({
+  range: 'card', diff: [
+    'diff --git a/word.txt b/word.txt',
+    '--- a/word.txt',
+    '+++ b/word.txt',
+    '@@ -1 +1 @@',
+    '-cat',
+    '+cut',
+  ].join('\n'),
+  truncated: false, files: [{ path: 'word.txt', additions: 1, deletions: 1 }], review: null,
+});
+const wordRows = getEl('diff-body').querySelectorAll('.diff-row');
+const wordDel = wordRows.find((r) => r.classList.contains('diff-row--del'));
+const wordAdd = wordRows.find((r) => r.classList.contains('diff-row--add'));
+const delSpan = wordDel.querySelector('.diff-word--del');
+const addSpan = wordAdd.querySelector('.diff-word--add');
+check(delSpan && textOf(delSpan) === 'a',
+  'the deleted character is highlighted, got ' + JSON.stringify(delSpan && textOf(delSpan)));
+check(addSpan && textOf(addSpan) === 'u',
+  'the added character is highlighted, got ' + JSON.stringify(addSpan && textOf(addSpan)));
+check(delSpan.children.length === 1 && delSpan.children[0].tagName === '#TEXT',
+  'the highlighted character is a TEXT NODE');
+
+/* 2c. A 40-line unchanged run collapses and expands. */
+const longCtx = [];
+for (let i = 0; i < 40; i++) longCtx.push(' line ' + i);
+X.renderDiff({
+  range: 'card', diff: [
+    'diff --git a/long.txt b/long.txt',
+    '--- a/long.txt',
+    '+++ b/long.txt',
+    '@@ -1,41 +1,41 @@',
+    ...longCtx,
+    '-old',
+    '+new',
+  ].join('\n'),
+  truncated: false, files: [{ path: 'long.txt', additions: 1, deletions: 1 }], review: null,
+});
+const longBody = getEl('diff-body');
+const collapsed = longBody.querySelector('.diff-collapsed');
+check(!!collapsed, 'a 40-line unchanged run collapses');
+check(textOf(collapsed).indexOf('40 unchanged lines') !== -1,
+  'the collapsed row says how many lines, got ' + JSON.stringify(textOf(collapsed)));
+const collapsedGroup = collapsed.nextSibling;
+check(collapsedGroup && collapsedGroup.hidden === true, 'the unchanged rows start hidden');
+collapsed.listeners.click[0]();
+check(collapsedGroup.hidden === false, 'clicking the collapsed row expands it');
+check(collapsed.getAttribute('aria-expanded') === 'true', 'the expanded row says so');
+collapsed.listeners.click[0]();
+check(collapsedGroup.hidden === true, 'clicking again collapses it');
+
+/* 2c0. The threshold is "more than 6": six stays visible, seven collapses. */
+const sixCtx = [];
+for (let i = 0; i < 6; i++) sixCtx.push(' line ' + i);
+X.renderDiff({
+  range: 'card', diff: [
+    'diff --git a/six.txt b/six.txt',
+    '--- a/six.txt',
+    '+++ b/six.txt',
+    '@@ -1,7 +1,7 @@',
+    ...sixCtx,
+    '-old',
+    '+new',
+  ].join('\n'),
+  truncated: false, files: [], review: null,
+});
+check(!getEl('diff-body').querySelector('.diff-collapsed'),
+  'six unchanged lines stay visible');
+X.renderDiff({
+  range: 'card', diff: [
+    'diff --git a/seven.txt b/seven.txt',
+    '--- a/seven.txt',
+    '+++ b/seven.txt',
+    '@@ -1,8 +1,8 @@',
+    ...sixCtx,
+    ' line 6',
+    '-old',
+    '+new',
+  ].join('\n'),
+  truncated: false, files: [], review: null,
+});
+check(!!getEl('diff-body').querySelector('.diff-collapsed'),
+  'seven unchanged lines collapse');
+
+/* 2d. Side-by-side: old left, new right, aligned by hunk. */
+X.state.diffMode = 'split';
+X.renderDiff({
+  range: 'card', diff: [
+    'diff --git a/split.txt b/split.txt',
+    '--- a/split.txt',
+    '+++ b/split.txt',
+    '@@ -1,2 +1,2 @@',
+    ' same',
+    '-old',
+    '+new',
+  ].join('\n'),
+  truncated: false, files: [{ path: 'split.txt', additions: 1, deletions: 1 }], review: null,
+});
+const splitRows = getEl('diff-body').querySelectorAll('.diff-row--split');
+check(splitRows.length === 2, 'two aligned rows (one context, one change), got ' + splitRows.length);
+const ctxCells = splitRows[0].querySelectorAll('.diff-cell');
+check(ctxCells.length === 2, 'a split row has two cells, got ' + ctxCells.length);
+check(textOf(ctxCells[0].querySelector('.diff-code')) === 'same'
+      && textOf(ctxCells[1].querySelector('.diff-code')) === 'same',
+  'the context row is on both sides');
+const changeCells = splitRows[1].querySelectorAll('.diff-cell');
+check(changeCells[0].classList.contains('diff-cell--del'), 'the left cell is the deletion');
+check(changeCells[1].classList.contains('diff-cell--add'), 'the right cell is the addition');
+check(textOf(changeCells[0].querySelector('.diff-code')) === 'old'
+      && textOf(changeCells[1].querySelector('.diff-code')) === 'new',
+  'the change is old left / new right');
+const leftLn = changeCells[0].querySelector('.diff-ln');
+const rightLn = changeCells[1].querySelector('.diff-ln');
+check(leftLn.textContent === '2' && rightLn.textContent === '2',
+  'the split row shows old 2 / new 2, got ' + JSON.stringify([leftLn.textContent, rightLn.textContent]));
+
+/* 2e. The default layout follows the panel width: split when wide enough,
+ *     unified on a narrow panel. */
+X.state.diffMode = null;
+getEl('diff-popup').style.width = '720px';
+check(X.effectiveDiffMode() === 'split', 'a wide panel defaults to side-by-side');
+getEl('diff-popup').style.width = '500px';
+check(X.effectiveDiffMode() === 'unified', 'a narrow panel defaults to unified');
+getEl('diff-popup').style.width = '720px';
+X.state.diffMode = 'split';
+
+/* 2f. The layout toggle switches unified <-> side-by-side. */
+const viewBtn = (mode) => getEl('diff-views').children.find((c) => c.dataset.mode === mode);
+check(!!viewBtn('unified') && !!viewBtn('split'), 'the layout buttons are unified and split');
+viewBtn('unified').listeners.click[0]();
+check(X.state.diffMode === 'unified', 'clicking Unified selects unified');
+check(getEl('diff-body').querySelectorAll('.diff-row--split').length === 0,
+  'unified mode has no split rows');
+viewBtn('split').listeners.click[0]();
+check(X.state.diffMode === 'split', 'clicking Side by side selects split');
+check(getEl('diff-body').querySelectorAll('.diff-row--split').length > 0,
+  'split mode renders split rows');
+
+/* 2g. The colourblind palette toggles and persists across a reload. */
+const paletteBtn = getEl('diff-palette');
+check(X.state.diffPalette === 'default', 'the palette starts default, got ' + X.state.diffPalette);
+paletteBtn.listeners.click[0]();
+check(X.state.diffPalette === 'colorblind', 'clicking the palette selects colourblind');
+check(getEl('diff-body').dataset.palette === 'colorblind', 'the body carries the palette');
+check(store['vibe.diff.palette'] === 'colorblind',
+  'the palette is persisted, got ' + JSON.stringify(store['vibe.diff.palette']));
+check(paletteBtn.getAttribute('aria-pressed') === 'true', 'the palette button says it is on');
+const reloaded = bootApp(store);
+check(reloaded.X.state.diffPalette === 'colorblind',
+  'a reload reads the persisted palette, got ' + reloaded.X.state.diffPalette);
+paletteBtn.listeners.click[0]();
+check(X.state.diffPalette === 'default', 'clicking again restores the default palette');
+check(store['vibe.diff.palette'] === 'default', 'the default palette is persisted too');
+
+/* 2h. The truncated flag still shows its notice. */
+X.renderDiff({ range: 'card', diff: 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b',
+               truncated: true, files: [{ path: 'x', additions: 1, deletions: 1 }], review: null });
+check(textOf(getEl('diff-body')).indexOf('truncated') !== -1,
+  'the truncated notice is shown');
+
+/* 2i. A meta row inside a hunk (the no-newline marker) spans the full width. */
+X.state.diffMode = 'unified';
+X.renderDiff({ range: 'card', diff: noNewlineText, truncated: false, files: [], review: null });
+const markerRows = getEl('diff-body').querySelectorAll('.diff-row--meta');
+check(markerRows.length >= 2, 'the no-newline markers render as meta rows, got ' + markerRows.length);
+check(!markerRows[markerRows.length - 1].querySelector('.diff-code'),
+  'a meta row has no code cell');
 
 /* 6. A sandbox card (no diff) explains itself instead of rendering nothing. */
 X.renderDiff({ range: 'card', diff: null, truncated: false, files: [], review: null,

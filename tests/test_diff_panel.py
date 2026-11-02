@@ -166,3 +166,60 @@ def test_floating_panels_share_one_base(env):
         assert prop in title, prop
     for clone in (".activity-title {", ".diff-popup-title {"):
         assert clone not in css, clone
+
+
+def test_diff_popup_has_layout_and_palette_controls(env):
+    """The popup carries the layout toggle and the palette toggle."""
+    html = env.client.get("/").text
+    assert 'id="diff-views"' in html
+    assert 'id="diff-palette"' in html
+    # The body is a block container now, not a <pre> of coloured lines.
+    assert '<div class="diff-body" id="diff-body"></div>' in html
+
+
+def test_diff_renderer_never_uses_innerhtml(env):
+    """The diff is model-written: no property that parses markup anywhere."""
+    js = env.client.get("/app.js").text
+    assert ".innerHTML" not in js
+    assert "outerHTML" not in js
+
+
+def test_diff_styles_are_restrained_and_palette_switches(env):
+    """Diff hue on the gutter rule and a faint row fill; code in normal ink."""
+    css = env.client.get("/style.css").text
+    body = _css_rule(css, ".diff-body")
+    for var in ("--diff-add:", "--diff-del:", "--diff-add-fill:", "--diff-del-fill:",
+                "--diff-add-word:", "--diff-del-word:", "--diff-ink:"):
+        assert var in body, var
+    # The code is normal ink, not a full-saturation red/green.
+    code = _css_rule(css, ".diff-code")
+    assert "color: var(--diff-ink)" in code
+    # The colourblind palette overrides the hues (blue additions, orange deletions).
+    cb = _css_rule(css, '.diff-body[data-palette="colorblind"]')
+    assert "--diff-add: #4c8dff" in cb
+    assert "--diff-del: #e08a2e" in cb
+    # The hue is on the gutter rule and a faint row fill...
+    add_row = _css_rule(css, ".diff-row--add")
+    assert "background: var(--diff-add-fill)" in add_row
+    add_gutter = _css_rule(css, ".diff-row--add .diff-gutter")
+    assert "border-left-color: var(--diff-add)" in add_gutter
+    # ...and the changed word gets a stronger tint.
+    word = _css_rule(css, ".diff-word--add")
+    assert "background: var(--diff-add-word)" in word
+    # Side-by-side has a 2px rule between the cells.
+    cell = _css_rule(css, ".diff-cell + .diff-cell")
+    assert "border-left: 2px solid" in cell
+    # The file header sticks while its file scrolls.
+    head = _css_rule(css, ".diff-file-head")
+    assert "position: sticky" in head
+    assert "top: 0" in head
+    # The collapsed run is a button.
+    collapsed = _css_rule(css, ".diff-collapsed")
+    assert "cursor: pointer" in collapsed
+
+
+def test_how_it_works_documents_the_diff_renderer(env):
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "how-it-works.md").read_text()
+    for needle in ("line numbers", "side-by-side", "word-level", "unchanged lines",
+                   "colourblind", "localstorage"):
+        assert needle in doc.lower(), needle
