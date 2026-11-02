@@ -65,6 +65,7 @@ from app.runner import (
 )
 from app.settings import SettingsError, SettingsStore, describe_accept_modes
 from app.stacks import StackError, StackNotFound, StackStore
+from app.tokens import card_token_breakdown, card_tokens
 
 
 class CardIn(BaseModel):
@@ -794,7 +795,7 @@ def create_app(config: Config | None = None,
                 return 0
             seen.add(card_id)
             card = by_id.get(card_id) or {}
-            own = int(((card.get("session") or {}).get("tokens")) or 0)
+            own = card_tokens(card.get("session") or {})
             return own + sum(subtree_tokens(k, seen) for k in children.get(card_id, []))
 
         def bucket(rows: list[dict]) -> dict:
@@ -845,18 +846,19 @@ def create_app(config: Config | None = None,
         for card in cards:
             counts[card["status"]] = counts.get(card["status"], 0) + 1
             session = card.get("session") or {}
-            recorded = session.get("tokens")
+            # The card's total cost (worker + review + resolver rounds), the
+            # same number its chip shows — so the board total is exactly the
+            # sum of the per-card totals.
+            recorded = session.get("card_tokens") or 0
             if session.get("live_tokens") is not None:
                 # Live session: count the live-updating per-card total (which
                 # already includes the recorded tokens of earlier rounds).
                 total_tokens += session["live_tokens"]
-                live_tokens += max(0, session["live_tokens"] - (recorded or 0))
+                live_tokens += max(0, session["live_tokens"] - recorded)
                 bd = session.get("live_token_breakdown")
-            elif recorded is not None:
-                total_tokens += recorded
-                bd = session.get("token_breakdown")
             else:
-                bd = None
+                total_tokens += recorded
+                bd = card_token_breakdown(session)
             for k in TOKEN_BREAKDOWN_KEYS:
                 v = (bd or {}).get(k)
                 if v is not None:

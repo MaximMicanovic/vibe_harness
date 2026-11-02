@@ -61,6 +61,12 @@ from app.sleepguard import SleepGuard
 from app.backends import Backend, get_backend
 from app.config import BASE_DIR, SESSIONS_DIR, Config, resolve_path
 from app.gitops import GitBusyError, GitError, GitMergeConflict
+from app.tokens import (
+    TOKEN_BREAKDOWN_KEYS,
+    card_token_breakdown,
+    card_tokens,
+    combine_live,
+)
 from app.cards import (
     COMPLETED_STATUSES,
     FINISHED_STATUSES,
@@ -84,9 +90,6 @@ LIVE_USAGE_SCAN_INTERVAL = 2.0
 # The harness MCP server (app/mcp_server.py), injected into spawned vibe
 # sessions via the VIBE_MCP_SERVERS env var so the model can talk to the board.
 MCP_SERVER_PATH = Path(__file__).resolve().parent / "mcp_server.py"
-
-# Token-type keys of a breakdown dict, in display order (cached, output, input).
-TOKEN_BREAKDOWN_KEYS = ("cached", "output", "input")
 
 
 def _num(value) -> int | None:
@@ -1373,20 +1376,42 @@ class SessionRunner:
         session = card.get("session") or {}
         git_info = session.get("git") or {}
         resolver = session.get("resolver") or {}
-        resolver_patch = {**resolver, "finished_at": now_iso(), "exit_code": exit_code}
+        # The resolver's own cost, read from the same export.json path the run
+        # and review rounds use. Without it a resolver's whole session was
+        # missing from every number on the board.
+        round_no = entry.get("round") or resolver.get("round") or 1
+        export = self._read_export(self.sessions_dir / card_id / f"resolve-{round_no}")
+        usage = export.get("usage") or export.get("token_usage") or {}
+        resolver_patch = {
+            **resolver,
+            "finished_at": now_iso(),
+            "exit_code": exit_code,
+            "tokens": usage.get("total_tokens", usage.get("total")),
+        }
+        token_breakdown = (export_token_breakdown(usage)
+                           if isinstance(usage, dict) else None)
+        if token_breakdown is not None:
+            resolver_patch["token_breakdown"] = token_breakdown
         root = Path(git_info["repo"]) if git_info.get("repo") else None
         concluded = (exit_code == 0 and root is not None
                      and not gitops.merge_in_progress(root)
                      and not gitops.is_dirty(root))
+        # The last live total shown for the card, kept as a floor so the
+        # display does not dip when the resolver's live counter goes away.
+        high_water = self._live_high_water(card)
+        high_water_patch = ({"live_high_water": high_water}
+                            if high_water is not None else {})
         if concluded:
-            self._conclude_resolved_merge(card, resolver_patch)
+            self._conclude_resolved_merge(card, resolver_patch,
+                                          extra_patch=high_water_patch)
         else:
             git_patch = {**git_info, "resolving": False}
             if exit_code != 0:
                 git_patch["resolver_error"] = (
                     f"resolver session exited with code {exit_code}")
             self.store.patch_session(card_id, {"git": git_patch,
-                                               "resolver": resolver_patch})
+                                               "resolver": resolver_patch,
+                                               **high_water_patch})
             # The resolver gave up on the merge: the card leaves the accept
             # queue (a retry is a deliberate click, not an endless loop) and
             # the repo is free again for the accepts queued behind it.
@@ -1395,7 +1420,8 @@ class SessionRunner:
                 self._release_accept_repo(root)
 
     def _conclude_resolved_merge(self, card: dict,
-                                 resolver_patch: dict | None = None) -> None:
+                                 resolver_patch: dict | None = None,
+                                 extra_patch: dict | None = None) -> None:
         """The in-progress merge was concluded (MERGE_HEAD gone, tree clean):
         finish the accept — post-merge green gate, record the resolver's
         commit as the card's merge commit, mark merged + resolving:false, and
@@ -1419,6 +1445,8 @@ class SessionRunner:
             p = {"git": {**base_git, **extra_git}}
             if resolver_patch is not None:
                 p["resolver"] = resolver_patch
+            if extra_patch:
+                p.update(extra_patch)
             self.store.patch_session(card_id, p)
 
         try:
@@ -1960,6 +1988,12 @@ class SessionRunner:
         rdir = sdir / f"{kind}-{entry['round']}"
         session = card.get("session") or {}
         ws = Path(session.get("workdir") or (sdir / "workspace"))
+        # The last live total shown for the card, persisted as a floor so the
+        # display does not dip between rounds (the registry entry is gone until
+        # the next round's export lands).
+        high_water = self._live_high_water(card)
+        high_water_patch = ({"live_high_water": high_water}
+                            if high_water is not None else {})
 
         export = self._read_export(rdir)
         usage = export.get("usage") or export.get("token_usage") or {}
@@ -1988,6 +2022,7 @@ class SessionRunner:
                 "model": model,
                 "tokens": tokens,
                 "stop_reason": stop_reason,
+                **high_water_patch,
             }
             if token_breakdown is not None:
                 outcome["token_breakdown"] = token_breakdown
@@ -2091,7 +2126,7 @@ class SessionRunner:
             # Supervision bookkeeping: which commit this review covered (the
             # next review diffs from it) and how many mailbox messages were
             # exchanged so far.
-            review_patch: dict = {}
+            review_patch: dict = {**high_water_patch}
             head = self._reviewed_commit(session)
             if head:
                 review_record["commit"] = head
@@ -2107,6 +2142,7 @@ class SessionRunner:
                 stopped_patch = {
                     "finished_at": now_iso(),
                     "exit_code": exit_code,
+                    **high_water_patch,
                 }
                 if entry.get("timed_out"):
                     stopped_patch["timed_out"] = True
@@ -2208,7 +2244,7 @@ class SessionRunner:
         or None. `cumulative` is True when the round RESUMED the worker session
         (`vibe --resume`), so the live counter already includes earlier rounds;
         False for a fresh session (run-1, every review, resolvers), where it
-        must be added to the previously recorded `session.tokens`. `breakdown`
+        must be added to the card's recorded total (`card_tokens`). `breakdown`
         is the per-type split ({"cached", "output", "input"}) of the same live
         counter, for the hover tooltip on the token counters.
 
@@ -2267,6 +2303,20 @@ class SessionRunner:
         return {"tokens": tokens, "cumulative": bool(entry.get("resumed")),
                 "breakdown": entry.get("live_breakdown")}
 
+    def _live_high_water(self, card: dict) -> int | None:
+        """The card's last displayed total, or None when no live value was seen.
+
+        Called when a round ends: its process has exited, so `live_usage`
+        returns the last scanned value without touching the journal. The value
+        is persisted as `session.live_high_water` so the card keeps showing it
+        until the next round's export lands — the number never dips at a round
+        boundary.
+        """
+        live = self.live_usage(card["id"])
+        if live is None:
+            return None
+        return combine_live(card_tokens(card.get("session") or {}), live)
+
     def annotate_card(self, card: dict) -> dict:
         """Return the card for API responses, with the derived fields attached.
 
@@ -2275,13 +2325,17 @@ class SessionRunner:
         MCP's get_card/list_cards both read it from here, so the reason is
         computed once, in one place.
 
-        While a session is live, `session.live_tokens` is the per-card token
-        total shown on the card and summed into /api/stats: the live counter
-        itself for resumed (cumulative) rounds, previous recorded tokens plus
-        the fresh round's live counter otherwise. `session.live_token_breakdown`
-        carries the same combination for the per-type split (cached/output/
-        input) shown on hover. The store's card is never mutated — the session
-        dict is copied.
+        `session.card_tokens` is what the card actually cost: the worker's
+        export total plus every review and resolver round (`app/tokens.py`).
+        The chip, /api/stats and /api/split-report all read this one number, so
+        they cannot disagree.
+
+        While a session is live, `session.live_tokens` is the per-card total
+        shown on the card and summed into /api/stats: the live counter itself
+        for resumed (cumulative) rounds, the card total plus the fresh round's
+        live counter otherwise. `session.live_token_breakdown` carries the same
+        combination for the per-type split (cached/output/input) shown on
+        hover. The store's card is never mutated — the session dict is copied.
         """
         out = dict(card)
         session = card.get("session")
@@ -2292,18 +2346,23 @@ class SessionRunner:
                 new_session.pop("failure", None)
             else:
                 new_session["failure"] = failure
+            total = card_tokens(session)
+            # A card that never recorded a cost (no export, no rounds) keeps
+            # showing no token chip, as before.
+            if total or session.get("tokens") is not None:
+                new_session["card_tokens"] = total
+            card_breakdown = card_token_breakdown(session)
+            if card_breakdown is not None:
+                new_session["card_token_breakdown"] = card_breakdown
             out["session"] = new_session
         live = self.live_usage(card["id"])
         if live is None:
             return out
         session = out.get("session") or {}
-        recorded = session.get("tokens") or 0
-        if live["cumulative"]:
-            value = max(live["tokens"], recorded)
-        else:
-            value = recorded + live["tokens"]
+        recorded = session.get("card_tokens") or 0
+        value = combine_live(recorded, live)
         new_session = {**session, "live_tokens": value}
-        breakdown = merge_token_breakdown(session.get("token_breakdown"),
+        breakdown = merge_token_breakdown(card_token_breakdown(session),
                                           live.get("breakdown"), live["cumulative"])
         if breakdown is not None:
             new_session["live_token_breakdown"] = breakdown
