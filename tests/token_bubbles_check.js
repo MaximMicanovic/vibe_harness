@@ -239,6 +239,32 @@ if (liveChips.length === 1) {
   }
 }
 
+/* 6. The chip shows the card's TOTAL cost (worker + review + resolver
+ *    rounds), not the worker's export total alone. */
+const totalCard = X.buildCard(note({
+  id: 'n4',
+  session: { tokens: 100, card_tokens: 250,
+             card_token_breakdown: { cached: 30, output: 20, input: 200 } },
+}));
+const totalChip = totalCard.querySelector('.chip-tokens');
+check(!!totalChip, 'a token chip renders for a card with a total');
+if (totalChip) {
+  check(totalChip.title && totalChip.title.indexOf('250') !== -1,
+    'chip hover title should carry the card total 250, got ' + JSON.stringify(totalChip.title));
+  check(totalChip.title && totalChip.title.indexOf('100') === -1,
+    'chip hover title must not show the worker-only total, got ' + JSON.stringify(totalChip.title));
+  for (const [label, val] of [['cached', '30'], ['output', '20'], ['input', '200']]) {
+    check(totalChip.title && totalChip.title.indexOf(label) !== -1 && totalChip.title.indexOf(val) !== -1,
+      'card total chip hover title should mention ' + label + ' ' + val + ', got ' + JSON.stringify(totalChip.title));
+  }
+}
+
+/* 7. Card total without a breakdown: the plain total counter. */
+const totalNoBd = X.buildCard(note({ id: 'n5', session: { tokens: 100, card_tokens: 250 } }));
+const totalNoBdChip = totalNoBd.querySelector('.chip-tokens');
+check(!!totalNoBdChip && totalNoBdChip.textContent === '250 tok',
+  'card total without a breakdown -> "250 tok", got ' + JSON.stringify(totalNoBdChip && totalNoBdChip.textContent));
+
 const result = { ok: failures.length === 0, failures };
 console.log(JSON.stringify(result, null, 2));
 process.exit(failures.length ? 1 : 0);

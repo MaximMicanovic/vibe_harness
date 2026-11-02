@@ -728,16 +728,20 @@ function buildCard(cardData, queuePos) {
       // chip; the live total stays in the hover title.
       const inline = tokenTypesInline(s.live_token_breakdown);
       const lc = chip('tokens tokens-live', '⚡ ' + (inline || fmtTokens(s.live_tokens) + ' tok'));
-      lc.title = 'Live token usage of the current session: ' + fmtTokens(s.live_tokens)
-        + ' tok — updates while it runs' + tokenTypesSuffix(s.live_token_breakdown);
+      lc.title = 'Live total for this card (worker + review + resolver rounds so far): '
+        + fmtTokens(s.live_tokens) + ' tok — updates while it runs'
+        + tokenTypesSuffix(s.live_token_breakdown);
       chips.appendChild(lc);
-    } else if (typeof s.tokens === 'number') {
-      // Recorded tokens of the last session: same little bubble, carrying
-      // cached, input, output in one chip when the breakdown is known.
-      const inline = tokenTypesInline(s.token_breakdown);
-      const tc = chip('tokens', inline || fmtTokens(s.tokens) + ' tok');
-      tc.title = 'Token usage of the last session: ' + fmtTokens(s.tokens) + ' tok'
-        + tokenTypesSuffix(s.token_breakdown);
+    } else if (typeof s.card_tokens === 'number' || typeof s.tokens === 'number') {
+      // The card's TOTAL cost — worker + review + resolver rounds — not just
+      // the worker's export total. Same little bubble, carrying cached, input,
+      // output in one chip when the breakdown is known.
+      const total = typeof s.card_tokens === 'number' ? s.card_tokens : s.tokens;
+      const bd = s.card_token_breakdown || s.token_breakdown;
+      const inline = tokenTypesInline(bd);
+      const tc = chip('tokens', inline || fmtTokens(total) + ' tok');
+      tc.title = 'Total tokens this card cost (worker + review + resolver rounds): '
+        + fmtTokens(total) + ' tok' + tokenTypesSuffix(bd);
       chips.appendChild(tc);
     }
     if (s.verified === true) chips.appendChild(chip('verified', '✓ verified'));

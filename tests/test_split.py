@@ -154,6 +154,40 @@ def test_report_separates_split_from_unsplit(env):
     assert report["split"]["tokens_per_accepted"] == 1000
 
 
+def test_report_counts_review_rounds(env):
+    """The report's cost is what the card cost: worker + review rounds."""
+    card = env.store.create("Reviewed", "spec")
+    env.store.set_status(card["id"], "running")
+    env.store.set_status(card["id"], "done", session_patch={
+        "tokens": 1000,
+        "reviews": [{"round": 1, "tokens": 250, "approved": True}],
+        "review": {"round": 1, "tokens": 250, "approved": True},
+    })
+    env.store.accept(card["id"])
+
+    report = env.client.get("/api/split-report").json()
+    assert report["unsplit"]["tokens"] == 1250
+    assert report["unsplit"]["tokens_per_accepted"] == 1250
+
+
+def test_report_subtree_sums_every_round(env):
+    # A split's cost is the whole subtree, review rounds included.
+    parent = env.store.create("Parent", "spec")
+    kid = env.store.create("Kid", "sub", parent_id=parent["id"])
+    for card, worker, review in ((parent, 400, 100), (kid, 600, 50)):
+        env.store.set_status(card["id"], "running")
+        env.store.set_status(card["id"], "done", session_patch={
+            "tokens": worker,
+            "reviews": [{"round": 1, "tokens": review, "approved": True}],
+            "review": {"round": 1, "tokens": review, "approved": True},
+        })
+        env.store.accept(card["id"])
+
+    report = env.client.get("/api/split-report").json()
+    assert report["split"]["tokens"] == 1150
+    assert report["trees"][0]["tokens"] == 1150
+
+
 def test_report_does_not_double_count_children(env):
     parent = env.store.create("Parent", "spec")
     kids = [env.store.create("Kid " + str(i), "sub", parent_id=parent["id"]) for i in range(2)]

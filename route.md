@@ -314,18 +314,28 @@ The cheapest token is the one never spent:
 
 ## 5. Measure what you spend
 
+- **One definition of a card's cost** (`app/tokens.py::card_tokens`): the
+  worker's `export.json` total (`session.tokens` — already cumulative across
+  resumed fixer rounds, so it is added once, never per round) **plus** every
+  review round (`session.reviews[]`, falling back to `session.review` for cards
+  written before the list existed) **plus** every resolver round
+  (`session.resolver`). The per-card chip, `/api/stats` and
+  `/api/split-report` all read this one number, so they cannot disagree.
 - **Stats bar** (`GET /api/stats`, optionally `?project=<name>`): counts by
-  status, Σ tokens, Σ runtime — scope it per project to compare. Hovering the
-  **Tokens** counter shows the token-type breakdown (`token_breakdown`:
-  cached · output · input, summed over the visible cards; a type nobody
-  reported stays hidden).
-- **Per-card chips:** each card shows the last session's token count and model;
-  hovering a token chip shows that session's type breakdown
-  (`session.token_breakdown` from `export.json` usage, or
-  `session.live_token_breakdown` while live).
+  status, Σ card totals, Σ runtime — scope it per project to compare. The
+  total is exactly the sum of the per-card chips. Hovering the **Tokens**
+  counter shows the token-type breakdown (`token_breakdown`: cached · output ·
+  input, summed over the visible cards; a type nobody reported stays hidden).
+- **Per-card chips:** each card shows its total cost (worker + review +
+  resolver rounds) and model; hovering a token chip shows the matching type
+  breakdown (`session.card_token_breakdown`, or `session.live_token_breakdown`
+  while live).
 - **Live while running:** while a session is live, the card chip and the
   stats-bar total update in place (`session.live_tokens` on the card,
-  `live_tokens` in `/api/stats`; the top-bar pill pulses while > 0). Source: the
+  `live_tokens` in `/api/stats`; the top-bar pill pulses while > 0). The
+  counter only ever climbs: a resumed round's journal is cumulative, and the
+  last live value is kept as `session.live_high_water` when a round ends, so
+  the number does not dip between rounds (review → fixer included). Source: the
   spawned vibe's own session journal — `$VIBE_HOME/logs/session/unified/<id>/journal/*.jsonl`
   carries the cumulative `contextUsage` (`totalTokens` plus `inputTokens` /
   `outputTokens` / `cachedInputTokens`, which feed the live hover breakdown),
@@ -335,8 +345,9 @@ The cheapest token is the one never spent:
   browser (it rides the existing 2 s poll) and no LLM spend. Best effort: if
   the journal is missing or changes schema, the card falls back to the last
   recorded `export.json` count.
-- **Per-round artifacts:** `sessions/<id>/run-N/export/export.json` and
-  `review-N/export/export.json` hold `usage.total_tokens` (plus
+- **Per-round artifacts:** `sessions/<id>/run-N/export/export.json`,
+  `review-N/export/export.json` and `resolve-N/export/export.json` hold
+  `usage.total_tokens` (plus
   `input_tokens` / `output_tokens` / `cached_input_tokens` when the model
   reports them), the model, and the stop reason — diff these across
   cards/agents to find your expensive routes.

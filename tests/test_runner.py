@@ -67,6 +67,11 @@ case "$round_dir" in
         git add -A
         git commit -q -m "resolver: conclude merge"
         echo "fake resolver concluded merge"
+        # The resolver's own export: its tokens are part of the card's cost.
+        mkdir -p "$OUTDIR"
+        cat > "$OUTDIR/export.json" <<'JSON'
+{"usage": {"total_tokens": 77}, "exit_code": 0}
+JSON
         exit 0
         ;;
     esac
@@ -1092,6 +1097,8 @@ def test_git_auto_accept_conflict_resolved_by_model(store, tmp_path, fake_vibe, 
     resolver = final["session"].get("resolver") or {}
     assert resolver.get("exit_code") == 0
     assert resolver.get("workdir") == str(proj.resolve())
+    # The resolver's own export is read: its tokens are part of the card cost.
+    assert resolver.get("tokens") == 77
     rdir = runner.sessions_dir / card_id / "resolve-1"
     assert (rdir / "session.log").exists()
     rprompt = (rdir / "prompt.md").read_text()
@@ -1166,6 +1173,60 @@ def test_git_resolver_failure_leaves_card_done(store, tmp_path, fake_vibe, proje
     assert g.get("resolver_error")
     assert gitops.merge_in_progress(proj)          # conflict still open, retryable
     assert Path(g["worktree"]).is_dir()            # worktree kept on conflict
+
+
+def test_resolver_tokens_are_recorded_from_its_export(store, make_runner,
+                                                      fake_vibe, tmp_path):
+    """A merge-conflict resolver's tokens are recorded on its resolver record.
+
+    The resolver used to record only `exit_code`: its whole session cost was
+    missing from every number on the board.
+    """
+    runner = make_runner(fake_vibe)
+    card = store.create("Resolver cost", "spec")
+    card_id = card["id"]
+    store.set_status(card_id, "running")
+    store.set_status(card_id, "done", session_patch={
+        "tokens": 1000,
+        "resolver": {"pid": 1, "round": 1,
+                     "started_at": "2026-01-01T00:00:00+00:00"},
+    })
+    rdir = tmp_path / "sessions" / card_id / "resolve-1"
+    (rdir / "export").mkdir(parents=True)
+    (rdir / "export" / "export.json").write_text(json.dumps({
+        "usage": {"total_tokens": 400, "input_tokens": 300, "output_tokens": 100},
+        "exit_code": 0,
+    }), encoding="utf-8")
+
+    entry = {"proc": SimpleNamespace(wait=lambda: 0), "kind": "resolve",
+             "round": 1, "live_tokens": None}
+    runner._record_resolver_outcome(card_id, entry)
+
+    resolver = store.get(card_id)["session"]["resolver"]
+    assert resolver["tokens"] == 400
+    assert resolver["token_breakdown"] == {
+        "cached": None, "output": 100, "input": 300}
+    assert resolver["exit_code"] == 0
+
+
+def test_resolver_without_an_export_records_no_tokens(store, make_runner,
+                                                      fake_vibe, tmp_path):
+    # A resolver that died before writing export.json records no token count
+    # (None, not 0) — the card total then just omits that round.
+    runner = make_runner(fake_vibe)
+    card = store.create("Resolver no export", "spec")
+    card_id = card["id"]
+    store.set_status(card_id, "running")
+    store.set_status(card_id, "done", session_patch={
+        "resolver": {"pid": 1, "round": 1}})
+
+    entry = {"proc": SimpleNamespace(wait=lambda: 1), "kind": "resolve",
+             "round": 1, "live_tokens": None}
+    runner._record_resolver_outcome(card_id, entry)
+
+    resolver = store.get(card_id)["session"]["resolver"]
+    assert resolver["tokens"] is None
+    assert "token_breakdown" not in resolver
 
 
 FAKE_VIBE_OWN_FILE = """#!/bin/sh

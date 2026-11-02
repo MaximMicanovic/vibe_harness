@@ -33,6 +33,39 @@ The pipeline a card goes through: implement, test gate, review, accept.
 Prompts, logs, and `export.json` for every round are kept under
 `sessions/<id>/run-N/` and `sessions/<id>/review-N/`.
 
+## What a card cost
+
+A card's total is what it actually cost, not just what its worker reported:
+
+```
+card_total = worker export total
+           + every review round
+           + every resolver round
+```
+
+- **Worker** — `session.tokens`, the worker's `export.json` total. It is
+  already cumulative across resumed fixer rounds (`vibe --resume`), so it is
+  added once, never per round.
+- **Review rounds** — `session.reviews[]` keeps every round's record
+  (`{approved, reason, round, tokens, model, log, export_dir, via, commit}`);
+  cards written before the list existed fall back to `session.review`.
+- **Resolver rounds** — a merge-conflict resolver writes its own
+  `resolve-N/export/export.json`; `_record_resolver_outcome` reads it and
+  stores `tokens` (and `token_breakdown`) on `session.resolver`.
+
+`app/tokens.py::card_tokens` is the one definition: the per-card chip,
+`/api/stats` and `/api/split-report` all read it, so the board total is exactly
+the sum of the chips. `session.tokens` keeps its old meaning (the worker's
+export total), so cards written before this existed still report a sensible
+total.
+
+**The live counter only climbs.** While a session runs, the card shows
+`card_total + live` (a fresh round) or `max(live, card_total)` (a resumed,
+cumulative round). When a round ends its live counter disappears for a moment;
+the last value shown is persisted as `session.live_high_water` and floors the
+total until the next round's export lands, so the number never dips at a round
+boundary (review → fixer included).
+
 ## Concurrency cap
 
 The harness runs at most `VIBE_HARNESS_MAX_CONCURRENT` sessions at once

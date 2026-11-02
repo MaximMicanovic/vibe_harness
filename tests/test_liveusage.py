@@ -371,3 +371,88 @@ def test_no_live_io_when_nothing_runs(env):
     assert env.runner.live_usage(card_id) is None
     card = env.client.get(f"/api/cards/{card_id}").json()
     assert "live_tokens" not in (card["session"] or {})
+
+
+def test_live_counter_never_dips_across_a_round_boundary(env):
+    """The displayed total only ever climbs — including across a
+    review -> fixer boundary, where the live counter disappears for a moment.
+
+    Sequence: run round live (500) -> run ends, review starts (no live value
+    yet) -> review live (620) -> review ends, fixer resumes with a cumulative
+    counter below the last shown value -> fixer climbs past it.
+    """
+    card_id = _start_card(env)
+    pid = env.store.get(card_id)["session"]["pid"]
+    home = liveusage.vibe_home()
+    _fake_home(env.tmp_path, pid)
+    _write_journal(_journal_dir(home), [_usage_record(500, input=400, output=100)])
+
+    with env.runner._lock:
+        entry = env.runner._registry[card_id]
+
+    # 1. The run round is live: recorded 0 + 500.
+    card = env.client.get(f"/api/cards/{card_id}").json()
+    assert card["session"]["live_tokens"] == 500
+
+    # 2. The run round ended (export 42 recorded, last live value kept as the
+    #    floor) and the review round has not produced a live value yet.
+    entry["live_tokens"] = None
+    entry["resumed"] = False
+    out = env.runner.annotate_card({
+        "id": card_id, "status": "reviewing",
+        "session": {"tokens": 42, "live_high_water": 500}})
+    assert out["session"]["card_tokens"] == 500      # floor, not 42
+    assert "live_tokens" not in out["session"]       # no live round yet
+
+    # 3. The review round's journal climbs: 500 + 120.
+    entry["live_tokens"] = 120
+    out = env.runner.annotate_card({
+        "id": card_id, "status": "reviewing",
+        "session": {"tokens": 42, "live_high_water": 500}})
+    assert out["session"]["live_tokens"] == 620
+
+    # 4. The review ended (42 + 120 recorded) and the fixer RESUMED: its
+    #    cumulative counter (150) is below the last shown value -> no dip.
+    entry["resumed"] = True
+    entry["live_tokens"] = 150
+    out = env.runner.annotate_card({
+        "id": card_id, "status": "running",
+        "session": {"tokens": 42, "reviews": [{"round": 1, "tokens": 120}],
+                    "live_high_water": 620}})
+    assert out["session"]["live_tokens"] == 620
+
+    # 5. ...and it climbs again as the fixer works.
+    entry["live_tokens"] = 900
+    out = env.runner.annotate_card({
+        "id": card_id, "status": "running",
+        "session": {"tokens": 42, "reviews": [{"round": 1, "tokens": 120}],
+                    "live_high_water": 620}})
+    assert out["session"]["live_tokens"] == 900
+
+    assert env.client.post(f"/api/cards/{card_id}/stop").status_code == 204
+    assert _wait_status(env.store, card_id, "stopped")
+
+
+def test_the_last_live_value_is_kept_when_the_round_ends(env):
+    """A round ending persists the last live total as the card's floor, so the
+    chip does not fall back to the (smaller) recorded export."""
+    card_id = _start_card(env)
+    pid = env.store.get(card_id)["session"]["pid"]
+    home = liveusage.vibe_home()
+    _fake_home(env.tmp_path, pid)
+    _write_journal(_journal_dir(home), [_usage_record(500, input=400, output=100)])
+    card = env.client.get(f"/api/cards/{card_id}").json()
+    assert card["session"]["live_tokens"] == 500
+
+    assert env.client.post(f"/api/cards/{card_id}/stop").status_code == 204
+    assert _wait_status(env.store, card_id, "stopped")
+
+    final = env.client.get(f"/api/cards/{card_id}").json()
+    # The fake vibe writes no export: the recorded total is 0, but the card
+    # keeps showing what it had reached instead of dropping to nothing.
+    assert final["session"]["live_high_water"] == 500
+    assert final["session"]["card_tokens"] == 500
+    assert "live_tokens" not in final["session"]
+    stats = env.client.get("/api/stats").json()
+    assert stats["total_tokens"] == 500
+    assert stats["live_tokens"] == 0

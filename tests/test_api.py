@@ -616,11 +616,91 @@ def test_stats(env):
     assert stats["counts"]["done"] == 1
     assert stats["counts"]["draft"] == 0
     assert "total_cost_usd" not in stats
-    assert stats["total_tokens"] == 42
+    # The fake vibe reports 42 tokens for the run AND for the review round:
+    # the card's total is the sum of both.
+    assert stats["total_tokens"] == 84
     # The fake export.json has no per-type usage: the breakdown stays unknown.
     assert stats["token_breakdown"] == {"input": None, "output": None, "cached": None}
     assert stats["total_runtime_seconds"] >= 0
     assert stats["avg_runtime_seconds"] >= 0
+
+
+def test_stats_counts_review_rounds(env):
+    """A card's total is what it actually cost: the worker export PLUS its
+    review rounds. `session.tokens` stays the worker's export total (existing
+    data keeps working); the card total is derived from it."""
+    card = create_card(env.client)
+    env.client.post(f"/api/cards/{card['id']}/run")
+    final = wait_for_status(env.client, card["id"], {"done"})
+    # The fake vibe reports 42 tokens for the run AND for the review round.
+    assert final["session"]["tokens"] == 42
+    assert final["session"]["reviews"][0]["tokens"] == 42
+    assert final["session"]["card_tokens"] == 84
+
+    stats = env.client.get("/api/stats").json()
+    assert stats["total_tokens"] == 84
+    # The stats total is exactly the sum of the per-card totals.
+    cards = env.client.get("/api/cards").json()
+    assert stats["total_tokens"] == sum(n["session"]["card_tokens"] for n in cards)
+
+
+def test_stats_sums_two_review_rounds(env):
+    # A rejected round and the fixer's approved round both cost tokens: the
+    # card total is worker + review-1 + review-2.
+    card = create_card(env.client)
+    env.store.set_status(card["id"], "running")
+    env.store.set_status(card["id"], "done", session_patch={
+        "tokens": 1000,
+        "reviews": [{"round": 1, "tokens": 250, "approved": False},
+                    {"round": 2, "tokens": 125, "approved": True}],
+        "review": {"round": 2, "tokens": 125, "approved": True},
+    })
+    final = env.client.get(f"/api/cards/{card['id']}").json()
+    assert final["session"]["card_tokens"] == 1375
+    stats = env.client.get("/api/stats").json()
+    assert stats["total_tokens"] == 1375
+
+
+def test_stats_total_equals_the_sum_of_the_per_card_totals(env):
+    # Two cards, each with a worker + review round: the board total is the sum
+    # of the chips, not the sum of the worker exports.
+    for title in ("One", "Two"):
+        card = create_card(env.client, title=title)
+        env.client.post(f"/api/cards/{card['id']}/run")
+        wait_for_status(env.client, card["id"], {"done"})
+
+    cards = env.client.get("/api/cards").json()
+    stats = env.client.get("/api/stats").json()
+    assert [n["session"]["card_tokens"] for n in cards] == [84, 84]
+    assert stats["total_tokens"] == 168
+
+
+def test_stats_includes_resolver_tokens(env):
+    # A merge-conflict resolver's cost is part of the card's total.
+    card = create_card(env.client)
+    env.store.set_status(card["id"], "running")
+    env.store.set_status(card["id"], "done", session_patch={
+        "tokens": 1000,
+        "reviews": [{"round": 1, "tokens": 250, "approved": True}],
+        "review": {"round": 1, "tokens": 250, "approved": True},
+        "resolver": {"round": 1, "exit_code": 0, "tokens": 400},
+    })
+    final = env.client.get(f"/api/cards/{card['id']}").json()
+    assert final["session"]["card_tokens"] == 1650
+    assert env.client.get("/api/stats").json()["total_tokens"] == 1650
+
+
+def test_stats_counts_a_legacy_card_without_a_reviews_list(env):
+    # Cards written before session.reviews existed keep only session.review.
+    card = create_card(env.client)
+    env.store.set_status(card["id"], "running")
+    env.store.set_status(card["id"], "done", session_patch={
+        "tokens": 1000,
+        "review": {"round": 1, "tokens": 250, "approved": True},
+    })
+    final = env.client.get(f"/api/cards/{card['id']}").json()
+    assert final["session"]["card_tokens"] == 1250
+    assert env.client.get("/api/stats").json()["total_tokens"] == 1250
 
 
 def test_token_breakdown_recorded_from_export(tmp_path):
@@ -638,8 +718,9 @@ def test_token_breakdown_recorded_from_export(tmp_path):
             "input": 30, "output": 2, "cached": 10}
 
         stats = env.client.get("/api/stats").json()
-        assert stats["total_tokens"] == 42
-        assert stats["token_breakdown"] == {"input": 30, "output": 2, "cached": 10}
+        # Worker + review round: the total and its breakdown both add up.
+        assert stats["total_tokens"] == 84
+        assert stats["token_breakdown"] == {"input": 60, "output": 4, "cached": 20}
         # Project scoping applies to the breakdown too (the "other" card is a
         # draft without a session and contributes nothing).
         scoped = env.client.get("/api/stats?project=other").json()
