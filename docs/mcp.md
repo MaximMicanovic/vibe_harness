@@ -54,3 +54,15 @@ cards start as drafts, and the model can run them immediately
 configured (`VIBE_HARNESS_ENABLED_TOOLS`), the harness automatically appends
 the `harness_*` glob so the MCP stays available. Disable the whole MCP with
 `VIBE_HARNESS_MCP_ENABLED=0`.
+
+## The other channel: steering through the mailbox
+
+The `harness` MCP is how a model acts on the board; the per-card **mailbox**
+MCP (`harness-mailbox`, see [`MCPTOOLS.md`](../MCPTOOLS.md)) is how it talks to
+the person watching. The worker prompt tells the model to call
+`wait_for_message(timeout_seconds=0)` between major steps and to reply with
+`post_message(to="user", ...)`. The chat popup's footer posts guidance with
+`POST /api/cards/<id>/messages` and reads the conversation back with
+`GET /api/cards/<id>/messages`; the message lands in the same mailbox the
+worker's next non-blocking check reads. A run with no user messages is
+unaffected — the check returns `{"none": true}` immediately.

@@ -47,6 +47,7 @@ LATER_FEED = {"cursor": 3, "events": [
 
 ROUTES = {
     "/api/cards": [CARD],
+    "/api/cards/card-1/messages": {"messages": []},
     "/api/stacks": [],
     "/api/projects": [],
     "/api/models": {},

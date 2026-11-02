@@ -165,7 +165,14 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   (`via="log"`) instead of inheriting the previous round's verdict. The harness
   only supervises: round cap, accept (merge or PR), token accounting, mailbox
   lifecycle.
-  Disable with `VIBE_HARNESS_MAILBOX=0`.
+  The mailbox is also the **steering channel**: the worker prompt tells the
+  model to call `wait_for_message(timeout_seconds=0)` between major steps
+  (before a new file, before the test suite, before finishing) and to reply
+  with `post_message(to="user", ...)`. The check is non-blocking, so a silent
+  user costs one tool call and never stalls the run. The popup's footer posts
+  guidance with `POST /api/cards/<id>/messages` (`from: "user"`,
+  `to: "worker"`); `GET /api/cards/<id>/messages` returns the conversation.
+  Disable with `VIBE_HARNESS_MAILBOX=0` (the prompt rule is omitted too).
 - **Accept mode decides where the change lands, not what it costs.**
   `VIBE_HARNESS_ACCEPT_MODE` (or the sidebar's **Accept mode** control,
   `PUT /api/settings {"accept_mode": …}`) picks how an accepted card ships:
@@ -386,6 +393,14 @@ The cheapest token is the one never spent:
   chat-mode toggle, whose 💬 panel opened the session LOG (the CLI's final
   output, empty until the run ends) and therefore answered nothing while a
   session was live.
+- **Steering costs one non-blocking tool call per checkpoint.** The popup's
+  footer sends guidance to the running worker (`POST /api/cards/<id>/messages`)
+  and shows the worker's replies; the same poll also reads
+  `GET /api/cards/<id>/messages` (a small file read, no LLM spend). The worker
+  checks the mailbox with `timeout_seconds=0` between major steps, so a run
+  with no user messages is unaffected — the check returns `{"none": true}`
+  immediately. The input is disabled (with a hint) while the card is not
+  running.
 - **Per-round artifacts:** `sessions/<id>/run-N/export/export.json`,
   `review-N/export/export.json` and `resolve-N/export/export.json` hold
   `usage.total_tokens` (plus

@@ -155,6 +155,11 @@ class AnswerIn(BaseModel):
     answer: str = Field(min_length=1, max_length=8000)
 
 
+class MessageIn(BaseModel):
+    """Guidance the user sends to a running session from the chat popup."""
+    text: str = Field(min_length=1, max_length=8000)
+
+
 def static_version() -> str:
     """Fingerprint of the front-end assets (name, size, mtime) served to the tab."""
     digest = hashlib.sha256()
@@ -469,6 +474,22 @@ def create_app(config: Config | None = None,
         # session, or a journal that is gone, is an empty feed — never an
         # error (the popup polls this every second while a card runs).
         return runner.activity(card_id, cursor=cursor)
+
+    @app.post("/api/cards/{card_id}/messages", status_code=201)
+    def post_message(card_id: str, payload: MessageIn):
+        # The popup's Send: append the user's guidance to the card's mailbox,
+        # addressed to the worker. The worker's next non-blocking
+        # wait_for_message returns it. CardNotFound -> 404, blank -> 400.
+        try:
+            return runner.post_message(card_id, payload.text)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/api/cards/{card_id}/messages")
+    def list_messages(card_id: str):
+        # The conversation the popup shows: user -> worker and worker -> user,
+        # oldest first. A card with no conversation is an empty list.
+        return {"messages": runner.messages(card_id)}
 
     @app.get("/api/cards/{card_id}/diff")
     def get_diff(card_id: str, range: str = Query(diffs.DEFAULT_RANGE)):

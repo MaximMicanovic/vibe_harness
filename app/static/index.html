@@ -188,6 +188,13 @@
     </header>
     <div class="activity-feed" id="activity-feed" role="log" aria-live="polite"></div>
     <button class="activity-jump" id="activity-jump" type="button" hidden>↓ jump to latest</button>
+    <form class="activity-compose" id="activity-compose">
+      <input class="activity-input" id="activity-input" type="text"
+             placeholder="Send guidance…" autocomplete="off"
+             aria-label="Message the running session">
+      <button class="activity-send" id="activity-send" type="submit">Send</button>
+    </form>
+    <div class="activity-hint" id="activity-hint" hidden>this card is not running</div>
   </aside>
 
   <!-- Diff viewer: what the card actually changed, with the verdict that

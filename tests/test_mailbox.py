@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -270,3 +271,86 @@ def test_setup_mailbox_appends_to_existing_config(tmp_path):
     cfg = (cfg_dir / "config.toml").read_text()
     assert 'active_model = "my-model"' in cfg       # existing content kept
     assert mailbox.CONFIG_MARKER in cfg              # managed block appended
+
+
+# ------------------------------------------------- the user channel (steering)
+
+def test_post_message_to_user_is_allowed(mdir):
+    """A worker can reply to the person watching: `to="user"` is a valid
+    target, and the harness side sees the reply in the message log."""
+    worker = Rpc(mdir, "worker")
+    try:
+        out = worker.tool("post_message", {"to": "user", "text": "step 1 done"})
+        assert out["isError"] is False
+        msg = out["structuredContent"]
+        assert msg["from"] == "worker" and msg["to"] == "user"
+        assert msg["text"] == "step 1 done"
+    finally:
+        worker.close()
+    assert [(m["from"], m["to"], m["text"]) for m in mailbox.list_messages(mdir)] == [
+        ("worker", "user", "step 1 done")]
+
+
+def test_post_message_tool_schema_offers_the_user_target(mdir):
+    c = Rpc(mdir, "worker")
+    try:
+        r = c.call("tools/list")
+        tools = {t["name"]: t for t in r["result"]["tools"]}
+        enum = tools["post_message"]["inputSchema"]["properties"]["to"]["enum"]
+        assert "user" in enum
+        assert "user" in tools["post_message"]["description"]
+    finally:
+        c.close()
+
+
+def test_harness_post_message_reaches_the_workers_next_wait(mdir):
+    """What the popup's Send does: append a message from the user addressed to
+    the worker. The worker's next `wait_for_message` returns exactly it."""
+    msg = mailbox.post_message(mdir, "user", "worker", "please add a test")
+    assert msg["from"] == "user" and msg["to"] == "worker"
+    assert msg["text"] == "please add a test" and msg["seq"] == 1
+
+    worker = Rpc(mdir, "worker")
+    try:
+        out = worker.tool("wait_for_message", {"timeout_seconds": 0})
+        got = out["structuredContent"]["message"]
+        assert got["text"] == "please add a test" and got["seq"] == 1
+        # Consumed: the next non-blocking check is empty again.
+        out = worker.tool("wait_for_message", {"timeout_seconds": 0})
+        assert out["structuredContent"]["none"] is True
+    finally:
+        worker.close()
+
+
+def test_harness_post_message_allocates_the_next_seq(mdir):
+    """The harness and the MCP server share one sequence: a user message and a
+    worker reply never collide on a filename."""
+    first = mailbox.post_message(mdir, "user", "worker", "one")
+    worker = Rpc(mdir, "worker")
+    try:
+        out = worker.tool("post_message", {"to": "user", "text": "two"})
+        assert out["structuredContent"]["seq"] == 2
+    finally:
+        worker.close()
+    third = mailbox.post_message(mdir, "user", "worker", "three")
+    assert (first["seq"], third["seq"]) == (1, 3)
+    assert [m["text"] for m in mailbox.list_messages(mdir)] == ["one", "two", "three"]
+
+
+def test_harness_post_message_rejects_an_unknown_target(mdir):
+    with pytest.raises(ValueError):
+        mailbox.post_message(mdir, "user", "nobody", "hi")
+
+
+def test_non_blocking_check_returns_none_immediately(mdir):
+    """A run with no user messages is unaffected: `timeout_seconds=0` returns
+    `{"none": true}` at once instead of stalling the session."""
+    worker = Rpc(mdir, "worker")
+    try:
+        started = time.monotonic()
+        out = worker.tool("wait_for_message", {"timeout_seconds": 0})
+        elapsed = time.monotonic() - started
+        assert out["structuredContent"] == {"none": True, "role": "worker"}
+        assert elapsed < 1.0, f"a zero timeout blocked for {elapsed:.2f}s"
+    finally:
+        worker.close()

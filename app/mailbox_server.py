@@ -8,7 +8,8 @@ all state lives on the filesystem in a per-card mailbox directory — the two
 sides (persistent worker, fresh reviewer) communicate through it:
 
 - ``post_message(to, text)`` — append a message addressed to ``to``
-  (``"worker"`` or ``"reviewer"``); ``from`` is the caller's role.
+  (``"worker"``, ``"reviewer"``, or ``"user"`` — the person watching the run);
+  ``from`` is the caller's role.
 - ``wait_for_message(timeout_seconds?)`` — block until an unread message
   addressed to the caller's role arrives; returns it (or ``{"none": true}``
   on timeout). Consumed messages are tracked per role.
@@ -44,7 +45,12 @@ from pathlib import Path
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "vibe-harness-mailbox"
 SERVER_VERSION = "0.1.0"
+#: Roles a spawned session can have (the ones that can wait for a message).
 ROLES = ("worker", "reviewer")
+#: Valid `to` targets: the two spawned roles plus the person watching, so a
+#: worker can reply to the dashboard user. There is no `user` session, so a
+#: `wait_for_message` for that role never happens.
+TARGETS = ("worker", "reviewer", "user")
 
 DEFAULT_WAIT_SECONDS = 60.0
 POLL_INTERVAL = 0.1
@@ -53,11 +59,12 @@ TOOLS = [
     {
         "name": "post_message",
         "description": "Send a message to the other party in this card's review "
-                       "loop (to: 'worker' or 'reviewer').",
+                       "loop (to: 'worker' or 'reviewer'), or reply to the "
+                       "person watching the run (to: 'user').",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "to": {"type": "string", "enum": list(ROLES)},
+                "to": {"type": "string", "enum": list(TARGETS)},
                 "text": {"type": "string"},
             },
             "required": ["to", "text"],
@@ -134,8 +141,8 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 
 def _post_message(to: str, text: str) -> dict:
-    if to not in ROLES:
-        raise RpcError(-32602, f"invalid 'to' {to!r}: must be one of {ROLES}")
+    if to not in TARGETS:
+        raise RpcError(-32602, f"invalid 'to' {to!r}: must be one of {TARGETS}")
     mdir = _messages_dir()
     seq = len(list(mdir.glob("*.json"))) + 1
     while True:

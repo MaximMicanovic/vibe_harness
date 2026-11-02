@@ -14,6 +14,9 @@ per session from the project-local ``.vibe/config.toml``):
   that round's verdict file; after it reads ONLY that round's structured
   verdict (``verdicts/<round>.json``, reviewer role only) plus the message
   log for token accounting/supervision.
+- ``post_message(mdir, from_role, to, text)`` — the harness side of the same
+  log (same format and sequence as the server), used by the dashboard's
+  steering endpoint to send the user's guidance to the worker.
 
 The spawned vibe processes get ``VIBE_HARNESS_MAILBOX_DIR`` /
 ``VIBE_HARNESS_MAILBOX_ROLE`` / ``VIBE_HARNESS_MAILBOX_ROUND`` /
@@ -23,9 +26,11 @@ inherits them..1.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app import gitops
@@ -33,6 +38,10 @@ from app import gitops
 SERVER_SCRIPT = Path(__file__).resolve().parent / "mailbox_server.py"
 SERVER_NAME = "harness-mailbox"
 CONFIG_MARKER = "# vibe-harness managed: per-card MCP mailbox"
+
+#: Valid `to` targets, same as the server's: the two spawned roles plus the
+#: person watching the run (the dashboard's steering channel).
+MESSAGE_TARGETS = ("worker", "reviewer", "user")
 
 
 def mailbox_dir(sessions_dir: Path, card_id: str) -> Path:
@@ -175,3 +184,34 @@ def list_messages(mdir: Path) -> list[dict]:
         except (OSError, ValueError):
             continue
     return out
+
+
+def post_message(mdir: Path, from_role: str, to: str, text: str) -> dict:
+    """Append a message to the card's mailbox from the harness side.
+
+    Same on-disk format and sequence allocation as the MCP server
+    (``app/mailbox_server.py``), so a message posted here is exactly what the
+    worker's next ``wait_for_message`` returns. The dashboard's steering
+    endpoint uses it to send the user's guidance (``from_role="user"``,
+    ``to="worker"``).
+    """
+    if to not in MESSAGE_TARGETS:
+        raise ValueError(f"invalid 'to' {to!r}: must be one of {MESSAGE_TARGETS}")
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("text must be a non-empty string")
+    mdir = Path(mdir) / "messages"
+    mdir.mkdir(parents=True, exist_ok=True)
+    seq = len(list(mdir.glob("*.json"))) + 1
+    while True:
+        path = mdir / f"{seq:06d}.json"
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            seq += 1
+            continue
+        msg = {"seq": seq, "from": from_role, "to": to, "text": text,
+               "ts": datetime.now(timezone.utc).isoformat()}
+        os.write(fd, json.dumps(msg).encode("utf-8"))
+        os.close(fd)
+        return msg
