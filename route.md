@@ -392,7 +392,9 @@ The cheapest token is the one never spent:
   request when no popup is open — the popup is the only caller. It replaced the
   chat-mode toggle, whose 💬 panel opened the session LOG (the CLI's final
   output, empty until the run ends) and therefore answered nothing while a
-  session was live.
+  session was live. The popup's own layout (size and place, shared with the
+  diff popup) lives in the browser's `localStorage` under
+  `vibe-harness:panel:<key>` — no server round-trip, no token cost.
 - **Steering costs one non-blocking tool call per checkpoint.** The popup's
   footer sends guidance to the running worker (`POST /api/cards/<id>/messages`)
   and shows the worker's replies; the same poll also reads

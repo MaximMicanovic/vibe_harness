@@ -1804,7 +1804,9 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
  * card, clamped to the viewport, never a full-screen overlay (no backdrop, no
  * focus trap — the board stays usable behind it). This is the one base they
  * share; each popup adds only its own size. app.js sets left/top/width/height
- * on open. */
+ * on open, and the user can move and resize either one: `resize` draws the
+ * native grip in the bottom-right corner (it needs the overflow below), and
+ * the header is the drag handle. */
 .floating-panel {
   position: fixed;
   z-index: 40;
@@ -1818,6 +1820,7 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
   border-radius: 10px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
   overflow: hidden;
+  resize: both;
 }
 
 .floating-panel[hidden] { display: none; }
@@ -1829,7 +1832,11 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
   padding: 8px 10px;
   border-bottom: 1px solid var(--border-soft);
   background: var(--surface-2);
+  cursor: grab;
+  user-select: none;
 }
+
+.floating-panel-head:active { cursor: grabbing; }
 
 .floating-panel-title {
   flex: 1 1 auto;
@@ -1849,15 +1856,13 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
 .diff-popup {
   width: 720px;
   height: 640px;
+  min-width: 420px;
+  min-height: 320px;
 }
 
 .diff-popup-head {
   flex-direction: column;
-  cursor: grab;
-  user-select: none;
 }
-
-.diff-popup-head:active { cursor: grabbing; }
 
 .diff-popup-bar {
   display: flex;
@@ -2109,10 +2114,16 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
 
 /* ---------------- Live activity popup (hold C + click a card) ---------------- */
 
-/* The shared floating panel (see above), sized for the activity feed. */
+/* The shared floating panel (see above), sized for the activity feed. The
+ * bottom padding is the resize grip's strip: the grip is drawn over the
+ * bottom-right corner, which is exactly where the compose row's Send button
+ * sits. */
 .activity-popup {
   width: 420px;
   height: 520px;
+  min-width: 320px;
+  min-height: 240px;
+  padding-bottom: 16px;
 }
 
 .activity-head {

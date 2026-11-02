@@ -209,6 +209,7 @@ const logHeading = $('log-heading');
 const logContent = $('log-content');
 
 const activityPopup = $('activity-popup');
+const activityHead = $('activity-head');
 const activityTitle = $('activity-title');
 const activityStatus = $('activity-status');
 const activityTokens = $('activity-tokens');
@@ -3683,20 +3684,103 @@ logOverlay.addEventListener('click', (e) => { if (e.target === logOverlay) close
 /* ---------------- Floating panels (hold a key + click a card) ---------------- */
 
 /* Both popups are the same idea: a small panel pinned next to the clicked
- * card, clamped to the viewport, never a full-screen overlay. */
+ * card, clamped to the viewport, never a full-screen overlay. The user can
+ * move and resize either one, and the panel remembers where it ended up. */
 
 const PANEL_GAP = 12;   // distance from the card and the viewport edge
+const PANEL_LAYOUT_PREFIX = 'vibe-harness:panel:';   // + the panel's key
+const PANEL_RESIZE_DEBOUNCE_MS = 250;   // a corner drag must not write per frame
+
+/* The panel's current box. The rendered size is what counts: the native resize
+ * grip changes the used size, not the inline style. A hidden panel reports a
+ * 0x0 box, so fall back to the inline geometry then. */
+function panelLayout(panel) {
+  const rect = panel.getBoundingClientRect ? panel.getBoundingClientRect() : null;
+  const shown = rect && rect.width > 0 && rect.height > 0;
+  return {
+    width: shown ? rect.width : parseFloat(panel.style.width),
+    height: shown ? rect.height : parseFloat(panel.style.height),
+    left: shown ? rect.left : parseFloat(panel.style.left),
+    top: shown ? rect.top : parseFloat(panel.style.top),
+  };
+}
+
+/* The user's own size and place for one panel, or null when nothing usable is
+ * stored. localStorage throws in private mode and the value is user-editable,
+ * so every read is guarded and every field is checked. */
+function loadPanelLayout(key) {
+  let raw = null;
+  try { raw = localStorage.getItem(PANEL_LAYOUT_PREFIX + key); } catch (_) { return null; }
+  if (!raw) return null;
+  let saved = null;
+  try { saved = JSON.parse(raw); } catch (_) { return null; }
+  if (!saved || typeof saved !== 'object') return null;
+  const layout = {
+    width: Number(saved.width),
+    height: Number(saved.height),
+    left: Number(saved.left),
+    top: Number(saved.top),
+  };
+  const usable = layout.width > 0 && layout.height > 0
+    && isFinite(layout.left) && isFinite(layout.top);
+  return usable ? layout : null;
+}
+
+/* Remember one panel's layout. A native resize fires no event of its own, so
+ * watch the box and write once the user stops dragging the corner. */
+function savePanelLayout(key, layout) {
+  if (!layout || !(layout.width > 0) || !(layout.height > 0)
+    || !isFinite(layout.left) || !isFinite(layout.top)) return;
+  try {
+    localStorage.setItem(PANEL_LAYOUT_PREFIX + key, JSON.stringify({
+      width: layout.width,
+      height: layout.height,
+      left: layout.left,
+      top: layout.top,
+    }));
+  } catch (_) { /* private mode */ }
+}
+
+/* Watch a panel for resizes and hand back the "save it now" callback the drag
+ * needs. The layout is captured when the resize happens, not when the debounce
+ * fires: a panel closed in between must not save its hidden 0x0 box. */
+function rememberPanelLayout(panel, key) {
+  const save = () => savePanelLayout(key, panelLayout(panel));
+  if (typeof ResizeObserver !== 'function') return save;
+  let timer = null;
+  let pending = null;
+  const same = (a, b) => Math.abs(a - b) < 1;   // sub-pixel layout rounding
+  const observer = new ResizeObserver(() => {
+    const layout = panelLayout(panel);
+    // Opening the panel sets the inline size; only a native resize — which the
+    // inline style never sees — is the user's own choice.
+    if (same(layout.width, parseFloat(panel.style.width))
+      && same(layout.height, parseFloat(panel.style.height))) return;
+    pending = layout;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      savePanelLayout(key, pending);
+    }, PANEL_RESIZE_DEBOUNCE_MS);
+  });
+  observer.observe(panel);
+  return save;
+}
 
 /* Place a panel next to the clicked card, clamped to the viewport: to its
- * right when there is room, else to its left. */
-function positionFloatingPanel(panel, anchor, width, height) {
+ * right when there is room, else to its left. `saved` is the user's own layout
+ * (see loadPanelLayout) — it wins over the anchor, still clamped. */
+function positionFloatingPanel(panel, anchor, width, height, saved) {
   const vw = window.innerWidth || 1280;
   const vh = window.innerHeight || 800;
-  const w = Math.min(width, vw - 2 * PANEL_GAP);
-  const h = Math.min(height, vh - 2 * PANEL_GAP);
+  const w = Math.min(saved ? saved.width : width, vw - 2 * PANEL_GAP);
+  const h = Math.min(saved ? saved.height : height, vh - 2 * PANEL_GAP);
   let left = PANEL_GAP;
   let top = PANEL_GAP;
-  if (anchor && typeof anchor.getBoundingClientRect === 'function') {
+  if (saved) {
+    left = saved.left;
+    top = saved.top;
+  } else if (anchor && typeof anchor.getBoundingClientRect === 'function') {
     const rect = anchor.getBoundingClientRect();
     left = rect.right + PANEL_GAP;
     if (left + w > vw - PANEL_GAP) left = rect.left - w - PANEL_GAP;
@@ -3711,9 +3795,9 @@ function positionFloatingPanel(panel, anchor, width, height) {
 }
 
 /* Drag a panel by its header: pointerdown on the header (but not on a button
- * in it) moves the panel with the pointer. Nothing is remembered across
- * reloads — the next open positions the panel next to its card again. */
-function makePanelDraggable(panel, handle) {
+ * in it) moves the panel with the pointer. `onEnd` runs when the drag ends, so
+ * the caller can remember where the panel landed. */
+function makePanelDraggable(panel, handle, onEnd) {
   let drag = null;
   handle.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
@@ -3732,7 +3816,11 @@ function makePanelDraggable(panel, handle) {
     panel.style.left = (drag.left + e.clientX - drag.x) + 'px';
     panel.style.top = (drag.top + e.clientY - drag.y) + 'px';
   });
-  const stop = () => { drag = null; };
+  const stop = () => {
+    if (!drag) return;   // a pointerup without a drag is not a drag end
+    drag = null;
+    if (onEnd) onEnd();
+  };
   handle.addEventListener('pointerup', stop);
   handle.addEventListener('pointercancel', stop);
 }
@@ -3959,7 +4047,8 @@ function openActivity(cardId, anchor) {
   activityFeed.textContent = '';
   activityJump.hidden = true;
   activityPopup.hidden = false;
-  positionFloatingPanel(activityPopup, anchor, ACTIVITY_WIDTH, ACTIVITY_HEIGHT);
+  positionFloatingPanel(activityPopup, anchor, ACTIVITY_WIDTH, ACTIVITY_HEIGHT,
+    loadPanelLayout('activity'));
   updateActivityHeader();
   return pollActivity();
 }
@@ -3979,6 +4068,7 @@ activityCompose.addEventListener('submit', (e) => {
   if (e && e.preventDefault) e.preventDefault();
   sendActivityMessage().catch(showError);
 });
+makePanelDraggable(activityPopup, activityHead, rememberPanelLayout(activityPopup, 'activity'));
 
 /* ---------------- Diff popup: what the card actually changed ---------------- */
 
@@ -4130,7 +4220,8 @@ async function openDiff(cardId, range, anchor) {
   const card = state.cards.find((n) => n.id === cardId);
   diffHeading.textContent = 'Diff — ' + (card ? card.title : cardId);
   diffPopup.hidden = false;
-  positionFloatingPanel(diffPopup, anchor, DIFF_WIDTH, DIFF_HEIGHT);
+  positionFloatingPanel(diffPopup, anchor, DIFF_WIDTH, DIFF_HEIGHT,
+    loadPanelLayout('diff'));
   renderDiffRanges();
   await loadDiff();
 }
@@ -4141,7 +4232,7 @@ function closeDiff() {
 }
 
 $('diff-close').addEventListener('click', closeDiff);
-makePanelDraggable(diffPopup, diffPopupHead);
+makePanelDraggable(diffPopup, diffPopupHead, rememberPanelLayout(diffPopup, 'diff'));
 
 /* ------------- Theme indicator (automatic dark mode, sun-based) ------------- */
 
