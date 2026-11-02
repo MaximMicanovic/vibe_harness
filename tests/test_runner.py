@@ -2124,6 +2124,182 @@ def test_tdd_config_flag_from_env():
     assert load_config({"VIBE_HARNESS_TDD": "false"}).tdd is False
 
 
+# ----------------------------------------------------------------------
+# duplication and redundancy: the worker is told up front, the reviewer is
+# handed the mechanical report and must act on it (card 26671e).
+# ----------------------------------------------------------------------
+
+CLONE = {"length": 8,
+         "occurrences": [{"file": "app/one.py", "start": 3},
+                         {"file": "app/two.py", "start": 12}]}
+
+
+def test_worker_prompts_tell_it_to_search_before_adding():
+    """Prevention is cheaper than a rejection round: both worker prompts (the
+    first run and every fixer round) carry the reuse rule."""
+    for prompt in (prompt_template("spec body"),
+                   fix_prompt_template("spec body", "reason")):
+        assert "Before adding a helper, search for an existing one" in prompt
+        assert "grep -rn" in prompt
+        assert "Reuse or extend it" in prompt
+        assert "Do not copy a block — extract it" in prompt
+        assert "Do not add code nothing calls" in prompt
+
+
+def test_review_prompt_carries_the_duplication_report_and_criteria():
+    """The reviewer sees the mechanical report for the touched files plus the
+    four criteria, and is told to reject unjustified clone growth."""
+    prompt = review_prompt_template("spec body", "diff --git a/app/one.py b/app/one.py",
+                                    "abc..def", "1 passed",
+                                    duplication=[CLONE])
+
+    assert "Duplication and redundancy" in prompt
+    # The report itself: length, file and line of each occurrence.
+    assert "app/one.py:3" in prompt
+    assert "app/two.py:12" in prompt
+    assert "8" in prompt
+    # The four criteria.
+    assert "re-implement something that already exists" in prompt
+    assert "Name the existing thing" in prompt
+    assert "copy a block instead of extracting or sharing it" in prompt
+    assert "code nothing calls" in prompt
+    assert "abstraction with exactly one caller" in prompt
+    assert "proportionate to the spec" in prompt
+    # ...and the verdict rule that makes them bite.
+    assert "REJECT" in prompt
+    assert "increases the clone count" in prompt
+    assert "must name the duplicate" in prompt
+
+
+def test_review_prompt_duplication_report_defaults_to_the_whole_app(monkeypatch):
+    """No diff (sandbox run) means the whole project is scanned — the reviewer
+    still gets a report instead of a silent gap."""
+    from app import dupes
+    from app.config import BASE_DIR
+
+    seen = {}
+
+    def fake_find_clones(root, min_lines=6):
+        seen["root"] = root
+        return [CLONE]
+
+    monkeypatch.setattr(dupes, "find_clones", fake_find_clones)
+
+    prompt = review_prompt_template("spec body")
+
+    assert "Duplication and redundancy" in prompt
+    assert "app/one.py:3" in prompt
+    assert seen["root"] == BASE_DIR
+
+
+def test_review_prompt_duplication_report_is_scoped_to_the_diff(monkeypatch):
+    """With a diff, the report is filtered to the files the diff touches."""
+    from app import dupes
+
+    seen = {}
+
+    def fake_report(root, files=None, min_lines=6):
+        seen["files"] = files
+        return [CLONE]
+
+    monkeypatch.setattr(dupes, "report", fake_report)
+
+    diff = ("diff --git a/app/one.py b/app/one.py\n"
+            "--- a/app/one.py\n+++ b/app/one.py\n@@ -1 +1 @@\n-x\n+y\n")
+    prompt = review_prompt_template("spec body", diff, "abc..def")
+
+    assert seen["files"] == ["app/one.py"]
+    assert "app/one.py:3" in prompt
+
+
+def test_review_prompt_says_so_when_the_touched_files_are_clean():
+    prompt = review_prompt_template("spec body", "diff --git a/x b/x",
+                                    "abc..def", duplication=[])
+    assert "Duplication and redundancy" in prompt
+    assert "no duplicated blocks" in prompt.lower()
+
+
+def test_review_prompt_names_the_duplicate_a_diff_copies(tmp_path):
+    """The acceptance criterion, mechanically: a diff that copies an existing
+    function gets a report naming the existing block, so the reviewer can
+    reject with the duplicate in the reason."""
+    block = (
+        "def compute_total(rows):\n"
+        "    total = 0\n"
+        "    for row in rows:\n"
+        "        if row is None:\n"
+        "            continue\n"
+        "        total += row['amount']\n"
+        "    return total\n"
+    )
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "existing.py").write_text(block)
+    (tmp_path / "app" / "new.py").write_text(block)
+    diff = ("diff --git a/app/new.py b/app/new.py\n"
+            "--- a/app/new.py\n+++ b/app/new.py\n"
+            "@@ -0,0 +1,7 @@\n+def compute_total(rows):\n")
+
+    prompt = review_prompt_template("spec body", diff, "abc..def",
+                                    duplication_root=tmp_path)
+
+    # Both places are named: the copy in the diff AND the existing function.
+    assert "app/new.py:1" in prompt
+    assert "app/existing.py:1" in prompt
+    assert "7 lines" in prompt
+
+
+def test_review_prompt_caps_a_huge_duplication_report():
+    """The report is a signal, not a second workspace to read: past the cap it
+    points at the endpoint instead of listing everything."""
+    from app.runner import REVIEW_DUPLICATION_MAX_CLONES
+
+    clones = [{"length": 6,
+               "occurrences": [{"file": f"app/f{i}.py", "start": 1},
+                               {"file": f"app/g{i}.py", "start": 2}]}
+              for i in range(REVIEW_DUPLICATION_MAX_CLONES + 5)]
+
+    prompt = review_prompt_template("spec body", "diff --git a/x b/x",
+                                    "abc..def", duplication=clones)
+
+    assert "app/f0.py:1" in prompt
+    assert f"app/f{REVIEW_DUPLICATION_MAX_CLONES - 1}.py:1" in prompt
+    assert f"app/f{REVIEW_DUPLICATION_MAX_CLONES}.py:1" not in prompt
+    assert "and 5 more" in prompt
+    assert "GET /api/duplication" in prompt
+
+
+@git_test
+def test_run_records_the_diff_stat(store, tmp_path, fake_vibe, projects):
+    """A finalized run records how much it grew the code: lines added and
+    removed against the base branch, so a 900-line card is visible at a
+    glance instead of only in review."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    card = store.create("Growth card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+
+    runner.run(card_id)
+    final = _wait_for_status(store, card_id, "done")
+
+    diff_stat = final["session"]["diff_stat"]
+    # The fake vibe writes one line into hello.py.
+    assert diff_stat == {"files": 1, "added": 1, "removed": 0}
+
+
+def test_a_sandbox_run_records_no_diff_stat(store, make_runner, fake_vibe):
+    """No git, no diff stat — the chip simply does not render."""
+    runner = make_runner(fake_vibe)
+    card = store.create("Sandbox card", "Do a thing.")
+    card_id = card["id"]
+
+    runner.run(card_id)
+    final = _wait_for_status(store, card_id, "done")
+
+    assert final["session"]["diff_stat"] is None
+
+
 def test_run_writes_tdd_rule_into_prompt(store, make_runner, fake_vibe):
     runner = make_runner(fake_vibe)
     card = store.create("TDD card", "Add a feature.")

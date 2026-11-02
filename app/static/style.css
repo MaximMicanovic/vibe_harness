@@ -1119,8 +1119,16 @@ body {
 .chip-model { background: var(--chip-model-bg); }
 .chip-depends { background: #f6d7d7; color: #8f1f1f; }
 .chip-waiting { background: var(--q-bg); color: var(--q-ink); }
+/* The growth signal: how many lines a card added and removed. Tabular figures
+ * so two cards' chips line up and a big number stands out. */
+.chip-diff-stat {
+  background: #e0e7ff;
+  color: #3730a3;
+  font-variant-numeric: tabular-nums;
+}
 
 html.dark .chip-depends { background: #4a2c2c; color: #f2b8b8; }
+html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
 
 /* Editor: the card's "runs after" dependency list. */
 .depends-list {

@@ -33,6 +33,38 @@ The pipeline a card goes through: implement, test gate, review, accept.
 Prompts, logs, and `export.json` for every round are kept under
 `sessions/<id>/run-N/` and `sessions/<id>/review-N/`.
 
+## Duplication and redundancy
+
+Correctness is not the only thing a review checks. Every card adds lines, so
+the pipeline also pushes back on *growth*:
+
+- **The worker is told up front.** Both worker prompts (run-1 and every fixer
+  round) carry the reuse rule: *before adding a helper, search for an existing
+  one (`grep -rn`); reuse or extend it; do not copy a block — extract it; do not
+  add code nothing calls.* Prevention is cheaper than a rejection round.
+- **The reviewer gets a mechanical report.** `app/dupes.py` is a pure,
+  dependency-free clone detector: it normalizes every source line (strip the
+  whitespace, drop blank and comment-only lines) and reports runs of at least
+  six consecutive identical normalized lines that appear in two or more places,
+  as `{"length": N, "occurrences": [{"file": ..., "start": ...}]}`. It covers
+  `.py`, `.js`, `.css` and `.html`, skipping `tests/`, `sessions/`, `archives/`,
+  `.venv` and `node_modules`. The review prompt carries the report for the files
+  the diff touches (the whole app when there is no diff) plus four criteria:
+  does the diff re-implement something that already exists (name it)? does it
+  copy a block instead of extracting or sharing it? does it add code nothing
+  calls, a config flag nothing reads, an abstraction with exactly one caller, or
+  a file that duplicates another? is the change proportionate to the spec (a
+  spec that needs 50 lines and a diff of 500 is a rejection)? The reviewer must
+  **reject** when the diff increases the clone count without a stated
+  justification, and the rejection reason must name the duplicate.
+- **The board shows the number.** `GET /api/duplication` returns
+  `{"count": N, "clones": [...]}` for the project, and every finalized run
+  records `session.diff_stat` — `{files, added, removed}` from
+  `git diff --stat <base>...<branch>` — which the card renders as a `+412 −38`
+  chip (file count on hover). A card that adds 900 lines for a small spec is
+  visible at a glance instead of only in review. Sandbox runs (no git) record
+  nothing and show no chip.
+
 ## What a card cost
 
 A card's total is what it actually cost, not just what its worker reported:

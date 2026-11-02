@@ -56,7 +56,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app import failures, gitops, liveusage, mailbox, praccept
+from app import dupes, failures, gitops, liveusage, mailbox, praccept
 from app.sleepguard import SleepGuard
 from app.backends import Backend, get_backend
 from app.config import BASE_DIR, SESSIONS_DIR, Config
@@ -203,12 +203,27 @@ def tdd_rules() -> str:
     )
 
 
+# Rule block telling spawned models to reuse what is already there. Prevention
+# is cheaper than a rejection round: the reviewer rejects a diff that copies a
+# block or adds code nothing calls, so the worker is told up front.
+def reuse_rules() -> str:
+    return (
+        "- Before adding a helper, search for an existing one (`grep -rn`). "
+        "Reuse or extend it. Do not copy a block — extract it. Do not add code "
+        "nothing calls.\n"
+    )
+
+
 # Cap on the diff embedded in a review prompt (keeps the fresh reviewer's
 # context small — the point of diff-scoped review).
 REVIEW_DIFF_MAX_CHARS = 60_000
 
 # Cap on the test-suite output embedded in a review prompt.
 REVIEW_TEST_OUTPUT_MAX_CHARS = 4_000
+
+# Cap on the clones listed in a review prompt: the report is a signal, not a
+# second workspace to read.
+REVIEW_DUPLICATION_MAX_CLONES = 25
 
 
 class WorkdirNotAllowed(Exception):
@@ -227,21 +242,27 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def prompt_template(body: str, mcp_name: str | None = "harness",
-                    *, tdd: bool = True) -> str:
+def worker_rules(mcp_name: str | None, tdd: bool) -> str:
+    """The rule block both worker prompts (first run and fixer) carry."""
     rules = (
         "- If an `agent.md` file exists in the workspace, read it and follow its "
         "rules (it may ask you to keep `route.md` up to date).\n"
     )
     if tdd:
         rules += tdd_rules()
+    rules += reuse_rules()
     if mcp_name:
         rules += mcp_rules(mcp_name)
+    return rules
+
+
+def prompt_template(body: str, mcp_name: str | None = "harness",
+                    *, tdd: bool = True) -> str:
     return (
         "You are a Mistral Vibe agent. A user wrote the following spec as a "
         "post-it card. Implement it completely in the current working directory.\n\n"
         "Rules:\n"
-        + rules +
+        + worker_rules(mcp_name, tdd) +
         "- If something is ambiguous, make a reasonable choice and record it in "
         "a NOTES.md file in the workspace.\n"
         "- Implement, then verify (run tests/build if applicable).\n"
@@ -252,14 +273,6 @@ def prompt_template(body: str, mcp_name: str | None = "harness",
 
 def fix_prompt_template(body: str, reason: str, mcp_name: str | None = "harness",
                         resumed: bool = False, *, tdd: bool = True) -> str:
-    rules = (
-        "- If an `agent.md` file exists in the workspace, read it and follow its "
-        "rules (it may ask you to keep `route.md` up to date).\n"
-    )
-    if tdd:
-        rules += tdd_rules()
-    if mcp_name:
-        rules += mcp_rules(mcp_name)
     resume_card = (
         "\n\nYou are RESUMING your previous session (`vibe --resume <session_id>`): "
         "all earlier context (the workspace you already read, the spec, the "
@@ -275,7 +288,7 @@ def fix_prompt_template(body: str, reason: str, mcp_name: str | None = "harness"
         "Fix the issues raised by the reviewer and complete the spec. Implement "
         "completely in the current working directory.\n\n"
         "Rules:\n"
-        + rules +
+        + worker_rules(mcp_name, tdd) +
         "- If something is ambiguous, make a reasonable choice and record it in "
         "a NOTES.md file in the workspace.\n"
         "- If the rejection reason contains test output, fix the code so the "
@@ -286,21 +299,76 @@ def fix_prompt_template(body: str, reason: str, mcp_name: str | None = "harness"
     )
 
 
+def duplication_section(clones: list[dict], *, whole_app: bool) -> str:
+    """The "Duplication and redundancy" block of the review prompt.
+
+    The report is mechanical (`app/dupes.py`), so the reviewer does not have to
+    guess whether a block already exists — and the criteria turn the report
+    into a verdict instead of a statistic.
+    """
+    scope = ("the whole app (no diff was available for this run)" if whole_app
+             else "the files this diff touches")
+    shown = clones[:REVIEW_DUPLICATION_MAX_CLONES]
+    if shown:
+        report = "\n".join(
+            f"- {clone['length']} lines: "
+            + ", ".join(f"{occ['file']}:{occ['start']}"
+                        for occ in clone["occurrences"])
+            for clone in shown)
+        if len(clones) > len(shown):
+            report += (f"\n- ... and {len(clones) - len(shown)} more (see "
+                       "`GET /api/duplication`)")
+    else:
+        report = "- no duplicated blocks were found in " + scope + "."
+    return (
+        "## Duplication and redundancy\n\n"
+        "A mechanical clone detector ran over the workspace: blocks of at least "
+        "6 normalized lines (whitespace stripped, blank and comment-only lines "
+        "dropped) that appear in two or more places. This is the report for "
+        + scope + ":\n\n"
+        + report + "\n\n"
+        "Judge the diff against it:\n"
+        "- Does the diff re-implement something that already exists in the "
+        "workspace? Name the existing thing.\n"
+        "- Does it copy a block instead of extracting or sharing it?\n"
+        "- Does it add code nothing calls, a config flag nothing reads, an "
+        "abstraction with exactly one caller, or a file that duplicates "
+        "another?\n"
+        "- Is the change proportionate to the spec? A spec that needs 50 lines "
+        "and a diff of 500 is a rejection.\n\n"
+        "REJECT when the diff increases the clone count without a stated "
+        "justification, and your rejection reason must name the duplicate.\n\n"
+    )
+
+
 def review_prompt_template(body: str, diff: str | None = None,
                            diff_range: str | None = None,
-                           test_output: str | None = None) -> str:
+                           test_output: str | None = None,
+                           duplication: list[dict] | None = None,
+                           duplication_root: Path | None = None) -> str:
     """Fresh-reviewer prompt, scoped small on purpose: the
     spec + the diff since the last reviewed commit + the harness-run test
-    output. The reviewer may ask the persistent worker questions through the
-    harness-mailbox MCP tools and must submit a structured verdict via
-    `submit_verdict` (VERDICT: text is only a fallback)."""
+    output + the mechanical duplication report. The reviewer may ask the
+    persistent worker questions through the harness-mailbox MCP tools and must
+    submit a structured verdict via `submit_verdict` (VERDICT: text is only a
+    fallback).
+
+    `duplication` is the precomputed clone report (tests pass it directly);
+    when it is None the report is computed here — for the files the diff
+    touches, or for the whole app when there is no diff — from
+    `duplication_root` (the card's worktree; the harness repo by default).
+    """
+    if duplication is None:
+        root = Path(duplication_root) if duplication_root is not None else BASE_DIR
+        files = dupes.diff_files(diff) if diff is not None else None
+        duplication = dupes.report(root, files=files)
     parts = [
         "You are the automated reviewer in a code-production pipeline. A worker "
         "implemented the spec below in the current working directory.\n\n"
         "You are a FRESH reviewer with deliberately small context: review ONLY "
-        "what is provided below (spec + diff + test output), plus targeted reads "
-        "of the workspace when the diff is unclear. Do NOT re-read the whole "
-        "workspace.\n\n"
+        "what is provided below (spec + diff + test output + duplication "
+        "report), plus targeted reads of the workspace when the diff is "
+        "unclear. Do NOT re-read the whole workspace.\n\n"
         "# Spec\n\n" + body + "\n\n",
     ]
     if diff is not None:
@@ -320,6 +388,7 @@ def review_prompt_template(body: str, diff: str | None = None,
             "## Test-suite output (run by the harness in the worktree)\n\n"
             "```\n" + test_output + "\n```\n\n"
         )
+    parts.append(duplication_section(duplication, whole_app=diff is None))
     parts.append(
         "Review the changes for bugs, correctness, edge cases, and completeness "
         "against the spec. You may also run the project's test suite in the "
@@ -2055,6 +2124,13 @@ class SessionRunner:
                             f"vibe-harness: {title} (card {card_id})")
                     except GitError as exc:
                         commit_error = str(exc)
+                    else:
+                        # The growth signal: how much this card added and
+                        # removed against its base. A 900-line card for a small
+                        # spec is then visible on the board, not only in review.
+                        counts = praccept.diff_stat_counts(git_info)
+                        if counts is not None:
+                            outcome["diff_stat"] = counts
                 if commit_error:
                     self.store.set_status(card_id, "failed", session_patch={
                         **outcome, "git_error": commit_error})
@@ -2085,7 +2161,8 @@ class SessionRunner:
                     self._spawn(card_id, kind="review",
                                 prompt=review_prompt_template(card["body"],
                                                               diff_text, diff_range,
-                                                              test_tail),
+                                                              test_tail,
+                                                              duplication_root=ws),
                                 extra_patch=handover)
         else:  # review
             # Verdict channel 1 (preferred): the structured `submit_verdict`
