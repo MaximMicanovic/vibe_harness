@@ -56,7 +56,6 @@
         <button class="rail-btn" type="button" data-panel="archive" title="Archive — the archive folders, the projects inside them and their cards" aria-controls="sidebar-panel">📦</button>
         <button class="rail-btn" type="button" data-panel="split" title="Split — do cards split into sub-cards cost less per accepted outcome?" aria-controls="sidebar-panel">⤷</button>
         <button class="rail-btn" type="button" data-panel="keys" title="Keys — every keyboard shortcut" aria-controls="sidebar-panel">⌨</button>
-        <button class="rail-btn" type="button" data-panel="chat" title="Chat — click a card to open its session chat instead of the editor" aria-controls="sidebar-panel">💬</button>
       </nav>
       <section class="sidebar-panel" id="sidebar-panel" hidden aria-label="Sidebar panel">
         <header class="sidebar-head">
@@ -178,6 +177,19 @@
       <pre id="log-content" class="log-content">…</pre>
     </div>
   </div>
+
+  <!-- Live activity popup: hold C and click a card to watch the model work.
+       A small floating panel, NOT an overlay — the board stays usable. -->
+  <aside class="activity-popup" id="activity-popup" hidden aria-label="Live activity">
+    <header class="activity-head">
+      <h2 class="activity-title" id="activity-title">Activity</h2>
+      <span class="activity-status" id="activity-status"></span>
+      <span class="activity-tokens" id="activity-tokens"></span>
+      <button class="icon-btn" id="activity-close" type="button" title="Close (Esc)">×</button>
+    </header>
+    <div class="activity-feed" id="activity-feed" role="log" aria-live="polite"></div>
+    <button class="activity-jump" id="activity-jump" type="button" hidden>↓ jump to latest</button>
+  </aside>
 
   <!-- Diff viewer: what the card actually changed, with the verdict that
        approved it pinned next to the diff. -->

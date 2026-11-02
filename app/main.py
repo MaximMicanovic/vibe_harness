@@ -462,6 +462,14 @@ def create_app(config: Config | None = None,
     def get_log(card_id: str, tail: int = Query(200, ge=1, le=5000)):
         return {"lines": runner.log_tail(card_id, n=tail)}
 
+    @app.get("/api/cards/{card_id}/activity")
+    def get_activity(card_id: str, cursor: int = Query(0, ge=0)):
+        # The live activity feed of the card's vibe session: the journal lines
+        # appended after `cursor` (0 = the last ~200 events). A card with no
+        # session, or a journal that is gone, is an empty feed — never an
+        # error (the popup polls this every second while a card runs).
+        return runner.activity(card_id, cursor=cursor)
+
     @app.get("/api/cards/{card_id}/diff")
     def get_diff(card_id: str, range: str = Query(diffs.DEFAULT_RANGE)):
         # What the card actually changed: card (what accept merged), round

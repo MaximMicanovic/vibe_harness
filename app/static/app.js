@@ -19,6 +19,7 @@ const KEYBINDINGS = [
   { key: 'N', label: 'New card', hint: 'opens the card editor' },
   { key: 'Esc', label: 'Close overlay', hint: 'clears a live search first, else closes the open panel or modal' },
   { key: 'D', label: 'Diff', hint: 'hover a card and press D to see what it changed' },
+  { key: 'C + click', label: 'Live activity', hint: 'hold C and click a card to watch the model work' },
   { key: '/', label: 'Search', hint: 'focuses the search box — it searches the board and the archives' },
 ];
 
@@ -59,7 +60,11 @@ const state = {
   diffRange: 'card',     // 'card' | 'round' | 'worktree'
   prevStatuses: null,    // Map cardId -> status from the previous refresh (null = first load)
   notificationsEnabled: true,  // sidebar Settings toggle, persisted in localStorage
-  chatMode: false,             // sidebar Chat toggle: a card click opens its chat
+  activityCardId: null,  // card whose live activity popup is open (one at a time)
+  activityCursor: 0,     // journal lines already consumed by the popup
+  activityTimer: null,   // 1s activity poll, active while the popup's card is live
+  activityAutoScroll: true,  // false once the user scrolls the feed up
+  cKeyDown: false,       // C is held: a card click opens the activity popup
   unreadNotifications: 0,      // finishes announced while the tab was hidden (title badge)
   searchQuery: '',       // the live query in the top bar ('' = no search)
   searchResults: [],     // GET /api/search hits: board cards + archived cards
@@ -132,16 +137,6 @@ function saveAutoAcceptDefault(on) {
   try { localStorage.setItem(AUTO_ACCEPT_KEY, on ? '1' : '0'); } catch (_) { /* private mode */ }
 }
 
-/* Chat mode: while it is on, clicking a card opens its session chat instead of
- * the editor. A reading mode, so it is remembered per browser. */
-const CHAT_MODE_KEY = 'vibe-harness:chat-mode';
-function loadChatMode() {
-  try { return localStorage.getItem(CHAT_MODE_KEY) === '1'; } catch (_) { return false; }
-}
-function saveChatMode(on) {
-  try { localStorage.setItem(CHAT_MODE_KEY, on ? '1' : '0'); } catch (_) { /* private mode */ }
-}
-
 /* The last used project, remembered per browser: updated whenever a card is
  * saved with a project (or without one) and whenever a concrete project is
  * picked in the top-bar switcher. The new-card dropdown defaults to it.
@@ -212,6 +207,13 @@ async function migrateLocalStacks() {
 const logOverlay = $('log-overlay');
 const logHeading = $('log-heading');
 const logContent = $('log-content');
+
+const activityPopup = $('activity-popup');
+const activityTitle = $('activity-title');
+const activityStatus = $('activity-status');
+const activityTokens = $('activity-tokens');
+const activityFeed = $('activity-feed');
+const activityJump = $('activity-jump');
 
 const diffOverlay = $('diff-overlay');
 const diffHeading = $('diff-heading');
@@ -826,9 +828,10 @@ function buildCard(cardData, queuePos) {
   if (chips.childNodes.length > 0) card.appendChild(chips);
 
   card.addEventListener('click', () => {
-    // Chat mode turns the board into a reading surface: a click opens what the
-    // model said instead of the editor.
-    if (state.chatMode) openLog(cardData.id, true);
+    // Hold C and click a card to watch the model work: a small floating
+    // activity popup, not a mode you have to remember you are in. A plain
+    // click still opens the editor.
+    if (state.cKeyDown) openActivity(cardData.id, card);
     else openEditor(cardData.id).catch(showError);
   });
 
@@ -2377,7 +2380,6 @@ const SIDEBAR_PANELS = {
   archive: { title: 'Archive', render: renderArchivePanel },
   split: { title: 'Split', render: renderSplitPanel },
   keys: { title: 'Keys', render: renderKeysPanel },
-  chat: { title: 'Chat', render: renderChatPanel },
 };
 
 function openSidebarPanel(key, force) {
@@ -2536,43 +2538,6 @@ async function saveMaxConcurrent(raw) {
     body: JSON.stringify({ max_concurrent: value }),
   });
   await renderSettingsPanel();
-}
-
-/* --- chat: a reading mode where a card click opens its session chat --- */
-
-async function renderChatPanel() {
-  sidebarBody.textContent = '';
-  const row = el('label', 'setting-row');
-  const box = el('input');
-  box.type = 'checkbox';
-  box.id = 'chat-mode-toggle';
-  box.checked = state.chatMode;
-  box.title = 'Click a card to open its session chat instead of the editor';
-  box.addEventListener('change', () => setChatMode(box.checked));
-  row.appendChild(box);
-  row.appendChild(el('span', 'setting-label', 'Click a card to open its chat'));
-  sidebarBody.appendChild(row);
-
-  sidebarBody.appendChild(el('p', 'sidebar-empty', state.chatMode
-    ? 'Chat mode is ON — clicking any card opens its session chat. Turn it off '
-      + 'to edit cards again.'
-    : 'Turn this on to read the board instead of editing it: a click on a card '
-      + 'opens its session chat.'));
-}
-
-function setChatMode(on) {
-  state.chatMode = !!on;
-  saveChatMode(state.chatMode);
-  applyChatMode();
-  if (state.sidebarPanel === 'chat') renderChatPanel().catch(showError);
-}
-
-/* Reflect the mode on the board and on the rail button, so it stays obvious
- * the board is in reading mode even with the sidebar closed. */
-function applyChatMode() {
-  document.body.classList.toggle('chat-mode', state.chatMode);
-  const btn = sidebarRail.querySelector('.rail-btn[data-panel="chat"]');
-  if (btn) btn.classList.toggle('rail-btn--mode-on', state.chatMode);
 }
 
 /* --- models: which model each kind of session runs on --- */
@@ -3661,10 +3626,10 @@ async function fetchLog() {
   }
 }
 
-function openLog(cardId, asChat) {
+function openLog(cardId) {
   state.logCardId = cardId;
   const card = state.cards.find((n) => n.id === cardId);
-  logHeading.textContent = (asChat ? 'Chat — ' : 'Log — ') + (card ? card.title : cardId);
+  logHeading.textContent = 'Log — ' + (card ? card.title : cardId);
   logOverlay.hidden = false;
   fetchLog();
 }
@@ -3677,6 +3642,199 @@ function closeLog() {
 
 $('log-close').addEventListener('click', closeLog);
 logOverlay.addEventListener('click', (e) => { if (e.target === logOverlay) closeLog(); });
+
+/* ---------------- Live activity popup (hold C + click a card) ---------------- */
+
+/* A small floating panel that shows what the model is doing RIGHT NOW. The
+ * session log is the CLI's final output (empty until the run ends); the vibe
+ * journal is appended while the session runs, so the popup polls
+ * /api/cards/<id>/activity every second and appends what is new. It is NOT an
+ * overlay: the board stays usable behind it. */
+
+const ACTIVITY_WIDTH = 420;
+const ACTIVITY_HEIGHT = 520;
+const ACTIVITY_GAP = 12;        // distance from the card and the viewport edge
+const ACTIVITY_POLL_MS = 1000;
+const ACTIVITY_STICK_PX = 24;   // "at the bottom" tolerance for auto-scroll
+
+/* One event -> one row. Every piece of journal text is model-written, so it
+ * goes in as a TEXT NODE (el() sets textContent) — never innerHTML. */
+function activityEventRow(event) {
+  const kind = event.kind || 'text';
+  const row = el('div', 'activity-event activity-event--' + kind);
+  if (kind === 'reasoning') {
+    // Collapsed by default: the thinking is there when you want it, but it
+    // does not push the actual work off the panel.
+    const toggle = el('button', 'activity-thinking', 'thinking…');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    const text = el('div', 'activity-text', event.text || '');
+    text.hidden = true;
+    toggle.addEventListener('click', () => {
+      const open = text.hidden;
+      text.hidden = !open;
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      toggle.textContent = open ? 'thinking ▴' : 'thinking…';
+    });
+    row.appendChild(toggle);
+    row.appendChild(text);
+    return row;
+  }
+  if (kind === 'tool') {
+    row.appendChild(el('span', 'activity-tool', event.tool || 'tool'));
+    row.appendChild(el('code', 'activity-summary', event.summary || ''));
+    return row;
+  }
+  if (kind === 'result') {
+    row.classList.add(event.ok ? 'activity-event--ok' : 'activity-event--failed');
+    row.appendChild(el('span', 'activity-ok', event.ok ? '✓' : '✗'));
+    row.appendChild(el('code', 'activity-summary', event.summary || ''));
+    return row;
+  }
+  if (kind === 'status') {
+    row.appendChild(el('span', 'activity-status-text', event.text || ''));
+    return row;
+  }
+  row.appendChild(el('div', 'activity-text', event.text || ''));
+  return row;
+}
+
+/* Append events to the feed (newest at the bottom) and follow them unless the
+ * user scrolled up to read something. */
+function renderActivityEvents(events) {
+  const rows = [];
+  for (const event of events || []) {
+    const row = activityEventRow(event);
+    activityFeed.appendChild(row);
+    rows.push(row);
+  }
+  if (rows.length && state.activityAutoScroll) scrollActivityToLatest();
+  return rows;
+}
+
+function scrollActivityToLatest() {
+  activityFeed.scrollTop = activityFeed.scrollHeight;
+  state.activityAutoScroll = true;
+  activityJump.hidden = true;
+}
+
+/* The feed's scroll listener: at the bottom it follows new events; scrolled up
+ * it stops and offers "jump to latest". */
+function onActivityScroll() {
+  const atBottom = activityFeed.scrollTop + activityFeed.clientHeight
+    >= activityFeed.scrollHeight - ACTIVITY_STICK_PX;
+  state.activityAutoScroll = atBottom;
+  activityJump.hidden = atBottom;
+}
+
+function activityCard() {
+  return state.cards.find((n) => n.id === state.activityCardId) || null;
+}
+
+function activityIsLive() {
+  const card = activityCard();
+  return !!card && (card.status === 'running' || card.status === 'reviewing');
+}
+
+/* Header: card title, status pill, live token count. */
+function updateActivityHeader() {
+  const card = activityCard();
+  activityTitle.textContent = card ? (card.title || '(untitled)') : (state.activityCardId || '');
+  const status = card ? card.status : '';
+  activityStatus.textContent = status || '—';
+  activityStatus.className = 'activity-status activity-status--' + (status || 'unknown');
+  const session = (card && card.session) || {};
+  const tokens = typeof session.live_tokens === 'number' ? session.live_tokens
+    : (typeof session.card_tokens === 'number' ? session.card_tokens : null);
+  activityTokens.textContent = tokens === null ? '' : fmtTokens(tokens) + ' tok';
+  activityTokens.title = tokens === null ? ''
+    : 'Tokens this card has spent so far: ' + fmtTokens(tokens)
+      + tokenTypesSuffix(session.live_token_breakdown || session.card_token_breakdown);
+}
+
+/* Place the panel next to the clicked card, clamped to the viewport: to its
+ * right when there is room, else to its left. */
+function positionActivityPopup(anchor) {
+  const vw = window.innerWidth || 1280;
+  const vh = window.innerHeight || 800;
+  const width = Math.min(ACTIVITY_WIDTH, vw - 2 * ACTIVITY_GAP);
+  const height = Math.min(ACTIVITY_HEIGHT, vh - 2 * ACTIVITY_GAP);
+  let left = ACTIVITY_GAP;
+  let top = ACTIVITY_GAP;
+  if (anchor && typeof anchor.getBoundingClientRect === 'function') {
+    const rect = anchor.getBoundingClientRect();
+    left = rect.right + ACTIVITY_GAP;
+    if (left + width > vw - ACTIVITY_GAP) left = rect.left - width - ACTIVITY_GAP;
+    top = rect.top;
+  }
+  left = Math.max(ACTIVITY_GAP, Math.min(left, vw - width - ACTIVITY_GAP));
+  top = Math.max(ACTIVITY_GAP, Math.min(top, vh - height - ACTIVITY_GAP));
+  activityPopup.style.left = left + 'px';
+  activityPopup.style.top = top + 'px';
+  activityPopup.style.width = width + 'px';
+  activityPopup.style.height = height + 'px';
+}
+
+function stopActivityTimer() {
+  if (state.activityTimer) {
+    clearInterval(state.activityTimer);
+    state.activityTimer = null;
+  }
+}
+
+/* One poll: append what the journal gained since the cursor. A failed poll
+ * never shows the error banner (it would flash once a second); a deleted card
+ * stops the timer, a transient error keeps it so the next tick retries. */
+async function pollActivity() {
+  const id = state.activityCardId;
+  if (!id) return;
+  let gone = false;
+  try {
+    const feed = await api('/api/cards/' + encodeURIComponent(id)
+      + '/activity?cursor=' + state.activityCursor);
+    if (state.activityCardId !== id) return;   // closed or reopened meanwhile
+    state.activityCursor = feed.cursor || 0;
+    const events = feed.events || [];
+    if (events.length) renderActivityEvents(events);
+    updateActivityHeader();
+  } catch (err) {
+    gone = !!(err && err.status === 404);      // the card was deleted
+  }
+  if (state.activityCardId !== id) return;
+  if (!gone && activityIsLive()) {
+    if (!state.activityTimer) {
+      state.activityTimer = setInterval(pollActivity, ACTIVITY_POLL_MS);
+    }
+  } else {
+    stopActivityTimer();
+  }
+}
+
+/* Open the popup for one card (only one at a time). A card that is not live
+ * still shows its last session's activity — one fetch, no polling. */
+function openActivity(cardId, anchor) {
+  closeActivity();
+  state.activityCardId = cardId;
+  state.activityCursor = 0;
+  state.activityAutoScroll = true;
+  activityFeed.textContent = '';
+  activityJump.hidden = true;
+  activityPopup.hidden = false;
+  positionActivityPopup(anchor);
+  updateActivityHeader();
+  return pollActivity();
+}
+
+function closeActivity() {
+  stopActivityTimer();
+  state.activityCardId = null;
+  state.activityCursor = 0;
+  activityPopup.hidden = true;
+}
+
+$('activity-close').addEventListener('click', closeActivity);
+activityJump.addEventListener('click', scrollActivityToLatest);
+activityFeed.addEventListener('scroll', onActivityScroll);
 
 /* ---------------- Diff panel: what the card actually changed ---------------- */
 
@@ -3892,6 +4050,9 @@ function anyOverlayOpen() {
 }
 
 document.addEventListener('keydown', (e) => {
+  // Hold C and click a card: the live activity popup (see buildCard). Tracked
+  // here so the Keys panel and the gesture read the same key.
+  if ((e.key === 'c' || e.key === 'C') && notTyping(e)) state.cKeyDown = true;
   if (e.key === 'Escape') {
     // A live query is cleared first: Esc on a search means "show me the board
     // again", not "close whatever overlay happens to be open".
@@ -3900,10 +4061,12 @@ document.addEventListener('keydown', (e) => {
       clearSearch();
       return;
     }
+    // Modals first (they sit on top), then the floating activity popup.
     if (!diffOverlay.hidden) closeDiff();
     else if (!logOverlay.hidden) closeLog();
     else if (!editorOverlay.hidden) closeEditor();
     else if (!projectsOverlay.hidden) closeProjects();
+    else if (!activityPopup.hidden) closeActivity();
   } else if (e.key === '/' && !anyOverlayOpen() && notTyping(e)) {
     e.preventDefault();
     searchInput.focus();
@@ -3918,6 +4081,14 @@ document.addEventListener('keydown', (e) => {
     openEditor(null).catch(showError);
   }
 });
+
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'c' || e.key === 'C') state.cKeyDown = false;
+});
+
+// Alt-tabbing while C is held must not leave the board stuck in "C is held"
+// mode — the keyup never arrives when the window loses focus.
+window.addEventListener('blur', () => { state.cKeyDown = false; });
 
 /* ---------------- Front-end build check ---------------- */
 
@@ -3944,10 +4115,6 @@ async function checkBuild() {
 renderThemeIndicator(window.VibeTheme ? window.VibeTheme.state : { dark: false, sunrise: null, sunset: null });
 // Land back on the project selected last time in this browser.
 state.selectedProject = loadSelectedProject();
-// Chat mode is a per-browser reading preference: restore it before the first
-// board render so the very first click already behaves the right way.
-state.chatMode = loadChatMode();
-applyChatMode();
 // ...and on the notification choice made in the sidebar's Settings panel.
 state.notificationsEnabled = loadNotificationsEnabled();
 // ...and on the failure filter, so a board narrowed to one reason stays that way.
