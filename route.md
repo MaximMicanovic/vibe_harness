@@ -74,7 +74,12 @@ you write a card (spec)
                worktree, so they cannot run concurrently); a conflicted
                accept hands to a resolver and the batch WAITS for it.
                A card that reaches Done mid-batch is not included — it
-               renders below the button for the next click.
+               renders below the button for the next click. The whole
+               snapshot (read Done, skip queued/resolving, patch
+               accept_queued, start the drain) is ONE critical section
+               under `_accept_lock`, so two simultaneous clicks queue
+               each card once: one call returns the ids, the other
+               returns `{"queued": [], "running": true}`.
   → inspect    GET /api/cards/<id>/diff?range=card|round|worktree    ← free
                (the board's Diff panel: D over a card, or the Diff
                 button) — no LLM tokens, it only reads git

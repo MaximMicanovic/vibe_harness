@@ -1071,22 +1071,30 @@ class SessionRunner:
         click picks it up. Merges are serialized because they all happen in the
         same main worktree, and a conflicted accept hands over to a resolver
         that the batch waits for before starting the next card.
+
+        The whole snapshot — read Done, skip what is already queued or being
+        resolved, patch `accept_queued`, decide whether to start the drain — is
+        ONE critical section under `_accept_lock`. The read and the patch are
+        not atomic on their own: two clients clicking at the same moment would
+        both snapshot the same cards and queue every one of them twice. The
+        second click now finds them already queued and returns an empty batch.
         """
-        queued: list[str] = []
-        for card in self.store.list():
-            if card["status"] != "done":
-                continue
-            session = card.get("session") or {}
-            git_info = session.get("git") or {}
-            if session.get("accept_queued") or git_info.get("resolving"):
-                continue          # already in this batch, or a resolver owns it
-            self.store.patch_session(card["id"], {
-                "accept_queued": True, "accept_queued_at": now_iso(),
-                "accept_error": None})
-            queued.append(card["id"])
-        if queued:
-            self._start_accept_drain()
-        return {"queued": queued, "running": self._accept_draining}
+        with self._accept_lock:
+            queued: list[str] = []
+            for card in self.store.list():
+                if card["status"] != "done":
+                    continue
+                session = card.get("session") or {}
+                git_info = session.get("git") or {}
+                if session.get("accept_queued") or git_info.get("resolving"):
+                    continue      # already in this batch, or a resolver owns it
+                self.store.patch_session(card["id"], {
+                    "accept_queued": True, "accept_queued_at": now_iso(),
+                    "accept_error": None})
+                queued.append(card["id"])
+            if queued:
+                self._start_accept_drain_locked()
+            return {"queued": queued, "running": self._accept_draining}
 
     def _start_accept_drain(self) -> None:
         """Start the batch drain unless one is already running.
@@ -1096,11 +1104,20 @@ class SessionRunner:
         queued behind a repo that just freed is never left waiting.
         """
         with self._accept_lock:
-            if self._accept_draining:
-                self._accept_drain_wakeup = True
-                return
-            self._accept_draining = True
-            self._accept_drain_wakeup = False
+            self._start_accept_drain_locked()
+
+    def _start_accept_drain_locked(self) -> None:
+        """`_start_accept_drain` with `_accept_lock` already held.
+
+        `accept_all` decides whether to start the drain inside its snapshot
+        critical section, so the flag it reports and the thread it starts
+        cannot race a second click.
+        """
+        if self._accept_draining:
+            self._accept_drain_wakeup = True
+            return
+        self._accept_draining = True
+        self._accept_drain_wakeup = False
         threading.Thread(target=self._drain_accepts, daemon=True).start()
 
     def _next_accept_queued(self, skip: set[str] | None = None) -> dict | None:

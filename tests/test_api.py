@@ -5,6 +5,7 @@ import contextlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -372,6 +373,63 @@ def test_accept_all_skips_cards_already_queued(env):
     assert second.status_code == 200
     assert second.json()["queued"] == []
     assert _wait_accepted(env, ids) == ["accepted"] * 2
+
+
+def test_accept_all_queues_each_card_once_under_two_simultaneous_clicks(env, monkeypatch):
+    """Two clients clicking Accept all at the same moment queue each Done card
+    exactly once (card 317592).
+
+    The snapshot — read the Done column, skip what is already queued or being
+    resolved, patch `accept_queued` — must be one critical section. Without it
+    both clicks read the same Done column and both queue every card, so the
+    second pass re-accepts cards the first one already shipped.
+    """
+    ids = [_make_done(env, f"Race {i}") for i in range(3)]
+
+    # Widen the snapshot window: a click that read the Done column sleeps
+    # before it patches, so two unlocked clicks are guaranteed to overlap.
+    real_list = env.store.list
+
+    def slow_list():
+        cards = real_list()
+        time.sleep(0.2)
+        return cards
+
+    monkeypatch.setattr(env.store, "list", slow_list)
+
+    # Hold the drain on its first card: the batch is still running when the
+    # second click returns, so `running` is deterministic.
+    release = threading.Event()
+    real_accept = env.runner.accept_card
+
+    def blocked_accept(card_id):
+        assert release.wait(10), "the drain was never released"
+        return real_accept(card_id)
+
+    monkeypatch.setattr(env.runner, "accept_card", blocked_accept)
+
+    start = threading.Barrier(2)
+    results: list[dict] = []
+
+    def click():
+        start.wait(10)
+        results.append(env.client.post("/api/cards/accept-all").json())
+
+    threads = [threading.Thread(target=click) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+    assert not any(thread.is_alive() for thread in threads)
+
+    # Exactly one click queued the batch; the other was a no-op that saw the
+    # batch already running.
+    assert sorted(sorted(r["queued"]) for r in results) == [[], sorted(ids)]
+    noop = next(r for r in results if r["queued"] == [])
+    assert noop["running"] is True
+
+    release.set()
+    assert _wait_accepted(env, ids) == ["accepted"] * 3
 
 
 def test_accept_all_leaves_a_failing_card_in_done(env):
