@@ -178,7 +178,7 @@ vm.createContext(sandbox);
 
 const src = fs.readFileSync(APP_JS, 'utf8');
 vm.runInContext(src + '\n;globalThis.__x = { state, renderActivityEvents, activityEventRow, '
-  + 'openActivity, closeActivity, pollActivity, positionActivityPopup, '
+  + 'openActivity, closeActivity, pollActivity, positionFloatingPanel, '
   + 'scrollActivityToLatest, buildCard, closeEditor, KEYBINDINGS, SIDEBAR_PANELS, '
   + 'ACTIVITY_WIDTH, ACTIVITY_HEIGHT };', sandbox, { filename: 'app.js' });
 const X = sandbox.__x;
@@ -198,7 +198,7 @@ function setBoard(cards) {
 
 /* The real page ships every modal with the `hidden` attribute; the stub
  * creates elements visible, so hide them here (Esc must reach the popup). */
-for (const id of ['editor-overlay', 'log-overlay', 'diff-overlay', 'projects-overlay']) {
+for (const id of ['editor-overlay', 'log-overlay', 'diff-popup', 'projects-overlay']) {
   getEl(id).hidden = true;
 }
 

@@ -22,10 +22,10 @@ Vibe Harness puts the agent behind a board:
 - **Nothing ships unreviewed.** A separate reviewer session inspects the diff
   and runs the test suite itself. A card cannot be accepted without an approval,
   and cannot be merged with red tests.
-- **You can see what changed.** Hover a card and press **D**: the diff the
-  reviewer judged, with its verdict, reason, model and token count next to it —
-  and the same diff still readable after accept, because the card branch and its
-  worktree are kept.
+- **You can see what changed.** Hold **D** and click a card: the diff the
+  reviewer judged opens in a floating popup, with its verdict, reason, model and
+  token count next to it — and the same diff still readable after accept,
+  because the card branch and its worktree are kept.
 - **Isolation by default.** Every card runs on `harness/<card-id>` in a linked
   git worktree, so several cards in one repository run concurrently and your
   working copy stays on your branch.

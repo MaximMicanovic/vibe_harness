@@ -17,8 +17,8 @@ const COLUMNS = [
  * drift from the handlers. */
 const KEYBINDINGS = [
   { key: 'N', label: 'New card', hint: 'opens the card editor' },
-  { key: 'Esc', label: 'Close overlay', hint: 'clears a live search first, else closes the open panel or modal' },
-  { key: 'D', label: 'Diff', hint: 'hover a card and press D to see what it changed' },
+  { key: 'Esc', label: 'Close panel', hint: 'clears a live search first, else closes the open popup or modal' },
+  { key: 'D + click', label: 'Diff', hint: 'hold D and click a card to see what it changed' },
   { key: 'C + click', label: 'Live activity', hint: 'hold C and click a card to watch the model work' },
   { key: '/', label: 'Search', hint: 'focuses the search box — it searches the board and the archives' },
 ];
@@ -55,8 +55,7 @@ const state = {
   archiveProjects: new Map(),  // archive id -> its project groups (GET /api/archives/<id>), cached for the sidebar
   models: null,          // GET /api/models: { roles, models, default_model }
   settings: null,        // GET /api/settings: { backend, backends, failure_kinds, … }
-  hoverCardId: null,     // card under the pointer — D opens its diff
-  diffCardId: null,      // card whose diff panel is open
+  diffCardId: null,      // card whose diff popup is open
   diffRange: 'card',     // 'card' | 'round' | 'worktree'
   prevStatuses: null,    // Map cardId -> status from the previous refresh (null = first load)
   notificationsEnabled: true,  // sidebar Settings toggle, persisted in localStorage
@@ -65,6 +64,7 @@ const state = {
   activityTimer: null,   // 1s activity poll, active while the popup's card is live
   activityAutoScroll: true,  // false once the user scrolls the feed up
   cKeyDown: false,       // C is held: a card click opens the activity popup
+  dKeyDown: false,       // D is held: a card click opens the diff popup
   unreadNotifications: 0,      // finishes announced while the tab was hidden (title badge)
   searchQuery: '',       // the live query in the top bar ('' = no search)
   searchResults: [],     // GET /api/search hits: board cards + archived cards
@@ -215,7 +215,8 @@ const activityTokens = $('activity-tokens');
 const activityFeed = $('activity-feed');
 const activityJump = $('activity-jump');
 
-const diffOverlay = $('diff-overlay');
+const diffPopup = $('diff-popup');
+const diffPopupHead = $('diff-popup-head');
 const diffHeading = $('diff-heading');
 const diffRanges = $('diff-ranges');
 const diffVerdict = $('diff-verdict');
@@ -839,10 +840,11 @@ function buildCard(cardData, queuePos) {
   if (chips.childNodes.length > 0) card.appendChild(chips);
 
   card.addEventListener('click', () => {
-    // Hold C and click a card to watch the model work: a small floating
-    // activity popup, not a mode you have to remember you are in. A plain
-    // click still opens the editor.
-    if (state.cKeyDown) openActivity(cardData.id, card);
+    // Hold a letter and click a card: D opens its diff, C watches the model
+    // work — both small floating popups, not a mode you have to remember you
+    // are in. A plain click still opens the editor.
+    if (state.dKeyDown) openDiff(cardData.id, null, card).catch(showError);
+    else if (state.cKeyDown) openActivity(cardData.id, card);
     else openEditor(cardData.id).catch(showError);
   });
 
@@ -3600,7 +3602,11 @@ btnLog.addEventListener('click', () => {
 });
 
 btnDiff.addEventListener('click', () => {
-  if (state.editorCardId) openDiff(state.editorCardId).catch(showError);
+  // The diff is a board-level popup, so the editor modal gets out of its way.
+  if (!state.editorCardId) return;
+  const cardId = state.editorCardId;
+  closeEditor();
+  openDiff(cardId).catch(showError);
 });
 
 $('editor-close').addEventListener('click', closeEditor);
@@ -3654,6 +3660,63 @@ function closeLog() {
 $('log-close').addEventListener('click', closeLog);
 logOverlay.addEventListener('click', (e) => { if (e.target === logOverlay) closeLog(); });
 
+/* ---------------- Floating panels (hold a key + click a card) ---------------- */
+
+/* Both popups are the same idea: a small panel pinned next to the clicked
+ * card, clamped to the viewport, never a full-screen overlay. */
+
+const PANEL_GAP = 12;   // distance from the card and the viewport edge
+
+/* Place a panel next to the clicked card, clamped to the viewport: to its
+ * right when there is room, else to its left. */
+function positionFloatingPanel(panel, anchor, width, height) {
+  const vw = window.innerWidth || 1280;
+  const vh = window.innerHeight || 800;
+  const w = Math.min(width, vw - 2 * PANEL_GAP);
+  const h = Math.min(height, vh - 2 * PANEL_GAP);
+  let left = PANEL_GAP;
+  let top = PANEL_GAP;
+  if (anchor && typeof anchor.getBoundingClientRect === 'function') {
+    const rect = anchor.getBoundingClientRect();
+    left = rect.right + PANEL_GAP;
+    if (left + w > vw - PANEL_GAP) left = rect.left - w - PANEL_GAP;
+    top = rect.top;
+  }
+  left = Math.max(PANEL_GAP, Math.min(left, vw - w - PANEL_GAP));
+  top = Math.max(PANEL_GAP, Math.min(top, vh - h - PANEL_GAP));
+  panel.style.left = left + 'px';
+  panel.style.top = top + 'px';
+  panel.style.width = w + 'px';
+  panel.style.height = h + 'px';
+}
+
+/* Drag a panel by its header: pointerdown on the header (but not on a button
+ * in it) moves the panel with the pointer. Nothing is remembered across
+ * reloads — the next open positions the panel next to its card again. */
+function makePanelDraggable(panel, handle) {
+  let drag = null;
+  handle.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('button')) return;
+    drag = {
+      x: e.clientX,
+      y: e.clientY,
+      left: parseFloat(panel.style.left) || 0,
+      top: parseFloat(panel.style.top) || 0,
+    };
+    if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  handle.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    panel.style.left = (drag.left + e.clientX - drag.x) + 'px';
+    panel.style.top = (drag.top + e.clientY - drag.y) + 'px';
+  });
+  const stop = () => { drag = null; };
+  handle.addEventListener('pointerup', stop);
+  handle.addEventListener('pointercancel', stop);
+}
+
 /* ---------------- Live activity popup (hold C + click a card) ---------------- */
 
 /* A small floating panel that shows what the model is doing RIGHT NOW. The
@@ -3664,7 +3727,6 @@ logOverlay.addEventListener('click', (e) => { if (e.target === logOverlay) close
 
 const ACTIVITY_WIDTH = 420;
 const ACTIVITY_HEIGHT = 520;
-const ACTIVITY_GAP = 12;        // distance from the card and the viewport edge
 const ACTIVITY_POLL_MS = 1000;
 const ACTIVITY_STICK_PX = 24;   // "at the bottom" tolerance for auto-scroll
 
@@ -3763,29 +3825,6 @@ function updateActivityHeader() {
       + tokenTypesSuffix(session.live_token_breakdown || session.card_token_breakdown);
 }
 
-/* Place the panel next to the clicked card, clamped to the viewport: to its
- * right when there is room, else to its left. */
-function positionActivityPopup(anchor) {
-  const vw = window.innerWidth || 1280;
-  const vh = window.innerHeight || 800;
-  const width = Math.min(ACTIVITY_WIDTH, vw - 2 * ACTIVITY_GAP);
-  const height = Math.min(ACTIVITY_HEIGHT, vh - 2 * ACTIVITY_GAP);
-  let left = ACTIVITY_GAP;
-  let top = ACTIVITY_GAP;
-  if (anchor && typeof anchor.getBoundingClientRect === 'function') {
-    const rect = anchor.getBoundingClientRect();
-    left = rect.right + ACTIVITY_GAP;
-    if (left + width > vw - ACTIVITY_GAP) left = rect.left - width - ACTIVITY_GAP;
-    top = rect.top;
-  }
-  left = Math.max(ACTIVITY_GAP, Math.min(left, vw - width - ACTIVITY_GAP));
-  top = Math.max(ACTIVITY_GAP, Math.min(top, vh - height - ACTIVITY_GAP));
-  activityPopup.style.left = left + 'px';
-  activityPopup.style.top = top + 'px';
-  activityPopup.style.width = width + 'px';
-  activityPopup.style.height = height + 'px';
-}
-
 function stopActivityTimer() {
   if (state.activityTimer) {
     clearInterval(state.activityTimer);
@@ -3824,6 +3863,7 @@ async function pollActivity() {
 /* Open the popup for one card (only one at a time). A card that is not live
  * still shows its last session's activity — one fetch, no polling. */
 function openActivity(cardId, anchor) {
+  closeDiff();          // one popup at a time
   closeActivity();
   state.activityCardId = cardId;
   state.activityCursor = 0;
@@ -3831,7 +3871,7 @@ function openActivity(cardId, anchor) {
   activityFeed.textContent = '';
   activityJump.hidden = true;
   activityPopup.hidden = false;
-  positionActivityPopup(anchor);
+  positionFloatingPanel(activityPopup, anchor, ACTIVITY_WIDTH, ACTIVITY_HEIGHT);
   updateActivityHeader();
   return pollActivity();
 }
@@ -3847,7 +3887,12 @@ $('activity-close').addEventListener('click', closeActivity);
 activityJump.addEventListener('click', scrollActivityToLatest);
 activityFeed.addEventListener('scroll', onActivityScroll);
 
-/* ---------------- Diff panel: what the card actually changed ---------------- */
+/* ---------------- Diff popup: what the card actually changed ---------------- */
+
+/* A diff needs room, so the panel is wider than the activity popup — still a
+ * floating panel, not an overlay: the board stays usable behind it. */
+const DIFF_WIDTH = 720;
+const DIFF_HEIGHT = 640;
 
 /* The three ranges the server knows (GET /api/cards/<id>/diff?range=…). */
 const DIFF_RANGES = [
@@ -3982,40 +4027,28 @@ async function loadDiff() {
   renderDiff(data);
 }
 
-async function openDiff(cardId, range) {
+/* Open the popup for one card (only one popup at a time: the activity popup
+ * closes). `anchor` is the clicked card, so the panel opens next to it. */
+async function openDiff(cardId, range, anchor) {
   if (!cardId) return;
+  closeActivity();
   state.diffCardId = cardId;
   if (range) state.diffRange = range;
   const card = state.cards.find((n) => n.id === cardId);
   diffHeading.textContent = 'Diff — ' + (card ? card.title : cardId);
-  diffOverlay.hidden = false;
+  diffPopup.hidden = false;
+  positionFloatingPanel(diffPopup, anchor, DIFF_WIDTH, DIFF_HEIGHT);
   renderDiffRanges();
   await loadDiff();
 }
 
 function closeDiff() {
   state.diffCardId = null;
-  diffOverlay.hidden = true;
+  diffPopup.hidden = true;
 }
 
 $('diff-close').addEventListener('click', closeDiff);
-diffOverlay.addEventListener('click', (e) => { if (e.target === diffOverlay) closeDiff(); });
-
-/* The card under the pointer, so D can open ITS diff. Tracked on the board
- * (mouseover bubbles) instead of relying on :hover, which a stack of
- * overlapping cards makes ambiguous. */
-const boardEl = $('board');
-boardEl.addEventListener('mouseover', (e) => {
-  const card = e.target && e.target.closest ? e.target.closest('.card') : null;
-  state.hoverCardId = card ? card.dataset.cardId : null;
-});
-boardEl.addEventListener('mouseleave', () => { state.hoverCardId = null; });
-
-function hoveredCardId() {
-  if (state.hoverCardId) return state.hoverCardId;
-  const card = document.querySelector('.card:hover');
-  return card ? card.dataset.cardId : null;
-}
+makePanelDraggable(diffPopup, diffPopupHead);
 
 /* ------------- Theme indicator (automatic dark mode, sun-based) ------------- */
 
@@ -4056,14 +4089,15 @@ function notTyping(e) {
 /* The keys handled here are the ones listed in KEYBINDINGS (see the Keys
  * panel) — keep the two in step. */
 function anyOverlayOpen() {
-  return !editorOverlay.hidden || !logOverlay.hidden || !projectsOverlay.hidden
-    || !diffOverlay.hidden;
+  return !editorOverlay.hidden || !logOverlay.hidden || !projectsOverlay.hidden;
 }
 
 document.addEventListener('keydown', (e) => {
-  // Hold C and click a card: the live activity popup (see buildCard). Tracked
-  // here so the Keys panel and the gesture read the same key.
+  // Hold a letter and click a card: D opens its diff, C the live activity
+  // popup (see buildCard). Tracked here so the Keys panel and the gesture
+  // read the same key.
   if ((e.key === 'c' || e.key === 'C') && notTyping(e)) state.cKeyDown = true;
+  if ((e.key === 'd' || e.key === 'D') && notTyping(e)) state.dKeyDown = true;
   if (e.key === 'Escape') {
     // A live query is cleared first: Esc on a search means "show me the board
     // again", not "close whatever overlay happens to be open".
@@ -4072,22 +4106,15 @@ document.addEventListener('keydown', (e) => {
       clearSearch();
       return;
     }
-    // Modals first (they sit on top), then the floating activity popup.
-    if (!diffOverlay.hidden) closeDiff();
-    else if (!logOverlay.hidden) closeLog();
+    // Modals first (they sit on top), then the floating popups.
+    if (!logOverlay.hidden) closeLog();
     else if (!editorOverlay.hidden) closeEditor();
     else if (!projectsOverlay.hidden) closeProjects();
+    else if (!diffPopup.hidden) closeDiff();
     else if (!activityPopup.hidden) closeActivity();
   } else if (e.key === '/' && !anyOverlayOpen() && notTyping(e)) {
     e.preventDefault();
     searchInput.focus();
-  } else if ((e.key === 'd' || e.key === 'D') && !anyOverlayOpen() && notTyping(e)) {
-    // D over a card: what that card actually changed.
-    const cardId = hoveredCardId();
-    if (cardId) {
-      e.preventDefault();
-      openDiff(cardId).catch(showError);
-    }
   } else if ((e.key === 'n' || e.key === 'N') && !anyOverlayOpen() && notTyping(e)) {
     openEditor(null).catch(showError);
   }
@@ -4095,11 +4122,16 @@ document.addEventListener('keydown', (e) => {
 
 document.addEventListener('keyup', (e) => {
   if (e.key === 'c' || e.key === 'C') state.cKeyDown = false;
+  if (e.key === 'd' || e.key === 'D') state.dKeyDown = false;
 });
 
-// Alt-tabbing while C is held must not leave the board stuck in "C is held"
-// mode — the keyup never arrives when the window loses focus.
-window.addEventListener('blur', () => { state.cKeyDown = false; });
+// Alt-tabbing while a letter is held must not leave the board stuck in
+// "a letter is held" mode — the keyup never arrives when the window loses
+// focus.
+window.addEventListener('blur', () => {
+  state.cKeyDown = false;
+  state.dKeyDown = false;
+});
 
 /* ---------------- Front-end build check ---------------- */
 

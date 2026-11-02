@@ -1,4 +1,4 @@
-"""What a card actually changed — the diff behind the board's Diff panel.
+"""What a card actually changed — the diff behind the board's Diff popup.
 
 A reviewer session approves a change the user never sees; this module is what
 makes it inspectable. Three ranges, all read from the card's git session

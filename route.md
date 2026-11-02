@@ -83,8 +83,8 @@ you write a card (spec)
                each card once: one call returns the ids, the other
                returns `{"queued": [], "running": true}`.
   → inspect    GET /api/cards/<id>/diff?range=card|round|worktree    ← free
-               (the board's Diff panel: D over a card, or the Diff
-                button) — no LLM tokens, it only reads git
+               (the board's Diff popup: hold D and click a card, or
+                the Diff button) — no LLM tokens, it only reads git
   → revert     POST /api/cards/<id>/revert (or the MCP revert_card)  ← free
                `git revert` the card's merge commit in the project
                folder, then accepted -> draft with the session kept;
@@ -393,7 +393,7 @@ The cheapest token is the one never spent:
   cards/agents to find your expensive routes.
 - **Per-round verdicts:** `session.reviews` keeps every round's record
   (`{approved, reason, round, tokens, model, log, export_dir, via, commit}`);
-  `session.review` is the last one. The Diff panel's `round` range reads them,
+  `session.review` is the last one. The Diff popup's `round` range reads them,
   so you can see what each review round actually judged — and what it cost —
   without re-running anything. Round 1 has no previous round, so it starts at
   the merge-base of the card branch and its base (never the base tip, which

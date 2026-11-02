@@ -1,11 +1,13 @@
-"""Behavior tests for the diff panel and the Keys panel (card b4e872).
+"""Behavior tests for the diff popup and the Keys panel (cards b4e872, 6b29b4).
 
 The panel logic lives in the served front-end `app/static/app.js`, so the
 reproducer boots the *served* app.js under Node with a minimal DOM stub
 (`tests/diff_panel_check.js`) and checks that a diff renders line by line with
 the right classifier, that every line is a TEXT NODE (the content is
-model-written — never innerHTML), that the verdict sits next to the diff, and
-that the Keys panel lists N, Esc and D from the one KEYBINDINGS list.
+model-written — never innerHTML), that the verdict sits next to the diff, that
+the panel floats next to the clicked card instead of covering the board, that
+D + click opens it while a plain click still opens the editor, and that the
+Keys panel lists N, Esc, D + click and C + click from the one KEYBINDINGS list.
 """
 from __future__ import annotations
 
@@ -66,5 +68,49 @@ def test_diff_panel_check_covers_the_spec(env):
     """Guard against the reproducer silently checking nothing."""
     source = HARNESS_JS.read_text()
     for needle in ("classifyDiffLine", "TEXT NODE", "KEYBINDINGS",
-                   "scrolledIntoView", "not git-backed"):
+                   "scrolledIntoView", "not git-backed", "D + click",
+                   "diff-popup", "pointermove", "hoverCardId"):
         assert needle in source, needle
+
+
+def test_diff_popup_markup_is_a_floating_panel(env):
+    """The diff is its own small panel — not an .overlay modal."""
+    html = env.client.get("/").text
+    assert 'id="diff-popup"' in html
+    assert 'id="diff-popup-head"' in html
+    assert 'id="diff-ranges"' in html
+    assert 'id="diff-verdict"' in html
+    assert 'id="diff-files"' in html
+    assert 'id="diff-body"' in html
+    assert 'id="diff-close"' in html
+    # It is not wrapped in the full-screen overlay the modals use.
+    popup_at = html.index('id="diff-popup"')
+    assert 'class="overlay"' not in html[popup_at - 200:popup_at]
+    # ...and the old full-screen diff modal is gone.
+    assert 'id="diff-overlay"' not in html
+    assert "diff-modal" not in html
+
+
+def test_hover_then_press_d_gesture_is_gone(env):
+    """D is a held modifier now: no hover tracking, no bare-D keydown branch."""
+    js = env.client.get("/app.js").text
+    for gone in ("hoverCardId", "hoveredCardId"):
+        assert gone not in js, gone
+    # The board no longer tracks the card under the pointer.
+    assert "boardEl.addEventListener('mouseover'" not in js
+    assert "const boardEl = $('board')" not in js
+    # D is tracked as a held key, like C.
+    assert "dKeyDown" in js
+    assert "cKeyDown" in js
+
+
+def test_diff_popup_styles_are_floating(env):
+    css = env.client.get("/style.css").text
+    assert ".diff-popup" in css
+    block = css[css.index(".diff-popup {"):]
+    block = block[: block.index("}")]
+    assert "position: fixed" in block
+    assert "720px" in block
+    assert "640px" in block
+    # The old full-screen modal sizing is gone.
+    assert ".diff-modal" not in css
