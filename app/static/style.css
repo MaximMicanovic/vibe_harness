@@ -2022,3 +2022,46 @@ body.chat-mode .card { cursor: pointer; }
  * middle of the card would otherwise swallow the click (it stops
  * propagation), so it goes inert while reading. */
 body.chat-mode .card-model { pointer-events: none; }
+
+/* ---------------- Heartbeat: how fresh is this board? ---------------- */
+
+.heartbeat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+
+.heartbeat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
+}
+
+.heartbeat[data-state="live"] { color: var(--ok-ink); border-color: var(--ok-border); background: var(--ok-soft); }
+.heartbeat[data-state="live"] .heartbeat-dot { background: var(--ok-ink); }
+
+/* Stale: the board is probably wrong but not certainly. */
+.heartbeat[data-state="stale"] { color: var(--hint-ink); border-color: var(--q-border); background: var(--q-bg); }
+.heartbeat[data-state="stale"] .heartbeat-dot { background: var(--q-border); }
+
+/* Out of date / offline: do not trust what is on screen. */
+.heartbeat[data-state="cold"],
+.heartbeat[data-state="offline"] {
+  color: var(--error-ink);
+  border-color: var(--error-border);
+  background: var(--error-bg);
+  font-weight: 600;
+}
+.heartbeat[data-state="cold"] .heartbeat-dot,
+.heartbeat[data-state="offline"] .heartbeat-dot { background: var(--error-border); }

@@ -30,6 +30,10 @@
     <button id="manage-projects-btn" class="btn" title="Add or remove projects">＋ Project</button>
     <button id="archives-btn" class="btn" title="The archive: a folder per archive (archives/) holding archived cards and projects">📦 Archives</button>
     <button id="restart-server-btn" class="btn" title="Hard-restart the dashboard server (picks up code changes)">⟳ Restart</button>
+    <button class="heartbeat" id="heartbeat" type="button" data-state="waiting"
+            title="How fresh this board is — click to refresh now">
+      <span class="heartbeat-dot"></span><span class="heartbeat-label">connecting…</span>
+    </button>
     <div class="stats" id="stats-bar">
       <span class="stat-tokens" id="stat-tokens-wrap" title="">Tokens <b id="stat-tokens">0</b><span class="stat-tok-types" id="stat-tok-types"></span></span>
       <span class="stat">Runtime <b id="stat-runtime">0s</b></span>

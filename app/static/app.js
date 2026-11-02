@@ -25,7 +25,10 @@ const KEYBINDINGS = [
 const state = {
   cards: [],
   stats: null,
-  pollTimer: null,      // 2s cards+stats poll, active only while a card is live (running/reviewing/resolving/queued)
+  pollTimer: null,      // cards+stats poll: 2s while a card is live, 10s when idle
+  pollIntervalMs: 0,    // the interval state.pollTimer is currently running at
+  lastPollAt: null,     // Date.now() of the last SUCCESSFUL refresh (drives the heartbeat)
+  pollError: null,      // message from the last failed refresh, null when healthy
   buildVersion: null,   // server fingerprint of the front-end assets (see checkBuild)
   logTimer: null,       // 2s log refresh, active while the viewed card is running
   logCardId: null,
@@ -3149,19 +3152,86 @@ function setNotificationsEnabled(on) {
   updateTitleBadge();
 }
 
+/* ---------------- Heartbeat: is this board still telling the truth? ---------------- */
+
+/* A board is only as honest as its last successful poll. Browsers throttle
+ * timers in background tabs (sometimes to once a minute), and the poll used to
+ * stop entirely when nothing was live — so a tab could sit for minutes showing
+ * cards that had already finished, with nothing on screen saying so. The
+ * heartbeat shows the age of the data and turns amber, then red, when the board
+ * can no longer be trusted. Clicking it refreshes immediately. */
+
+const HEARTBEAT_LIVE_MS = 10000;    // under this the board is current
+const HEARTBEAT_STALE_MS = 60000;   // over this it is definitely wrong
+
+function heartbeatState() {
+  if (state.pollError) return 'offline';
+  if (state.lastPollAt === null) return 'waiting';
+  const age = Date.now() - state.lastPollAt;
+  if (age < HEARTBEAT_LIVE_MS) return 'live';
+  if (age < HEARTBEAT_STALE_MS) return 'stale';
+  return 'cold';
+}
+
+function formatAge(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h';
+}
+
+function renderHeartbeat() {
+  const node = $('heartbeat');
+  if (!node) return;
+  const kind = heartbeatState();
+  const age = state.lastPollAt === null ? null : Date.now() - state.lastPollAt;
+  node.dataset.state = kind;
+  const label = node.querySelector('.heartbeat-label');
+  if (label) {
+    label.textContent = kind === 'offline' ? 'offline'
+      : kind === 'waiting' ? 'connecting…'
+      : kind === 'live' ? 'live'
+      : (kind === 'stale' ? 'stale · ' : 'out of date · ') + formatAge(age);
+  }
+  node.title = state.pollError
+    ? 'The last refresh failed: ' + state.pollError + ' — click to retry'
+    : age === null
+      ? 'Waiting for the first refresh'
+      : 'Last update ' + formatAge(age) + ' ago — click to refresh now';
+}
+
+$('heartbeat').addEventListener('click', () => { refresh(); });
+
+/* The label ages even when no poll is due, so a throttled background tab shows
+ * its staleness the moment it is looked at again. */
+setInterval(renderHeartbeat, 1000);
+
+/* Coming back to the tab: refresh at once instead of waiting for the next tick
+ * (a background tab's timers may have been throttled for minutes). */
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refresh();
+});
+
 /* ---------------- Polling ---------------- */
 
 function anyLive() {
   return state.cards.some((n) => n.status === 'running' || n.status === 'reviewing' || isResolving(n) || isQueued(n));
 }
 
+/* The board used to stop polling entirely when nothing was live, so an idle tab
+ * never noticed a card finishing, an accept, or a change made from another
+ * window — it just kept showing whatever it had. Poll slowly when idle instead
+ * of not at all; the heartbeat below makes the age of the data visible. */
+const LIVE_POLL_MS = 2000;
+const IDLE_POLL_MS = 10000;
+
 function updatePolling() {
-  if (anyLive() && !state.pollTimer) {
-    state.pollTimer = setInterval(refresh, 2000);
-  } else if (!anyLive() && state.pollTimer) {
-    clearInterval(state.pollTimer);
-    state.pollTimer = null;
-  }
+  const want = anyLive() ? LIVE_POLL_MS : IDLE_POLL_MS;
+  if (state.pollTimer && state.pollIntervalMs === want) return;
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollIntervalMs = want;
+  state.pollTimer = setInterval(refresh, want);
 }
 
 async function refresh() {
@@ -3173,11 +3243,16 @@ async function refresh() {
     state.cards = results[0];
     state.stats = results[1];
     state.stacks = Array.isArray(results[2]) ? results[2] : [];
+    state.lastPollAt = Date.now();
+    state.pollError = null;
     announceFinished(diffCardStatuses(state.cards));
     renderStats();
     renderBoard();
+    renderHeartbeat();
     updatePolling();
   } catch (err) {
+    state.pollError = err && err.message ? err.message : String(err);
+    renderHeartbeat();
     showError(err);
   }
 }
