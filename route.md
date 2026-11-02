@@ -155,7 +155,10 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   concludes or fails. The resolver's commit is only recorded as the card's
   `merge_commit` when the card branch is an ancestor of HEAD
   (`git merge-base --is-ancestor`); otherwise the card stays done with a
-  `merge_error` instead of being accepted with another card's commit.
+  `merge_error` instead of being accepted with another card's commit. A
+  failed resolver drops the card out of the accept queue (no automatic
+  retry — that would spawn resolver after resolver); a card accepted by its
+  resolver is cleared of `accept_queued` / `queue_reason`.
 - **Loop cap.** Rejections (review or test) loop through a fixer, capped at
   `VIBE_HARNESS_MAX_REVIEW_ROUNDS` (default 5). After the cap the card lands in
   Done unapproved (`review.exhausted`) and *you* decide — no more paid rounds.

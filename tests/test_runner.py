@@ -1171,7 +1171,8 @@ def test_git_resolver_failure_leaves_card_done(store, tmp_path, fake_vibe, proje
 FAKE_VIBE_OWN_FILE = """#!/bin/sh
 # Fake vibe that writes $FAKE_FILE (default hello.txt) into --workdir, so two
 # cards in one repo can produce non-conflicting merges. A resolve-* round
-# blocks until $GO_FILE exists, then concludes the in-progress merge.
+# blocks until $GO_FILE exists, then concludes the in-progress merge;
+# FAKE_RESOLVE=fail makes it exit 1 instead (a resolver that gives up).
 WORKDIR=""
 OUTDIR=""
 AGENT=""
@@ -1186,6 +1187,9 @@ done
 round_dir=$(basename "$(dirname "$OUTDIR")")
 case "$round_dir" in
   resolve-*)
+    case "$FAKE_RESOLVE" in
+      fail) echo "fake resolver failing"; exit 1 ;;
+    esac
     while [ ! -f "$GO_FILE" ]; do sleep 0.05; done
     git add -A
     git commit -q -m "resolver: conclude merge"
@@ -1264,7 +1268,9 @@ def test_second_accept_same_repo_queues_then_merges_automatically(
     # The queued accept is picked up by the drain: no second click needed.
     final = _wait_for_status(store, second["id"], "accepted", timeout=15)
     assert final["session"]["git"]["merged"] is True
-    assert final["session"]["accept_queued"] is False
+    # The queue flags are cleared right after the accept completes.
+    final = _wait_for_flag(store, second["id"],
+                           lambda n: (n["session"] or {}).get("accept_queued"), False)
     assert final["session"]["queue_reason"] is None
 
 
@@ -1359,6 +1365,84 @@ def test_queued_accept_in_a_free_repo_does_not_wait_for_a_busy_one(
     assert accepted["status"] == "accepted"
     final = _wait_for_status(store, second["id"], "accepted", timeout=15)
     assert final["session"]["git"]["merged"] is True
+
+
+@git_test
+def test_failed_resolver_is_not_retried_in_a_loop(store, tmp_path, projects,
+                                                  monkeypatch):
+    """A queued accept whose conflict resolver FAILS leaves the accept queue:
+    it is not re-queued and re-resolved over and over (unbounded token burn)."""
+    monkeypatch.setenv("FAKE_RESOLVE", "fail")
+    runner = _own_file_runner(store, tmp_path, projects, monkeypatch)
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    gitops.ensure_repo(proj)
+    (proj / "hello.txt").write_text("base version\n")
+    _git(["add", "-A"], proj)
+    _git(["commit", "-q", "-m", "base hello.txt"], proj)
+    card = store.create("Conflict card", "Write a hello file.", project="my-app")
+    runner.run(card["id"])
+    _wait_for_status(store, card["id"], "done")
+    # The user edits the same file on the base branch: the accept conflicts.
+    (proj / "hello.txt").write_text("user edit\n")
+    _git(["add", "hello.txt"], proj)
+    _git(["commit", "-q", "-m", "user edit"], proj)
+
+    store.patch_session(card["id"], {
+        "accept_queued": True, "accept_queued_at": "2024-01-01T00:00:00+00:00",
+        "queue_reason": f"waiting for the merge in {proj.resolve()} to finish"})
+    runner._start_accept_drain()
+
+    sdir = runner.sessions_dir / card["id"]
+    deadline = time.time() + 10
+    while time.time() < deadline and not list(sdir.glob("resolve-*")):
+        time.sleep(0.05)
+    assert list(sdir.glob("resolve-*")), "no resolver session was spawned"
+    time.sleep(2.0)          # give a re-queue loop time to spin
+
+    assert sorted(p.name for p in sdir.glob("resolve-*")) == ["resolve-1"]
+    final = store.get(card["id"])
+    assert final["status"] == "done"               # left for a deliberate retry
+    assert final["session"]["git"]["merge_conflict"] is True
+    assert final["session"]["accept_queued"] is False
+    assert final["session"]["queue_reason"] is None
+
+
+@git_test
+def test_queued_accept_that_conflicts_then_resolves_clears_the_queue_flags(
+        store, tmp_path, projects, monkeypatch):
+    """A queued accept that hits a conflict and is finished by its resolver
+    must not stay flagged accept_queued / queue_reason after it is accepted."""
+    runner = _own_file_runner(store, tmp_path, projects, monkeypatch)
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    gitops.ensure_repo(proj)
+    (proj / "hello.txt").write_text("base version\n")
+    _git(["add", "-A"], proj)
+    _git(["commit", "-q", "-m", "base hello.txt"], proj)
+    card = store.create("Conflict card", "Write a hello file.", project="my-app")
+    runner.run(card["id"])
+    _wait_for_status(store, card["id"], "done")
+    (proj / "hello.txt").write_text("user edit\n")
+    _git(["add", "hello.txt"], proj)
+    _git(["commit", "-q", "-m", "user edit"], proj)
+
+    store.patch_session(card["id"], {
+        "accept_queued": True, "accept_queued_at": "2024-01-01T00:00:00+00:00",
+        "queue_reason": f"waiting for the merge in {proj.resolve()} to finish"})
+    runner._start_accept_drain()
+    _wait_for_flag(store, card["id"],
+                   lambda n: (n["session"]["git"] or {}).get("resolving"), True)
+
+    (tmp_path / "go").write_text("go\n")           # the resolver concludes the merge
+    final = _wait_for_status(store, card["id"], "accepted", timeout=20)
+    assert final["session"]["git"]["merged"] is True
+    # The queue flags are cleared right after the accept completes.
+    final = _wait_for_flag(store, card["id"],
+                           lambda n: (n["session"] or {}).get("accept_queued"), False)
+    assert final["session"]["queue_reason"] is None
 
 
 @git_test

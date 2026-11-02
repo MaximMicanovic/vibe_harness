@@ -190,8 +190,12 @@ per card, shipped on accept — merged locally, or opened as a pull request.
   (`git merge-base --is-ancestor`), so a merge that belongs to another card
   leaves this card done with a `merge_error` instead of accepting it with
   someone else's commit. If the resolver fails, the card stays done with
-  the conflict open — clicking Accept again spawns a fresh resolver (clicking
-  it while one is already running returns 409).
+  the conflict open and **leaves the accept queue** — it is not retried in a
+  loop (that would spawn resolver after resolver); clicking Accept again
+  spawns a fresh resolver (clicking it while one is already running returns
+  409). A card that was queued behind a busy repo and is then accepted by its
+  resolver is cleared of `accept_queued` / `queue_reason` like any other
+  accept.
 - A dirty tree never blocks a run: leftover uncommitted changes (e.g. from an
   interrupted previous run) are stashed automatically — on a first run or a
   re-run — and kept in `git stash list` for manual recovery. The card's git
