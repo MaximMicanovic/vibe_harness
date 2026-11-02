@@ -3,8 +3,9 @@
  * The checks in this folder drive the *served* front-end under Node: they read
  * app.js, run it in a `vm` context whose `document` is this stub, and then poke
  * the exported functions. The stub only implements what app.js touches —
- * elements, class lists, listeners, a tiny selector engine, localStorage and
- * fetch — so a check can assert on what the browser would show.
+ * elements, class lists, listeners, a tiny selector engine, localStorage,
+ * ResizeObserver and fetch — so a check can assert on what the browser would
+ * show.
  *
  * Usage:
  *
@@ -139,7 +140,19 @@ function makeEl(tag) {
     return out;
   };
   node.closest = (sel) => { let n = node; while (n) { if (n.classList && matchSimple(n, sel)) return n; n = n.parentNode; } return null; };
-  node.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 140, right: 200, bottom: 140 });
+  /* The box the browser would report: the inline geometry when the app set one
+   * (a floating panel's left/top/width/height), else a card-sized default. A
+   * check that simulates the native resize grip sets `node._rect` — the grip
+   * changes the used box without touching the inline style. */
+  node.getBoundingClientRect = () => {
+    if (node._rect) return node._rect;
+    const px = (v, fallback) => { const n = parseFloat(v); return isFinite(n) ? n : fallback; };
+    const left = px(node.style.left, 0);
+    const top = px(node.style.top, 0);
+    const width = px(node.style.width, 200);
+    const height = px(node.style.height, 140);
+    return { left, top, width, height, right: left + width, bottom: top + height };
+  };
   node.focus = () => { node._focused = true; };
   node.blur = () => { node._focused = false; };
   node.scrollIntoView = () => { node._scrolled = true; };
@@ -185,9 +198,27 @@ function makeDom(options) {
     if (!byId[id]) { byId[id] = makeEl('div'); byId[id].id = id; roots.push(byId[id]); }
     return byId[id];
   };
-  const store = {};
+  /* `store` lets a check boot a second instance over the same localStorage —
+   * that is what a page reload looks like to the app. */
+  const store = opts.store || {};
   const timers = [];
   const docListeners = {};
+  const resizeObservers = [];
+
+  /* ResizeObserver: records the callback and the observed nodes; the check
+   * fires it with `fireResize(node)` to simulate the user dragging the native
+   * resize grip. */
+  class ResizeObserverStub {
+    constructor(cb) { this.cb = cb; this.targets = []; resizeObservers.push(this); }
+    observe(target) { if (this.targets.indexOf(target) === -1) this.targets.push(target); }
+    unobserve(target) { this.targets = this.targets.filter((t) => t !== target); }
+    disconnect() { this.targets = []; }
+  }
+  const fireResize = (target) => {
+    for (const obs of resizeObservers) {
+      if (obs.targets.indexOf(target) !== -1) obs.cb([{ target }], obs);
+    }
+  };
 
   for (const id of (opts.hidden || HIDDEN_BY_DEFAULT)) getEl(id).hidden = true;
 
@@ -217,6 +248,7 @@ function makeDom(options) {
     },
     fetch: opts.fetch || emptyFetch,
     requestAnimationFrame: (fn) => fn(),
+    ResizeObserver: ResizeObserverStub,
     getComputedStyle: () => ({ fontSize: '15px' }),
     CSS: { escape: (s) => String(s) },
     navigator: { platform: 'test', userAgentData: null },
@@ -248,7 +280,7 @@ function makeDom(options) {
     return sandbox.__x;
   }
 
-  return { sandbox, getEl, byId, store, timers, docListeners, flush, runTimers, boot };
+  return { sandbox, getEl, byId, store, timers, docListeners, resizeObservers, fireResize, flush, runTimers, boot };
 }
 
 module.exports = {

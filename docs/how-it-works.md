@@ -328,10 +328,12 @@ as a **draft**, so the loop closes without a hand-run `git revert`:
 A reviewer session approves a change you never look at; the diff view is how you
 inspect it. Hold **D** and click a card (or use the **Diff** button in the card
 panel) to open it. The diff is a floating popup, not a full-screen modal: about
-720x640, opened next to the clicked card and clamped to the viewport, draggable
-by its header, closed with **Esc** or the ×. The board stays visible and usable
+720x640 (floor 420x320), opened next to the clicked card and clamped to the
+viewport, draggable by its header and resizable by the grip in its bottom-right
+corner, closed with **Esc** or the ×. The board stays visible and usable
 behind it, and only one popup is open at a time — opening the diff closes the
-live activity popup (**C** + click) and vice versa.
+live activity popup (**C** + click) and vice versa. Like the activity popup it
+remembers where you put it (see below).
 
 The header carries the card title, the range selector and the verdict that
 judged that range (approved/rejected, the reviewer's reason, the round, the
@@ -375,13 +377,27 @@ The session **log** is the CLI's final output: for a headless run it stays
 almost empty until the session ends, so it cannot answer "what is it doing
 right now". The vibe **journal** can — it is appended *while* the session runs.
 
-Hold **C** and left-click a card to open a small floating panel (~420x520) next
-to it. It is not an overlay: the board stays usable behind it, and only one
-popup is open at a time. The header shows the card title, its status pill and
-the live token count; the body is the activity feed, newest at the bottom,
-auto-scrolled unless you scrolled up (then a **↓ jump to latest** button
+Hold **C** and left-click a card to open a small floating panel (~420x520, floor
+320x240) next to it. It is not an overlay: the board stays usable behind it, and
+only one popup is open at a time. The header shows the card title, its status
+pill and the live token count; the body is the activity feed, newest at the
+bottom, auto-scrolled unless you scrolled up (then a **↓ jump to latest** button
 appears). The model's thinking is collapsed behind a **thinking…** toggle. Esc
 or the **×** closes it. A plain click still opens the editor.
+
+Both popups are the same kind of panel, so both behave the same way: drag the
+header to move one, drag the grip in its bottom-right corner to resize it (the
+activity popup keeps a strip of padding under its compose row so the grip never
+covers **Send**). The layout is remembered per panel in `localStorage` under
+`vibe-harness:panel:activity` / `vibe-harness:panel:diff` as
+`{width, height, left, top}` — written when a drag ends and, debounced ~250 ms,
+when a resize settles (a native resize fires no event of its own, so a
+`ResizeObserver` watches the box). The next open, and a reload, put the panel
+back where you left it, still clamped to the viewport. Opening a panel is not a
+layout choice: a panel you never moved or resized keeps opening next to the card
+you clicked. A corrupt, missing or unreadable stored value (private mode throws
+on `localStorage`) falls back to the defaults, and clearing `localStorage`
+returns both panels to them.
 
 `GET /api/cards/<id>/activity?cursor=<int>` returns
 `{cursor, events: [{kind, at, …}]}` with `kind` one of:
