@@ -407,6 +407,16 @@ The cheapest token is the one never spent:
   `input_tokens` / `output_tokens` / `cached_input_tokens` when the model
   reports them), the model, and the stop reason — diff these across
   cards/agents to find your expensive routes.
+- **Session transcripts cost nothing to keep, and nothing to route:** each
+  round's `export/session/` (journal + chunks, ~4.7 MB per round) is tarred,
+  gzipped and moved into `transcripts.db` when the round finalizes
+  (`app/transcripts.py`), so `sessions/` no longer grows by ~1 GB of loose
+  files. `export.json` stays in place — the token numbers above are read from
+  it exactly as before. `POST /api/transcripts/backfill` imports the rounds
+  written before the store existed; `GET /api/transcripts/stats` reports the
+  rows and the compression ratio. Reading a transcript back
+  (`GET /api/cards/<id>/transcripts/<round>/events`, or the MCP
+  `harness_get_transcript`) is a local SQLite read — no model spend.
 - **Per-round verdicts:** `session.reviews` keeps every round's record
   (`{approved, reason, round, tokens, model, log, export_dir, via, commit}`);
   `session.review` is the last one. The Diff popup's `round` range reads them,

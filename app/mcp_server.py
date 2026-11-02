@@ -31,6 +31,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -47,6 +48,11 @@ MAX_ASK_TIMEOUT_SECONDS = 3600.0
 # ask_user loop re-issues until the total timeout is spent (keeps proxies and
 # the HTTP client timeout comfortably above the server wait).
 ASK_WAIT_CHUNK_SECONDS = 30.0
+
+# get_transcript caps (mirror app.activity.DEFAULT_LIMIT / MAX_LIMIT: the
+# API rejects a larger limit, so the tool clamps instead of erroring).
+DEFAULT_TRANSCRIPT_EVENTS = 200
+MAX_TRANSCRIPT_EVENTS = 500
 
 # Harness root = parent of app/; used to derive the current card id from the
 # session workdir (sessions/<id>/worktree or sessions/<id>/workspace) when the
@@ -315,6 +321,40 @@ TOOLS: list[dict] = [
             "card's own model wins for its own sessions; a card without one "
             "inherits the worker role's model. " + _COMMON),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_transcripts",
+        "description": (
+            "List a card's stored session transcripts: one metadata row per "
+            "round (round, session_id, created_at, raw_bytes, gz_bytes). The "
+            "transcripts live compressed in the harness's SQLite store; read "
+            "one with get_transcript. " + _COMMON),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"card_id": {"type": "string"}},
+            "required": ["card_id"],
+        },
+    },
+    {
+        "name": "get_transcript",
+        "description": (
+            "Read one round's session transcript as text: the parsed journal "
+            "events (assistant text, reasoning, tool calls and their results), "
+            "capped at `limit` events (default 200, max 500). This is the "
+            "debugging surface for \"what did the model actually do in that "
+            "round\" — the raw tar.gz blob is not readable by a model. " + _COMMON),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "card_id": {"type": "string"},
+                "round": {"type": "string",
+                          "description": "run-1, review-2, resolve-1, ..."},
+                "limit": {"type": "integer", "minimum": 1,
+                          "maximum": MAX_TRANSCRIPT_EVENTS,
+                          "description": "Max events to return (default 200)"},
+            },
+            "required": ["card_id", "round"],
+        },
     },
     {
         "name": "stats",
@@ -758,6 +798,22 @@ def tool_list_models(args: dict) -> object:
     }
 
 
+def tool_list_transcripts(args: dict) -> object:
+    return _api().get(f"/api/cards/{args['card_id']}/transcripts")
+
+
+def tool_get_transcript(args: dict) -> object:
+    """One round's journal as text (the API parses it with parse_journal_line)."""
+    try:
+        limit = int(args.get("limit") or DEFAULT_TRANSCRIPT_EVENTS)
+    except (TypeError, ValueError):
+        raise HarnessError("limit must be an integer")
+    limit = max(1, min(limit, MAX_TRANSCRIPT_EVENTS))
+    round_name = urllib.parse.quote(str(args["round"]), safe="")
+    return _api().get(f"/api/cards/{args['card_id']}/transcripts/{round_name}"
+                      f"/events?limit={limit}")
+
+
 def tool_stats(args: dict) -> object:
     project = args.get("project")
     path = "/api/stats" + (f"?project={project}" if project else "")
@@ -961,6 +1017,8 @@ TOOL_FUNCS = {
     "card_log": tool_card_log,
     "list_templates": tool_list_templates,
     "list_models": tool_list_models,
+    "list_transcripts": tool_list_transcripts,
+    "get_transcript": tool_get_transcript,
     "stats": tool_stats,
     "list_projects": tool_list_projects,
     "add_dependency": tool_add_dependency,

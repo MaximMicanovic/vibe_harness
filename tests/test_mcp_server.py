@@ -177,7 +177,10 @@ def test_tools_list_surface(harness):
                 "list_stacks", "create_stack", "update_stack", "delete_stack",
                 "stack_cards", "unstack_card",
                 # Which models a card can be put on (create_card takes `model`).
-                "list_models"}
+                "list_models",
+                # Compressed session transcripts: metadata rows + one round's
+                # journal as text (the debugging surface a model can read).
+                "list_transcripts", "get_transcript"}
     assert set(tools) == expected
     # No way for models to manage or swap projects (archiving a whole project
     # deck stays a user-side action — deliberately not an MCP tool).
@@ -371,6 +374,47 @@ def test_misc_read_tools(harness):
     templates = call(harness, "list_templates")
     assert templates["isError"] is False
     assert any(t["name"] == "bug" for t in templates["payload"])
+
+
+# ---------------------------------------------------------------- transcripts
+
+def _write_session_dir(root: Path) -> Path:
+    """A stand-in for `sessions/<card>/<round>/export/session`."""
+    session = root / "session"
+    (session / "journal").mkdir(parents=True)
+    (session / "journal" / "0000000000000001.jsonl").write_text(json.dumps({
+        "payload": {"delta": [{"entry": {
+            "type": "message", "role": "assistant",
+            "content": [{"text": "hello from the transcript"}],
+            "createdAt": 1700000000000}}]}}) + "\n")
+    (session / "meta.json").write_text(json.dumps({"session_id": "sess-1"}))
+    return session
+
+
+def test_transcript_tools_via_mcp(harness):
+    """list_transcripts / get_transcript read the compressed store."""
+    card = call(harness, "create_card", title="Transcripts", body="b")["payload"]
+    _write_session_dir(harness.tmp_path / "sessions" / card["id"] / "run-1" / "export")
+    _http_json(f"{mcp_server.harness_url()}/api/transcripts/backfill", "POST", {})
+
+    listed = call(harness, "list_transcripts", card_id=card["id"])
+    assert listed["isError"] is False, listed
+    assert [row["round"] for row in listed["payload"]] == ["run-1"]
+    assert "blob" not in listed["payload"][0]
+
+    got = call(harness, "get_transcript", card_id=card["id"], round="run-1")
+    assert got["isError"] is False, got
+    assert "hello from the transcript" in got["payload"]["text"]
+    assert got["payload"]["events"][0]["kind"] == "text"
+
+    # `limit` caps the events a model has to read.
+    capped = call(harness, "get_transcript", card_id=card["id"], round="run-1",
+                  limit=1)
+    assert len(capped["payload"]["events"]) == 1
+
+    # A round that was never stored is a tool error, not an empty transcript.
+    assert call(harness, "get_transcript", card_id=card["id"],
+                round="run-9")["isError"] is True
 
 
 # ---------------------------------------------------------------- ask_user

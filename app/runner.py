@@ -78,6 +78,7 @@ from app.cards import (
 )
 from app.projects import ProjectStore
 from app.models import ModelSettings
+from app.transcripts import TranscriptStore
 from app.questions import QuestionStore
 # Imported for real, not under `if TYPE_CHECKING:`: the module uses
 # `from __future__ import annotations`, so `settings: SettingsStore | None` is a
@@ -527,7 +528,8 @@ class SessionRunner:
                  projects: ProjectStore | None = None,
                  questions: QuestionStore | None = None,
                  models: ModelSettings | None = None,
-                 settings: "SettingsStore | None" = None):
+                 settings: "SettingsStore | None" = None,
+                 transcripts: TranscriptStore | None = None):
         self.store = store
         self.config = config
         self.sessions_dir = Path(sessions_dir)
@@ -537,6 +539,11 @@ class SessionRunner:
         self.models = models
         # Which agent CLI to drive (vibe / claude). None = the default backend.
         self.settings = settings
+        # Compressed session transcripts: every finalized round's
+        # export/session/ directory moves into this store (see _capture_transcript).
+        # It lives beside the sessions it indexes (BASE_DIR in production, the
+        # temp dir in tests); VIBE_HARNESS_TRANSCRIPTS_DB still wins.
+        self.transcripts = transcripts or TranscriptStore(base_dir=self.sessions_dir.parent)
         # Per-card Q&A (model asks the user on the card via the MCP ask_user
         # tool); shared with the app's HTTP endpoints when the app built us.
         self.questions = questions or QuestionStore(self.sessions_dir)
@@ -1471,7 +1478,9 @@ class SessionRunner:
         # and review rounds use. Without it a resolver's whole session was
         # missing from every number on the board.
         round_no = entry.get("round") or resolver.get("round") or 1
-        export = self._read_export(self.sessions_dir / card_id / f"resolve-{round_no}")
+        rdir = self.sessions_dir / card_id / f"resolve-{round_no}"
+        export = self._read_export(rdir)
+        self._capture_transcript(card_id, f"resolve-{round_no}", rdir)
         usage = export.get("usage") or export.get("token_usage") or {}
         resolver_patch = {
             **resolver,
@@ -1851,6 +1860,26 @@ class SessionRunner:
         """
         return (backend or self.backend()).read_export(rdir)
 
+    def _capture_transcript(self, card_id: str, round_name: str, rdir: Path) -> None:
+        """Move one round's session transcript into the compressed store.
+
+        `export/session/` is the vibe journal + chunks: worth keeping for
+        debugging, but ~1 GB of loose files. It is stored as one tar.gz blob
+        and then removed; `export.json` stays, it is what the harness reads.
+
+        Never raises: a failed save leaves the directory in place (nothing is
+        lost) and must not fail the round.
+        """
+        session_dir = rdir / "export" / "session"
+        if not session_dir.is_dir():
+            return
+        try:
+            self.transcripts.save(card_id, round_name, session_dir)
+        except Exception as exc:
+            print(f"WARNING: could not store transcript {card_id} {round_name}: {exc!r}")
+            return
+        shutil.rmtree(session_dir, ignore_errors=True)
+
     @staticmethod
     def _read_verdict(rdir: Path, ws: Path) -> tuple[bool, str | None] | None:
         """Reviewer verdict: last VERDICT: line in its session log, else REVIEW.md."""
@@ -2088,6 +2117,7 @@ class SessionRunner:
                             if high_water is not None else {})
 
         export = self._read_export(rdir)
+        self._capture_transcript(card_id, f"{kind}-{entry['round']}", rdir)
         usage = export.get("usage") or export.get("token_usage") or {}
         tokens = usage.get("total_tokens", usage.get("total"))
         # Per-type breakdown (cached/output/input) for the token-counter hover

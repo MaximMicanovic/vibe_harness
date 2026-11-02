@@ -5,7 +5,7 @@ of them, as they exist in the code today.
 
 | Source | Published as | Count | Who gets it |
 |---|---|---|---|
-| Harness MCP server (`app/mcp_server.py`) | `harness_<tool>` | 31 | `run` sessions (implement + fix rounds) |
+| Harness MCP server (`app/mcp_server.py`) | `harness_<tool>` | 33 | `run` sessions (implement + fix rounds) |
 | Mailbox MCP server (`app/mailbox_server.py`) | `harness-mailbox_<tool>` | 3 | worker and reviewer sessions, when `VIBE_HARNESS_MAILBOX` is on |
 | Vibe's built-in tools | bare names (`bash`, `read_file`, …) | platform-dependent | every session, filtered by `VIBE_HARNESS_ENABLED_TOOLS` |
 
@@ -15,7 +15,7 @@ sessions are deliberately MCP-free — they only get the built-ins.
 
 ---
 
-## 1. Harness MCP server — `harness_*` (31 tools)
+## 1. Harness MCP server — `harness_*` (33 tools)
 
 A thin JSON-RPC stdio server that forwards every call to the dashboard's HTTP
 API (`VIBE_HARNESS_URL`, default `http://127.0.0.1:8734`), so the dashboard
@@ -33,6 +33,8 @@ stays the single writer of cards and sessions. Injected through
 | `list_templates` | Card templates usable with `create_card`. | — |
 | `stats` | Counts by status, total tokens, total/avg runtime. | `project` (optional) |
 | `list_projects` | Registered projects (name + path). Read-only by design. | — |
+| `list_transcripts` | A card's stored session transcripts: one metadata row per round (`round`, `session_id`, `created_at`, `raw_bytes`, `gz_bytes`). The transcripts live compressed in the harness's SQLite store. | `card_id` |
+| `get_transcript` | One round's transcript as text: the parsed journal events (assistant text, reasoning, tool calls and results), capped. The debugging surface for "what did the model actually do in that round". | `card_id`, `round` (`run-1`, `review-2`, `resolve-1`, …), `limit` (1–500, default 200) |
 
 ### Writing cards
 
@@ -164,7 +166,7 @@ one-shot `bash`, the managed variant exposes the `bash_output` family above.
 The schemas the model actually receives come straight from the `TOOLS` lists:
 
 ```bash
-# the 31 harness tools, with descriptions and JSON schemas
+# the 33 harness tools, with descriptions and JSON schemas
 uv run python -c "import json, app.mcp_server as m; print(json.dumps(m.TOOLS, indent=2))"
 
 # the 3 mailbox tools
