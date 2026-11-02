@@ -34,7 +34,12 @@ POLL_SECONDS = 5.0
 def inhibitor_command() -> list[str] | None:
     """The command that holds an idle-sleep inhibitor on this platform."""
     if sys.platform == "darwin":
-        return ["caffeinate", "-i"]
+        # -i: no idle sleep (what actually kills a session).
+        # -s: no system sleep while on AC power — the strongest assertion a
+        #     userspace process can hold. Closing the lid still sleeps the
+        #     machine; only `sudo pmset -a disablesleep 1` overrides that, and
+        #     it is a system-wide root setting this harness will not touch.
+        return ["caffeinate", "-i", "-s"]
     if sys.platform.startswith("linux") and shutil.which("systemd-inhibit"):
         return ["systemd-inhibit", "--what=idle:sleep",
                 "--why=vibe-harness is running cards", "sleep", "infinity"]

@@ -13,12 +13,15 @@ session dicts and safe to call for every card on every board poll.
 Kinds, in priority order (the first match wins):
 
 1. `stopped_by_user` — the user pressed Stop.
-2. `git_conflict` — a merge conflict / resolver was involved.
-3. `timeout` — the session hit its time (or other) limit.
-4. `tests_failed` — the test gate rejected it.
-5. `reviewer_rejected` — the review loop ran out with a rejection.
-6. `no_verdict` — the reviewer produced no verdict at all.
-7. `crashed` — a non-zero exit (or a failed commit) with no other explanation.
+2. `interrupted` — the session was signalled from outside (a sleeping machine
+   suspends the process and the CLI gives up with `interrupted`). Not a crash:
+   the work was never judged, so re-running is the right response.
+3. `git_conflict` — a merge conflict / resolver was involved.
+4. `timeout` — the session hit its time (or other) limit.
+5. `tests_failed` — the test gate rejected it.
+6. `reviewer_rejected` — the review loop ran out with a rejection.
+7. `no_verdict` — the reviewer produced no verdict at all.
+8. `crashed` — a non-zero exit (or a failed commit) with no other explanation.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ from __future__ import annotations
 #: offers exactly these.
 KINDS: tuple[str, ...] = (
     "stopped_by_user",
+    "interrupted",
     "git_conflict",
     "timeout",
     "tests_failed",
@@ -40,6 +44,13 @@ KINDS: tuple[str, ...] = (
 TIMEOUT_STOP_REASONS = frozenset({
     "limit", "time_limit", "timeout", "timed_out",
     "max_turns", "max_budget_usd", "blocking_limit",
+})
+
+#: `stop_reason` values that mean the session was signalled from outside rather
+#: than failing on its own. A sleeping machine suspends the process and the CLI
+#: reports `interrupted`; the work was never judged, so this is not a crash.
+INTERRUPTED_STOP_REASONS = frozenset({
+    "interrupted", "cancelled", "canceled", "sigterm", "sigint", "suspended",
 })
 
 #: Statuses that cannot have failed yet: nothing has finished. `accepted` is a
@@ -147,7 +158,16 @@ def classify(card: dict) -> dict | None:
     if status == "stopped" and not timed_out:
         return _failure("stopped_by_user", "stopped by the user")
 
-    # 2. a merge conflict / resolver was involved
+    # 2. the session was signalled from outside. A sleeping machine suspends
+    #    the process and the CLI gives up with `interrupted` — the work was
+    #    never judged, so this is not a crash and re-running is the fix.
+    if status == "failed" and stop_reason in INTERRUPTED_STOP_REASONS:
+        return _failure(
+            "interrupted",
+            "the session was interrupted from outside (the machine may have "
+            "slept) — re-run it")
+
+    # 3. a merge conflict / resolver was involved
     conflict = _git_conflict(git, resolver)
     if conflict is not None:
         return conflict

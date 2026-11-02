@@ -229,6 +229,7 @@ def test_every_kind_is_reachable():
     seen = set()
     for c in (
         card(status="stopped"),
+        card(session={"stop_reason": "interrupted", "exit_code": 3}),
         card(status="done", session={"git": {"merge_conflict": True}}),
         card(session={"stop_reason": "limit"}),
         card(session={"verified": False}),
@@ -244,6 +245,20 @@ def test_every_kind_is_reachable():
         assert out is not None
         seen.add(out["kind"])
     assert seen == set(KINDS)
+
+
+def test_interrupted_is_not_a_crash():
+    """A session signalled from outside — a sleeping machine suspends it and the
+    CLI gives up with `interrupted` — was never judged, so it is not a crash."""
+    out = classify(card(session={"stop_reason": "interrupted", "exit_code": 3}))
+    assert out["kind"] == "interrupted"
+    assert "re-run" in out["detail"]
+    # A user stop still wins: that one was deliberate.
+    assert classify(card(status="stopped",
+                         session={"stop_reason": "interrupted"}))["kind"] == "stopped_by_user"
+    # A card that shipped is not a failure, whatever the exit code.
+    assert classify(card(status="accepted",
+                         session={"stop_reason": "interrupted"})) is None
 
 
 def test_detail_is_one_human_line():

@@ -62,7 +62,7 @@ def fake_popen(monkeypatch):
 
 def test_inhibitor_command_on_macos(monkeypatch):
     monkeypatch.setattr(sleepguard.sys, "platform", "darwin")
-    assert sleepguard.inhibitor_command() == ["caffeinate", "-i"]
+    assert sleepguard.inhibitor_command() == ["caffeinate", "-i", "-s"]
 
 
 def test_inhibitor_command_on_linux(monkeypatch):
@@ -85,7 +85,7 @@ def test_acquire_starts_the_inhibitor(fake_popen, monkeypatch):
     assert guard.held() is False
     assert guard.acquire() is True
     assert guard.held() is True
-    assert fake_popen[0].cmd == ["caffeinate", "-i"]
+    assert fake_popen[0].cmd == ["caffeinate", "-i", "-s"]
 
 
 def test_acquire_is_idempotent(fake_popen, monkeypatch):

@@ -2475,6 +2475,12 @@ async function renderSettingsPanel() {
         : 'While a card is running or queued, the harness stops the machine from '
           + 'going to sleep. A sleeping machine suspends the session and the card '
           + 'comes back as "interrupted".'));
+  if (settings.sleep_supported) {
+    sidebarBody.appendChild(el('p', 'sidebar-empty',
+      'Closing the lid still sleeps the machine — no userspace process can '
+      + 'override that. Only `sudo pmset -a disablesleep 1` does, and it is a '
+      + 'system-wide root setting the harness will not touch.'));
+  }
 }
 
 async function savePreventSleep(on) {
