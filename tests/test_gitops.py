@@ -252,6 +252,22 @@ def test_merge_card_branch_already_up_to_date(repo, tmp_path):
     assert second["merged_at"]
 
 
+def test_is_ancestor(repo, tmp_path):
+    """is_ancestor answers `git merge-base --is-ancestor`: True only when the
+    branch is contained in HEAD (the wrong-merge guard's check)."""
+    wt = _wt(tmp_path, "abc123")
+    info = gitops.prepare_card_branch(repo, "harness/abc123", wt)
+    (wt / "hello.py").write_text("print('hi')\n")
+    gitops.commit_workspace(wt, "vibe-harness: test")
+    # The card's work is not in the base branch yet.
+    assert gitops.is_ancestor(repo, "harness/abc123") is False
+    gitops.merge_card_branch(info)
+    assert gitops.is_ancestor(repo, "harness/abc123") is True
+    # A revision that does not exist is not an ancestor either: a broken check
+    # must never let an accept through.
+    assert gitops.is_ancestor(repo, "harness/nope") is False
+
+
 def test_merge_card_branch_conflict_left_in_place(repo, tmp_path):
     """A conflict raises GitMergeConflict and the conflicted merge is LEFT in
     place in the MAIN worktree (no abort) for the resolver session; the branch

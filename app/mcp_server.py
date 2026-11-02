@@ -256,7 +256,10 @@ TOOLS: list[dict] = [
             "'local' the git branch is merged into the base branch; in 'pr' "
             "mode the branch is pushed and a pull request is opened with the "
             "review verdict as its body). Only possible with an approved "
-            "review (or an exhausted review loop). " + _COMMON),
+            "review (or an exhausted review loop). Only one accept merges "
+            "into a repository at a time: a second accept for the same repo "
+            "is queued (session.accept_queued + queue_reason) and merged "
+            "automatically when the repo frees. " + _COMMON),
         "inputSchema": {
             "type": "object",
             "properties": {"card_id": {"type": "string"}},

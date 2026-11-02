@@ -64,6 +64,10 @@ you write a card (spec)
                (accept_mode=pr: `git push -u origin harness/<id>` +
                `gh pr create`; the branch and worktree are kept for
                follow-up commits, and nothing is merged locally)
+               ONE accept per repository at a time: a second accept
+               for the same repo is queued (accept_queued +
+               queue_reason) and merged by the drain when the repo
+               frees; different repos still accept concurrently.
   → accept all POST /api/cards/accept-all (the Done column's button)  ← free
                snapshots the cards in Done NOW and merges them one at
                a time in a background drain (they share one main
@@ -146,6 +150,22 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   the `-u` push makes `git branch -d` consider the branch merged and would
   otherwise delete it. A repo therefore accumulates one worktree per
   accepted-but-unmerged card until the PR lands.
+- **One accept per repository at a time.** Every accept merges in the repo's
+  MAIN worktree (the project folder), and git allows exactly one merge in
+  progress there, so `SessionRunner` holds a per-repo accept lock
+  (`_accepting_repos`). A second accept for the same repo neither merges nor
+  fails: the card is queued (`session.accept_queued` + `queue_reason` =
+  "waiting for the merge in <repo> to finish") and the existing accept drain
+  merges it as soon as the repo frees — no second click. Accepts for
+  *different* repos still run concurrently. The repo stays locked while a
+  conflict resolver owns the merge and is released when the resolver
+  concludes or fails. The resolver's commit is only recorded as the card's
+  `merge_commit` when the card branch is an ancestor of HEAD
+  (`git merge-base --is-ancestor`); otherwise the card stays done with a
+  `merge_error` instead of being accepted with another card's commit. A
+  failed resolver drops the card out of the accept queue (no automatic
+  retry — that would spawn resolver after resolver); a card accepted by its
+  resolver is cleared of `accept_queued` / `queue_reason`.
 - **Loop cap.** Rejections (review or test) loop through a fixer, capped at
   `VIBE_HARNESS_MAX_REVIEW_ROUNDS` (default 5). After the cap the card lands in
   Done unapproved (`review.exhausted`) and *you* decide — no more paid rounds.

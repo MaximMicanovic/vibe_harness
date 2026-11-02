@@ -468,6 +468,17 @@ class SessionRunner:
         # concurrently). Guarded by _accept_lock.
         self._accept_lock = threading.Lock()
         self._accept_draining = False
+        # Set when a drain is asked to run while one is already running: the
+        # running drain re-checks the queue before it exits, so a card queued
+        # behind a repo that just freed is never left waiting.
+        self._accept_drain_wakeup = False
+        # Serializes accepts PER REPOSITORY: every accept merges in the repo's
+        # MAIN worktree, and git allows exactly one merge in progress there.
+        # A repo stays in the set while a resolver owns its merge and is
+        # released when the resolver concludes or fails. Lock order is
+        # _accept_repo_lock -> _accept_lock; nothing takes them the other way.
+        self._accept_repo_lock = threading.Lock()
+        self._accepting_repos: set[Path] = set()
         # Keeps the machine awake while cards run or wait: a sleeping machine
         # suspends the session process and the CLI reports `interrupted`.
         self.sleep_guard = SleepGuard(enabled=config.prevent_sleep)
@@ -870,11 +881,20 @@ class SessionRunner:
         of merging locally (see `_accept_with_pr`). In `local` mode the card
         branch is merged into its base branch (if any).
 
+        Only ONE accept may merge into a repository at a time: every accept
+        merges in the repo's MAIN worktree, and git allows exactly one merge
+        in progress there. A second accept for the same repo does not merge —
+        the card is queued (`session.accept_queued` + `queue_reason`) and
+        merged automatically when the repo frees (see `_drain_accepts`).
+        Different repos still accept concurrently.
+
         A merge conflict does NOT fail the accept: the conflicted merge is left
         in place, the card stays 'done' (Done column) flagged `resolving`, and
         a resolver vibe session is spawned. When the resolver concludes the
         merge, the accept finishes automatically (merge recorded -> accepted).
-        A second accept while a resolver is live raises GitBusyError (-> 409).
+        The repo stays locked until that resolver concludes or fails; a second
+        accept for the SAME card while its resolver is live raises
+        GitBusyError (-> 409).
 
         The merge result is recorded on the session git record
         (``merge_commit`` / ``merge_was_ff`` / ``merged_at``) and the card
@@ -884,12 +904,33 @@ class SessionRunner:
         card = self.store.check_accept(card_id)
         git_info = (card.get("session") or {}).get("git")
         if self.accept_mode() == "pr":
-            return self._accept_with_pr(card, git_info)
+            result = self._accept_with_pr(card, git_info)
+        else:
+            repo = Path(git_info["repo"]) if git_info and git_info.get("repo") else None
+            if repo is not None:
+                if gitops.merge_in_progress(repo) and self.is_running(card_id):
+                    # Retry accept while THIS card's resolver is live.
+                    raise GitBusyError(
+                        f"a conflict resolver is already running for card {card_id}")
+                if not self._claim_accept_repo(repo):
+                    return self._queue_accept(card, repo)
+            try:
+                result = self._accept_card_locked(card, git_info)
+            finally:
+                # A resolver owns the merge now: the repo stays locked until it
+                # concludes (_conclude_resolved_merge) or fails.
+                if repo is not None and not self._resolver_owns_merge(card_id):
+                    self._release_accept_repo(repo)
+        if result.get("status") == "accepted":
+            # Shipped: the card is no longer waiting for a merge slot.
+            result = self._drop_from_accept_queue(card_id) or result
+        return result
+
+    def _accept_card_locked(self, card: dict, git_info: dict | None) -> dict:
+        """The accept itself, with the card's repo already claimed."""
+        card_id = card["id"]
         if git_info and gitops.merge_in_progress(Path(git_info["repo"])):
             # A conflicted merge is waiting for a resolver (retry accept).
-            if self.is_running(card_id):
-                raise GitBusyError(
-                    f"a conflict resolver is already running for card {card_id}")
             self._start_resolver(card, git_info, "a merge is already in progress")
             return self.store.get(card_id)
         if git_info:
@@ -933,6 +974,48 @@ class SessionRunner:
         except Exception:
             pass
         return accepted
+
+    def _claim_accept_repo(self, repo: Path) -> bool:
+        """Take the repo's accept lock; False when another accept (or a live
+        resolver) already owns a merge in that repo."""
+        with self._accept_repo_lock:
+            if repo in self._accepting_repos:
+                return False
+            self._accepting_repos.add(repo)
+            return True
+
+    def _release_accept_repo(self, repo: Path) -> None:
+        """Free the repo's accept lock and merge whatever was queued behind
+        it — through the existing accept drain, so no second click is needed."""
+        with self._accept_repo_lock:
+            self._accepting_repos.discard(repo)
+        try:
+            if self._next_accept_queued() is not None:
+                self._start_accept_drain()
+        except Exception:
+            pass  # never let the queue drain break an accept
+
+    def _resolver_owns_merge(self, card_id: str) -> bool:
+        """True when a conflict resolver still owns the card's merge — the
+        repo must stay locked until it concludes or fails."""
+        try:
+            card = self.store.get(card_id)
+        except CardNotFound:
+            return False
+        return bool(((card.get("session") or {}).get("git") or {}).get("resolving"))
+
+    def _queue_accept(self, card: dict, repo: Path) -> dict:
+        """Another accept is merging into `repo`: queue this one instead of
+        merging into the same main worktree. No exception — the UI renders
+        `queue_reason` — and the drain merges it when the repo frees."""
+        session = card.get("session") or {}
+        return self.store.patch_session(card["id"], {
+            "accept_queued": True,
+            # Keep the original queue time: a second click must not jump the
+            # card ahead of the ones queued before it.
+            "accept_queued_at": session.get("accept_queued_at") or now_iso(),
+            "queue_reason": f"waiting for the merge in {repo} to finish",
+        })
 
     def revert_card(self, card_id: str) -> dict:
         """Undo an accepted card: revert its merge commit and reopen it.
@@ -1006,18 +1089,30 @@ class SessionRunner:
         return {"queued": queued, "running": self._accept_draining}
 
     def _start_accept_drain(self) -> None:
-        """Start the batch drain unless one is already running."""
+        """Start the batch drain unless one is already running.
+
+        A caller that arrives while a drain is running sets the wakeup flag:
+        the running drain re-checks the queue before it exits, so a card
+        queued behind a repo that just freed is never left waiting.
+        """
         with self._accept_lock:
             if self._accept_draining:
+                self._accept_drain_wakeup = True
                 return
             self._accept_draining = True
+            self._accept_drain_wakeup = False
         threading.Thread(target=self._drain_accepts, daemon=True).start()
 
-    def _next_accept_queued(self) -> dict | None:
-        """The oldest Done card still marked accept_queued, or None."""
+    def _next_accept_queued(self, skip: set[str] | None = None) -> dict | None:
+        """The oldest Done card still marked accept_queued, or None.
+
+        `skip` holds the cards this drain pass already found blocked (their
+        repo is busy), so one busy repo does not stall the others.
+        """
         queued = [c for c in self.store.list()
                   if c["status"] == "done"
-                  and (c.get("session") or {}).get("accept_queued")]
+                  and (c.get("session") or {}).get("accept_queued")
+                  and c["id"] not in (skip or ())]
         if not queued:
             return None
         queued.sort(key=lambda c: ((c.get("session") or {}).get("accept_queued_at") or "",
@@ -1026,9 +1121,10 @@ class SessionRunner:
 
     def _drain_accepts(self) -> None:
         """Merge the queued Done cards one at a time (daemon thread)."""
+        skipped: set[str] = set()
         try:
             while True:
-                card = self._next_accept_queued()
+                card = self._next_accept_queued(skip=skipped)
                 if card is None:
                     return
                 card_id = card["id"]
@@ -1037,18 +1133,65 @@ class SessionRunner:
                 except Exception as exc:
                     # Green gate / git problem: leave the card in Done and drop
                     # it out of the batch so it renders below the button again.
-                    self.store.patch_session(card_id, {
-                        "accept_queued": False, "accept_queued_at": None,
-                        "accept_error": str(exc)})
+                    self._drop_from_accept_queue(card_id, error=str(exc))
                     continue
                 # A conflicted accept hands over to a resolver: wait for it, so
                 # the next merge does not start in the same worktree.
                 self._wait_for_resolve(card_id)
-                self.store.patch_session(card_id, {
-                    "accept_queued": False, "accept_queued_at": None})
+                # Re-read the card: the accept_card() return value is a
+                # snapshot from BEFORE the resolver ran, and the card has
+                # moved on since (accepted, conflict still open, or re-queued
+                # behind a busy repo). Driving the loop off the stale snapshot
+                # re-queues a failed resolver forever and leaves an accepted
+                # card flagged accept_queued.
+                try:
+                    current = self.store.get(card_id)
+                except CardNotFound:
+                    continue
+                session = current.get("session") or {}
+                git_info = session.get("git") or {}
+                if current["status"] == "done" and git_info.get("merge_conflict"):
+                    # The resolver failed (or was stopped): the conflict is
+                    # still open. Drop the card out of the batch — re-queuing
+                    # it would spawn resolver after resolver.
+                    self._drop_from_accept_queue(card_id)
+                    continue
+                if current["status"] == "done" and session.get("accept_queued"):
+                    # The card's repo was busy: accept_card queued it behind
+                    # the merge in progress. Leave it queued and try the next
+                    # one — releasing the repo starts a fresh drain.
+                    skipped.add(card_id)
+                    continue
+                self._drop_from_accept_queue(card_id)
         finally:
             with self._accept_lock:
                 self._accept_draining = False
+                wakeup = self._accept_drain_wakeup
+                self._accept_drain_wakeup = False
+            if wakeup:
+                self._start_accept_drain()
+
+    def _drop_from_accept_queue(self, card_id: str,
+                                error: str | None = None) -> dict | None:
+        """Take a card out of the accept queue: it is no longer waiting for a
+        merge slot, so `accept_queued` / `accept_queued_at` / `queue_reason`
+        are cleared (an accepted card must not keep the queue chip). `error`
+        records why the attempt failed. Never raises — a drain thread must not
+        die on one card."""
+        patch: dict = {"accept_queued": False, "accept_queued_at": None,
+                       "queue_reason": None}
+        if error is not None:
+            patch["accept_error"] = error
+        try:
+            card = self.store.get(card_id)
+            session = card.get("session") or {}
+            if error is None and not (session.get("accept_queued")
+                                      or session.get("accept_queued_at")
+                                      or session.get("queue_reason")):
+                return card      # already out of the queue: nothing to write
+            return self.store.patch_session(card_id, patch)
+        except Exception:
+            return None      # card deleted or moved on: nothing left to clear
 
     def _wait_for_resolve(self, card_id: str, timeout: float = 3600.0) -> None:
         """Block until the card's conflict resolver is done (or the timeout)."""
@@ -1227,6 +1370,12 @@ class SessionRunner:
                     f"resolver session exited with code {exit_code}")
             self.store.patch_session(card_id, {"git": git_patch,
                                                "resolver": resolver_patch})
+            # The resolver gave up on the merge: the card leaves the accept
+            # queue (a retry is a deliberate click, not an endless loop) and
+            # the repo is free again for the accepts queued behind it.
+            self._drop_from_accept_queue(card_id)
+            if root is not None:
+                self._release_accept_repo(root)
 
     def _conclude_resolved_merge(self, card: dict,
                                  resolver_patch: dict | None = None) -> None:
@@ -1236,11 +1385,18 @@ class SessionRunner:
         accept the card. The card branch and its linked worktree are kept (the
         diff view reads them). Used by _finalize_resolver and by startup
         recovery (a resolver that died after concluding the merge but before
-        its finalize ran)."""
+        its finalize ran).
+
+        Only concludes when the merge that finished is THIS card's: the card
+        branch must be an ancestor of HEAD. A merge that belongs to another
+        card (or a resolver that committed something else) leaves the card
+        done with a merge_error — never accepted with someone else's commit.
+        """
         card_id = card["id"]
         session = card.get("session") or {}
         git_info = session.get("git") or {}
         base_git = {**git_info, "resolving": False}
+        root = Path(git_info["repo"]) if git_info.get("repo") else None
 
         def patch(extra_git: dict) -> None:
             p = {"git": {**base_git, **extra_git}}
@@ -1249,14 +1405,23 @@ class SessionRunner:
             self.store.patch_session(card_id, p)
 
         try:
+            if root is None:
+                raise GitError("the card has no repository on record")
+            branch = git_info.get("branch")
+            if branch and not gitops.is_ancestor(root, branch):
+                # The merge that finished is not this card's: accepting would
+                # record another card's commit as this card's merge.
+                patch({"merged": False, "merge_error": (
+                    f"the merge in {root} is not this card's — {branch} is not "
+                    "in HEAD; the card stays done for a retry")})
+                return
             # Post-merge green gate: tests must pass on the merged result
             # before the accept finishes.
             self._green_gate(card)
             # The resolver concluded the merge in the main worktree: its
             # commit IS the card's merge commit. The card branch and its
             # linked worktree are kept (the diff view reads them).
-            head = gitops.run_git(["rev-parse", "HEAD"],
-                                  Path(git_info["repo"])).stdout.strip()
+            head = gitops.run_git(["rev-parse", "HEAD"], root).stdout.strip()
             patch({"merged": True, "merge_conflict": False, "merge_error": None,
                    "merge_commit": head, "merge_was_ff": False,
                    "merged_at": now_iso()})
@@ -1268,6 +1433,16 @@ class SessionRunner:
             # branch, record the failure; a retry accept re-runs the gate
             # (the merge itself is already up to date).
             patch({"test_error": str(exc)})
+        finally:
+            # The accept attempt is over — accepted, or left done for a retry:
+            # either way the card is no longer waiting for a merge slot, so it
+            # leaves the accept queue before the repo is released (otherwise
+            # the release would pick it straight back up).
+            self._drop_from_accept_queue(card_id)
+            # The resolver is done with the repo either way: free it so the
+            # accepts queued behind it can merge.
+            if root is not None:
+                self._release_accept_repo(root)
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
