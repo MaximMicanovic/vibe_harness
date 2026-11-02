@@ -96,7 +96,6 @@ const cardWorkdir = $('card-workdir');
 const dependsField = $('depends-field');
 const dependsList = $('depends-list');
 const projectSelect = $('project-select');
-const manageProjectsBtn = $('manage-projects-btn');
 const archivesBtn = $('archives-btn');
 const archivesOverlay = $('archives-overlay');
 const archiveForm = $('archive-form');
@@ -1948,6 +1947,12 @@ $('restart-server-btn').addEventListener('click', async () => {
 });
 /* ---------------- Project picker ---------------- */
 
+/* The last entry of the project menu: a command, not a project. Picking it
+ * opens the projects modal (add / remove), so the top bar needs no separate
+ * "＋ Project" button. The sentinel value is not a name anyone registers a
+ * project under. */
+const ADD_PROJECT_VALUE = '__add_project__';
+
 async function loadProjects() {
   try {
     state.projects = await api('/api/projects');
@@ -1965,6 +1970,10 @@ async function loadProjects() {
     opt.value = p.name;
     projectSelect.appendChild(opt);
   }
+  // "Add project…" sits at the BOTTOM of the menu, after every project.
+  const addProject = el('option', '', '＋ Add project…');
+  addProject.value = ADD_PROJECT_VALUE;
+  projectSelect.appendChild(addProject);
   // Keep the selection if the project still exists. A remembered selection
   // whose project was since deleted falls back to All projects, and the stale
   // memory is overwritten with that fallback.
@@ -2027,6 +2036,13 @@ function ensureProjectOption(name) {
 }
 
 projectSelect.addEventListener('change', () => {
+  // "Add project…" is a command: open the projects modal and put the menu back
+  // on the project the board is filtered to (the pick itself is not a filter).
+  if (projectSelect.value === ADD_PROJECT_VALUE) {
+    projectSelect.value = state.selectedProject;
+    openProjects().catch(showError);
+    return;
+  }
   state.selectedProject = projectSelect.value;
   // Remember the selection for the next browser session…
   saveSelectedProject(state.selectedProject);
@@ -2078,7 +2094,6 @@ function closeProjects() {
   projectsOverlay.hidden = true;
 }
 
-manageProjectsBtn.addEventListener('click', () => { openProjects().catch(showError); });
 $('projects-close').addEventListener('click', closeProjects);
 projectsOverlay.addEventListener('click', (e) => { if (e.target === projectsOverlay) closeProjects(); });
 

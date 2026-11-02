@@ -13,8 +13,9 @@ registered project gets its **own** `route.md`, which starts **empty** and is
 maintained by the agents working in that project — the harness only creates it
 if missing and never modifies an existing one.
 
-Opening a new project (＋ Project → `POST /api/projects`) always sets up its
-folder (`app/routemd.py::setup_project`):
+Opening a new project (Project dropdown → **＋ Add project…** →
+`POST /api/projects`) always sets up its folder
+(`app/routemd.py::setup_project`):
 
 - **`git init`** the folder (if it isn't a repo yet) with an initial commit that
   folds in `.gitignore`, `agent.md` and `route.md` — the work tree starts clean,
