@@ -423,6 +423,9 @@ def create_app(config: Config | None = None,
     def accept_card(card_id: str):
         # Gate + git merge + (on conflict) resolver spawn, all inside the
         # runner. GitError -> 409 (dirty tree, resolver already running, ...).
+        # A second accept for a repo that is already merging is not an error:
+        # the card comes back queued (session.accept_queued + queue_reason) and
+        # merges automatically when the repo frees.
         return runner.accept_card(card_id)
 
     @app.post("/api/cards/accept-all")

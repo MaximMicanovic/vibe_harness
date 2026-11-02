@@ -158,6 +158,16 @@ per card, shipped on accept — merged locally, or opened as a pull request.
     no `origin` remote, or the card branch gone — changing nothing. The body is
     built by `app/praccept.py::build_pr_body`, a pure function unit-tested
     without git or network.
+- **One accept per repository at a time.** Every accept merges in the repo's
+  main worktree (the project folder), and git allows exactly one merge in
+  progress there. `SessionRunner` keeps a per-repository accept lock
+  (`_accepting_repos`): a second accept for the same repo does not merge — the
+  card stays in **Done** flagged `session.accept_queued` with a `queue_reason`
+  ("waiting for the merge in <repo> to finish") and the accept drain merges it
+  automatically when the repo frees, so no second click is needed. Accepts for
+  *different* repos still run concurrently. The repo stays locked while a
+  conflict resolver owns the merge, and is released when the resolver
+  concludes or fails.
 - **The card branch and its linked worktree are KEPT after accept.** They are
   what the card's diff is read from, so `GET /api/cards/<id>/diff` still works
   on an accepted card. They are removed only when the card is **deleted** or
@@ -175,7 +185,11 @@ per card, shipped on accept — merged locally, or opened as a pull request.
   resolving…" chip), and a vibe session is spawned to fix the conflict there
   (it concludes the merge with a commit). When it succeeds, the card is
   accepted and merged automatically, and the resolver's commit is recorded as
-  the card's `merge_commit`. If the resolver fails, the card stays done with
+  the card's `merge_commit`. That conclusion is guarded: the commit is only
+  recorded when the card branch is an ancestor of HEAD
+  (`git merge-base --is-ancestor`), so a merge that belongs to another card
+  leaves this card done with a `merge_error` instead of accepting it with
+  someone else's commit. If the resolver fails, the card stays done with
   the conflict open — clicking Accept again spawns a fresh resolver (clicking
   it while one is already running returns 409).
 - A dirty tree never blocks a run: leftover uncommitted changes (e.g. from an

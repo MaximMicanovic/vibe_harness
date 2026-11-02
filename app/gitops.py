@@ -135,6 +135,17 @@ def branch_exists(cwd: Path, branch: str) -> bool:
                    cwd, check=False).returncode == 0
 
 
+def is_ancestor(root: Path, ancestor: str, descendant: str = "HEAD") -> bool:
+    """True when `ancestor` is contained in `descendant` (default HEAD).
+
+    ``git merge-base --is-ancestor`` exits 1 when it is not, and 128 on a
+    broken revision — both mean "not this card's merge", so both are False.
+    """
+    proc = run_git(["merge-base", "--is-ancestor", ancestor, descendant],
+                   root, check=False)
+    return proc.returncode == 0
+
+
 def registered_worktrees(root: Path) -> set[Path]:
     """Absolute paths of all worktrees git currently knows about for `root`."""
     proc = run_git(["worktree", "list", "--porcelain"], root, check=False)

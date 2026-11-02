@@ -1027,6 +1027,18 @@ def _wait_for_flag(store, card_id, getter, expected, timeout=10.0):
     raise AssertionError(f"flag did not become {expected!r} within {timeout}s")
 
 
+def _wait_for_repo_free(runner, repo, timeout=10.0):
+    """Wait until the runner's per-repo accept lock is released (the release
+    happens in a `finally`, just after the card is marked accepted)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with runner._accept_repo_lock:
+            if repo not in runner._accepting_repos:
+                return
+        time.sleep(0.02)
+    raise AssertionError(f"repo {repo} stayed locked for {timeout}s")
+
+
 def _commit_on_branch(proj, branch, path, content, message):
     """Advance `branch` with a commit that rewrites `path`. The base branch is
     checked out in the MAIN worktree (the card's work lives in its own linked
@@ -1154,6 +1166,276 @@ def test_git_resolver_failure_leaves_card_done(store, tmp_path, fake_vibe, proje
     assert g.get("resolver_error")
     assert gitops.merge_in_progress(proj)          # conflict still open, retryable
     assert Path(g["worktree"]).is_dir()            # worktree kept on conflict
+
+
+FAKE_VIBE_OWN_FILE = """#!/bin/sh
+# Fake vibe that writes $FAKE_FILE (default hello.txt) into --workdir, so two
+# cards in one repo can produce non-conflicting merges. A resolve-* round
+# blocks until $GO_FILE exists, then concludes the in-progress merge.
+WORKDIR=""
+OUTDIR=""
+AGENT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workdir) WORKDIR="$2"; shift 2 ;;
+    --output-dir) OUTDIR="$2"; shift 2 ;;
+    --agent) AGENT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+round_dir=$(basename "$(dirname "$OUTDIR")")
+case "$round_dir" in
+  resolve-*)
+    while [ ! -f "$GO_FILE" ]; do sleep 0.05; done
+    git add -A
+    git commit -q -m "resolver: conclude merge"
+    echo "fake resolver concluded merge"
+    exit 0
+    ;;
+esac
+mkdir -p "$WORKDIR"
+if [ "$AGENT" != "ask" ]; then
+  echo "hello from fake vibe" > "$WORKDIR/${FAKE_FILE:-hello.txt}"
+fi
+mkdir -p "$OUTDIR"
+cat > "$OUTDIR/export.json" <<'JSON'
+{"usage": {"total_tokens": 42}, "config": {"active_model": "fake-model"}, "stop_reason": "end_turn", "session_id": "fake-worker-session"}
+JSON
+if [ "$AGENT" = "ask" ]; then
+  echo "VERDICT: APPROVED"
+fi
+sleep 0.2
+exit 0
+"""
+
+
+def _own_file_runner(store, tmp_path, projects, monkeypatch):
+    """A runner whose fake vibe writes $FAKE_FILE, plus a GO_FILE for its
+    resolver rounds."""
+    monkeypatch.setenv("GO_FILE", str(tmp_path / "go"))
+    vibe = _write_script(tmp_path / "fake_vibe_own_file.sh", FAKE_VIBE_OWN_FILE)
+    return _make_runner_with_projects(store, tmp_path, vibe, projects)
+
+
+@git_test
+def test_second_accept_same_repo_queues_then_merges_automatically(
+        store, tmp_path, projects, monkeypatch):
+    """Two accepts for the same repo at the same moment: one merges, the other
+    is QUEUED with a clear reason (no exception, no second merge into the same
+    main worktree) and merges automatically once the repo frees."""
+    runner = _own_file_runner(store, tmp_path, projects, monkeypatch)
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    first = store.create("First", "Write a hello file.", project="my-app")
+    runner.run(first["id"])
+    _wait_for_status(store, first["id"], "done")
+    monkeypatch.setenv("FAKE_FILE", "other.txt")
+    second = store.create("Second", "Write another file.", project="my-app")
+    runner.run(second["id"])
+    _wait_for_status(store, second["id"], "done")
+
+    real_merge = gitops.merge_card_branch
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_merge(git_info):
+        entered.set()
+        assert release.wait(10), "the first merge was never released"
+        return real_merge(git_info)
+
+    monkeypatch.setattr(gitops, "merge_card_branch", slow_merge)
+    accepted: dict = {}
+    thread = threading.Thread(
+        target=lambda: accepted.update(runner.accept_card(first["id"])))
+    thread.start()
+    assert entered.wait(10), "the first accept never reached the merge"
+
+    queued = runner.accept_card(second["id"])
+    assert queued["status"] == "done"              # not an error, not merged
+    assert queued["session"]["accept_queued"] is True
+    assert queued["session"]["queue_reason"] == (
+        f"waiting for the merge in {proj.resolve()} to finish")
+    assert queued["session"]["git"].get("merged") is not True
+
+    release.set()
+    thread.join(10)
+    assert accepted["status"] == "accepted"
+
+    # The queued accept is picked up by the drain: no second click needed.
+    final = _wait_for_status(store, second["id"], "accepted", timeout=15)
+    assert final["session"]["git"]["merged"] is True
+    assert final["session"]["accept_queued"] is False
+    assert final["session"]["queue_reason"] is None
+
+
+@git_test
+def test_accepts_for_different_repos_run_concurrently(store, tmp_path, projects,
+                                                      monkeypatch):
+    """The accept lock is PER REPOSITORY: two accepts in different repos merge
+    at the same time (a global lock would break the barrier below)."""
+    runner = _own_file_runner(store, tmp_path, projects, monkeypatch)
+    cards = []
+    for name in ("app-one", "app-two"):
+        folder = tmp_path / name
+        folder.mkdir()
+        projects.create(name, str(folder))
+        card = store.create(f"Card {name}", "Write a hello file.", project=name)
+        runner.run(card["id"])
+        _wait_for_status(store, card["id"], "done")
+        cards.append(card)
+
+    real_merge = gitops.merge_card_branch
+    barrier = threading.Barrier(2, timeout=10)
+
+    def both_merging(git_info):
+        barrier.wait()          # both accepts must be inside the merge together
+        return real_merge(git_info)
+
+    monkeypatch.setattr(gitops, "merge_card_branch", both_merging)
+    results: dict = {}
+    threads = [threading.Thread(
+        target=lambda c=c: results.update({c["id"]: runner.accept_card(c["id"])}))
+        for c in cards]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(15)
+    for card in cards:
+        assert results[card["id"]]["status"] == "accepted"
+
+
+@git_test
+def test_queued_accept_in_a_free_repo_does_not_wait_for_a_busy_one(
+        store, tmp_path, projects, monkeypatch):
+    """The drain skips a card whose repo is busy and merges the next one: a
+    queued accept in a free repo never waits behind another repo's merge."""
+    runner = _own_file_runner(store, tmp_path, projects, monkeypatch)
+    for name in ("app-one", "app-two"):
+        folder = tmp_path / name
+        folder.mkdir()
+        projects.create(name, str(folder))
+    first = store.create("First", "Write a hello file.", project="app-one")
+    runner.run(first["id"])
+    _wait_for_status(store, first["id"], "done")
+    monkeypatch.setenv("FAKE_FILE", "other.txt")
+    second = store.create("Second", "Write another file.", project="app-one")
+    runner.run(second["id"])
+    _wait_for_status(store, second["id"], "done")
+    third = store.create("Third", "Write a third file.", project="app-two")
+    runner.run(third["id"])
+    _wait_for_status(store, third["id"], "done")
+
+    real_merge = gitops.merge_card_branch
+    entered, release = threading.Event(), threading.Event()
+    busy_repo = (tmp_path / "app-one").resolve()
+
+    def slow_merge(git_info):
+        if Path(git_info["repo"]) == busy_repo and not release.is_set():
+            entered.set()
+            assert release.wait(10), "the first merge was never released"
+        return real_merge(git_info)
+
+    monkeypatch.setattr(gitops, "merge_card_branch", slow_merge)
+    accepted: dict = {}
+    thread = threading.Thread(
+        target=lambda: accepted.update(runner.accept_card(first["id"])))
+    thread.start()
+    assert entered.wait(10), "the first accept never reached the merge"
+
+    # Both cards are queued for the drain; `second` is older, so it is picked
+    # first — and its repo is the busy one.
+    store.patch_session(second["id"], {"accept_queued": True,
+                                       "accept_queued_at": "2024-01-01T00:00:00+00:00"})
+    store.patch_session(third["id"], {"accept_queued": True,
+                                      "accept_queued_at": "2024-01-01T00:00:01+00:00"})
+    runner._start_accept_drain()
+
+    assert _wait_for_status(store, third["id"], "accepted",
+                            timeout=15)["session"]["git"]["merged"] is True
+    assert store.get(second["id"])["session"]["accept_queued"] is True
+
+    release.set()
+    thread.join(10)
+    assert accepted["status"] == "accepted"
+    final = _wait_for_status(store, second["id"], "accepted", timeout=15)
+    assert final["session"]["git"]["merged"] is True
+
+
+@git_test
+def test_conclude_resolved_merge_refuses_a_merge_that_is_not_the_cards(
+        store, tmp_path, projects, monkeypatch):
+    """The resolver's commit is only recorded as THIS card's merge when the
+    card branch is in HEAD: a merge that belongs to another card leaves the
+    card done with a merge_error, never accepted."""
+    runner = _own_file_runner(store, tmp_path, projects, monkeypatch)
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    card = store.create("Wrong merge", "Write a hello file.", project="my-app")
+    runner.run(card["id"])
+    done = _wait_for_status(store, card["id"], "done")
+    git_info = done["session"]["git"]
+    # Another card's merge landed in the repo: HEAD does not contain this
+    # card's branch.
+    (proj / "someone-else.txt").write_text("another card\n")
+    _git(["add", "-A"], proj)
+    _git(["commit", "-q", "-m", "another card's merge"], proj)
+    assert not gitops.is_ancestor(proj, git_info["branch"])
+
+    runner._conclude_resolved_merge(done, {"finished_at": "now", "exit_code": 0})
+
+    after = store.get(card["id"])
+    assert after["status"] == "done"               # left for a retry
+    assert after["session"]["git"]["merged"] is False
+    assert after["session"]["git"]["resolving"] is False
+    assert after["session"]["git"]["merge_error"]
+    assert "not this card's" in after["session"]["git"]["merge_error"]
+
+
+@git_test
+def test_conflicted_accept_keeps_repo_locked_until_resolver_concludes(
+        store, tmp_path, projects, monkeypatch):
+    """A conflicted accept hands over to a resolver and the repo stays locked
+    until that resolver concludes; the accept queued behind it then merges."""
+    runner = _own_file_runner(store, tmp_path, projects, monkeypatch)
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    gitops.ensure_repo(proj)
+    (proj / "hello.txt").write_text("base version\n")
+    _git(["add", "-A"], proj)
+    _git(["commit", "-q", "-m", "base hello.txt"], proj)
+
+    conflicted = store.create("Conflict card", "Write a hello file.", project="my-app")
+    runner.run(conflicted["id"])
+    _wait_for_status(store, conflicted["id"], "done")
+    monkeypatch.setenv("FAKE_FILE", "other.txt")
+    other = store.create("Other card", "Write another file.", project="my-app")
+    runner.run(other["id"])
+    _wait_for_status(store, other["id"], "done")
+    # The user edits the same file on the base branch: the first accept conflicts.
+    (proj / "hello.txt").write_text("user edit\n")
+    _git(["add", "hello.txt"], proj)
+    _git(["commit", "-q", "-m", "user edit"], proj)
+
+    runner.accept_card(conflicted["id"])           # conflict -> resolver spawned
+    _wait_for_flag(store, conflicted["id"],
+                   lambda n: (n["session"]["git"] or {}).get("resolving"), True)
+    with runner._accept_repo_lock:
+        assert proj.resolve() in runner._accepting_repos
+
+    queued = runner.accept_card(other["id"])
+    assert queued["status"] == "done"
+    assert queued["session"]["accept_queued"] is True
+    assert queued["session"]["queue_reason"] == (
+        f"waiting for the merge in {proj.resolve()} to finish")
+
+    (tmp_path / "go").write_text("go\n")           # the resolver concludes the merge
+    assert _wait_for_status(store, conflicted["id"], "accepted",
+                            timeout=20)["session"]["git"]["merged"] is True
+    final = _wait_for_status(store, other["id"], "accepted", timeout=20)
+    assert final["session"]["git"]["merged"] is True
+    _wait_for_repo_free(runner, proj.resolve())
 
 
 FAKE_VIBE_RESOLVE_ON_FLAG = """#!/bin/sh
