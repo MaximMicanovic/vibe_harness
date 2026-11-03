@@ -9,6 +9,12 @@ dependencies = [
     "python-frontmatter>=1.1",
 ]
 
+[project.scripts]
+# Console entrypoint that binds from config (VIBE_HARNESS_HOST/VIBE_HARNESS_PORT):
+# `vibe-harness` once installed, `python -m app.main` / `uv run python -m app.main`
+# without installing. `uvicorn app.main:app` still works as-is.
+vibe-harness = "app.main:serve"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
