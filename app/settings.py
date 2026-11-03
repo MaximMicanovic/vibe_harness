@@ -48,8 +48,8 @@ def describe_accept_modes() -> list[dict]:
 
 
 class SettingsStore:
-    """`{"backend": "vibe", "max_concurrent": 3, "accept_mode": "local"}` on
-    disk, with the default for anything unset."""
+    """`{"backend": "vibe", "max_concurrent": 3, "accept_mode": "local",
+    "prevent_sleep": true}` on disk, with the default for anything unset."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -128,3 +128,21 @@ class SettingsStore:
             data["accept_mode"] = key
             self._save(data)
         return key
+
+    def prevent_sleep(self, default: bool = True) -> bool:
+        """The stored sleep-guard toggle, else `default` (Config.prevent_sleep,
+        i.e. the VIBE_HARNESS_PREVENT_SLEEP env value). A non-boolean stored
+        value is treated as unset."""
+        raw = self._load().get("prevent_sleep")
+        if isinstance(raw, bool):
+            return raw
+        return bool(default)
+
+    def set_prevent_sleep(self, value: bool) -> bool:
+        """Persist the sleep-guard toggle so a restart keeps it."""
+        value = bool(value)
+        with self._lock:
+            data = self._load()
+            data["prevent_sleep"] = value
+            self._save(data)
+        return value
