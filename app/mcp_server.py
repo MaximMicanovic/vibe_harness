@@ -35,7 +35,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = "2025-06-18"
+PROTOCOL_VERSION = "2026-07-28"
 SERVER_NAME = "vibe-harness"
 SERVER_VERSION = "0.1.0"
 DEFAULT_URL = "http://127.0.0.1:8734"
@@ -1085,6 +1085,8 @@ def handle_message(msg: dict) -> dict | None:
     if method.startswith("notifications/"):
         return None
     if method == "initialize":
+        # Spec backward-compat: echo the client's requested protocolVersion
+        # when it is a string; fall back to our own only when it sends none.
         params = msg.get("params") or {}
         version = params.get("protocolVersion") if isinstance(params, dict) else None
         return _result(mid, {

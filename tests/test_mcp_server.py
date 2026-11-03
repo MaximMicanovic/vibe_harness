@@ -144,10 +144,10 @@ def wait_status(harness, card_id, statuses, timeout=10.0):
 def test_initialize_ping_and_notifications():
     resp = mcp_server.handle_message({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+        "params": {"protocolVersion": "2026-07-28", "capabilities": {},
                    "clientInfo": {"name": "test", "version": "0"}}})
     assert resp["id"] == 1
-    assert resp["result"]["protocolVersion"] == "2025-06-18"
+    assert resp["result"]["protocolVersion"] == "2026-07-28"
     assert resp["result"]["serverInfo"]["name"] == "vibe-harness"
     assert "tools" in resp["result"]["capabilities"]
     assert mcp_server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
@@ -157,6 +157,34 @@ def test_initialize_ping_and_notifications():
     # unknown method -> -32601
     resp = mcp_server.handle_message({"jsonrpc": "2.0", "id": 3, "method": "bogus"})
     assert resp["error"]["code"] == -32601
+
+
+def test_protocol_version_pins_current_spec_revision():
+    # modelcontextprotocol.io/specification/versioning — current revision.
+    assert mcp_server.PROTOCOL_VERSION == "2026-07-28"
+
+
+def test_initialize_handshake_echoes_client_protocol_version():
+    # Backward-compat behaviour: echo the client's requested protocolVersion
+    # when it is a string; fall back to our own PROTOCOL_VERSION only when the
+    # client sends none (or a non-string).
+    resp = mcp_server.handle_message({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2026-07-28"}})
+    assert resp["result"]["protocolVersion"] == "2026-07-28"
+    # any other string version is echoed back verbatim
+    resp = mcp_server.handle_message({
+        "jsonrpc": "2.0", "id": 2, "method": "initialize",
+        "params": {"protocolVersion": "2099-12-31"}})
+    assert resp["result"]["protocolVersion"] == "2099-12-31"
+    # no params at all -> server default
+    resp = mcp_server.handle_message({"jsonrpc": "2.0", "id": 3, "method": "initialize"})
+    assert resp["result"]["protocolVersion"] == "2026-07-28"
+    # non-string version -> server default
+    resp = mcp_server.handle_message({
+        "jsonrpc": "2.0", "id": 4, "method": "initialize",
+        "params": {"protocolVersion": 42}})
+    assert resp["result"]["protocolVersion"] == "2026-07-28"
 
 
 def test_tools_list_surface(harness):
@@ -543,7 +571,7 @@ def test_stdio_subprocess_jsonrpc(tmp_path, monkeypatch):
             return json.loads(line)
 
         send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-              "params": {"protocolVersion": "2025-06-18"}})
+              "params": {"protocolVersion": "2026-07-28"}})
         resp = recv()
         assert resp["result"]["serverInfo"]["name"] == "vibe-harness"
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})

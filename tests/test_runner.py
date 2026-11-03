@@ -212,7 +212,7 @@ def start_mailbox():
         return None
     proc = subprocess.Popen([sys.executable, server], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, text=True)
-    rpc(proc, 1, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+    rpc(proc, 1, "initialize", {"protocolVersion": "2026-07-28", "capabilities": {},
                                 "clientInfo": {"name": "fake", "version": "0"}})
     proc.stdin.write(json.dumps({"jsonrpc": "2.0",
                                  "method": "notifications/initialized"}) + "\n")

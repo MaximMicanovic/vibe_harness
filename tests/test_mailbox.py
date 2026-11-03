@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from app import mailbox
+from app import mailbox, mailbox_server
 
 SERVER = Path(__file__).resolve().parent.parent / "app" / "mailbox_server.py"
 
@@ -79,9 +79,10 @@ def mdir(tmp_path) -> Path:
 def test_initialize_and_tools_list(mdir):
     c = Rpc(mdir, "reviewer")
     try:
-        r = c.call("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+        r = c.call("initialize", {"protocolVersion": "2026-07-28", "capabilities": {},
                                   "clientInfo": {"name": "t", "version": "0"}})
         assert r["result"]["serverInfo"]["name"] == "vibe-harness-mailbox"
+        assert r["result"]["protocolVersion"] == "2026-07-28"
         assert "tools" in r["result"]["capabilities"]
         c.notify("notifications/initialized")   # notification: no response, no crash
         r = c.call("tools/list")
@@ -89,6 +90,28 @@ def test_initialize_and_tools_list(mdir):
         assert names == ["post_message", "submit_verdict", "wait_for_message"]
         r = c.call("ping")
         assert r["result"] == {}
+    finally:
+        c.close()
+
+
+def test_initialize_handshake_echoes_client_protocol_version(mdir):
+    # Same handshake rule as the harness MCP server: echo the client's
+    # requested protocolVersion when it is a string (spec backward-compat),
+    # fall back to our own PROTOCOL_VERSION only when the client sends none.
+    assert mailbox_server.PROTOCOL_VERSION == "2026-07-28"
+    c = Rpc(mdir, "worker")
+    try:
+        r = c.call("initialize", {"protocolVersion": "2026-07-28"})
+        assert r["result"]["protocolVersion"] == "2026-07-28"
+        # any other string version is echoed back verbatim
+        r = c.call("initialize", {"protocolVersion": "2099-12-31"})
+        assert r["result"]["protocolVersion"] == "2099-12-31"
+        # no params at all -> server default
+        r = c.call("initialize")
+        assert r["result"]["protocolVersion"] == "2026-07-28"
+        # non-string version -> server default
+        r = c.call("initialize", {"protocolVersion": 42})
+        assert r["result"]["protocolVersion"] == "2026-07-28"
     finally:
         c.close()
 
