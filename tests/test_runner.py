@@ -27,6 +27,7 @@ from app.runner import (
     TestFailedError,
     WorkdirNotAllowed,
     fix_prompt_template,
+    mcp_rules,
     prompt_template,
     resolve_prompt_template,
     review_prompt_template,
@@ -2183,6 +2184,169 @@ def test_tdd_config_flag_from_env():
     assert load_config({"VIBE_HARNESS_TDD": "1"}).tdd is True
     assert load_config({"VIBE_HARNESS_TDD": "0"}).tdd is False
     assert load_config({"VIBE_HARNESS_TDD": "false"}).tdd is False
+
+
+# ----------------------------------------------------------------------
+# the MCP rule block names every tool after the configured server
+# (VIBE_HARNESS_MCP_SERVER_NAME), so a rename leaves no stale tool names
+# ----------------------------------------------------------------------
+
+def test_mcp_rules_name_every_tool_after_the_configured_server():
+    rules = mcp_rules("board")
+    for tool in ("list_cards", "create_card", "run_card", "add_dependency",
+                 "list_dependencies", "create_archive", "archive_card",
+                 "archive_cards", "list_archives", "get_archive", "restore_card",
+                 "ask_user"):
+        assert f"board_{tool}" in rules
+    # No hardcoded harness_* tool names may survive the rename.
+    assert "`harness_" not in rules
+    # The default server name keeps the familiar harness_* tools.
+    assert "`harness_list_cards`" in mcp_rules("harness")
+
+
+def test_worker_prompt_tool_names_follow_the_server_name():
+    prompt = prompt_template("spec body", "board", tdd=False, mailbox=False)
+    assert "board_create_card" in prompt
+    assert "board_ask_user" in prompt
+    assert "`harness_" not in prompt
+
+
+# ----------------------------------------------------------------------
+# the mailbox rules are only for sessions that actually have the mailbox
+# (it is attached via .vibe/config.toml, which only Vibe reads)
+# ----------------------------------------------------------------------
+
+def test_worker_prompts_mention_the_mailbox_only_when_enabled():
+    for prompt in (prompt_template("spec body"),
+                   fix_prompt_template("spec body", "reason")):
+        assert "harness-mailbox" in prompt
+        assert "wait_for_message" in prompt
+        assert "post_message" in prompt
+    for prompt in (prompt_template("spec body", mailbox=False),
+                   fix_prompt_template("spec body", "reason", mailbox=False)):
+        assert "harness-mailbox" not in prompt
+        assert "wait_for_message" not in prompt
+        assert "post_message" not in prompt
+    # The board MCP rules are independent of the mailbox.
+    assert "harness_create_card" in prompt_template("spec body", mailbox=False)
+
+
+def test_review_prompt_mailbox_section_only_when_enabled():
+    prompt = review_prompt_template("spec body")
+    assert "## Mailbox (MCP)" in prompt
+    assert "submit_verdict" in prompt
+    assert "post_message" in prompt
+    assert "wait_for_message" in prompt
+
+    bare = review_prompt_template("spec body", mailbox=False)
+    assert "## Mailbox (MCP)" not in bare
+    assert "submit_verdict" not in bare
+    assert "post_message" not in bare
+    assert "wait_for_message" not in bare
+    # The log VERDICT: line stays: on a backend without the mailbox it is the
+    # only verdict channel.
+    assert "VERDICT: APPROVED" in bare
+    assert "VERDICT: REJECTED" in bare
+
+
+def _runner_with_backend(tmp_path, store, backend_key, **config_kwargs):
+    from app.settings import SettingsStore
+    settings = SettingsStore(tmp_path / f"settings-{backend_key}.json")
+    settings.set_backend(backend_key)
+    config = Config(**{"vibe_bin": str(tmp_path / "vibe"),
+                       "claude_bin": str(tmp_path / "claude"),
+                       "time_limit_seconds": 30, **config_kwargs})
+    return SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
+                         settings=settings)
+
+
+def test_prompt_mailbox_gate_follows_the_resolved_backend(store, tmp_path):
+    """_prompt_mailbox gates the mailbox prose on the backend the spawn
+    actually uses: only Vibe reads the worktree's .vibe/config.toml."""
+    card = store.create("C", "spec body")
+    vibe_runner = _runner_with_backend(tmp_path, store, "vibe")
+    claude_runner = _runner_with_backend(tmp_path, store, "claude")
+    assert vibe_runner._prompt_mailbox("run", card) is True
+    assert claude_runner._prompt_mailbox("run", card) is False
+    assert vibe_runner._prompt_mailbox("review", card) is True
+    assert claude_runner._prompt_mailbox("review", card) is False
+    # ... and it still honours the mailbox kill-switch on Vibe.
+    off = _runner_with_backend(tmp_path, store, "vibe", mailbox=False)
+    assert off._prompt_mailbox("run", card) is False
+
+
+def test_fixer_prompt_drops_the_mailbox_on_claude(store, tmp_path, monkeypatch):
+    """The fixer round's prompt is gated the same way as the first run."""
+    card = store.create("C", "spec body")
+    captured: dict = {}
+    for key in ("vibe", "claude"):
+        runner = _runner_with_backend(tmp_path, store, key)
+        monkeypatch.setattr(runner, "_spawn",
+                            lambda card_id, **kw: captured.update(kw))
+        runner._loop_reject(card["id"], card, "fix this", source="review")
+        prompt = captured["prompt"]
+        if key == "vibe":
+            assert "harness-mailbox" in prompt
+        else:
+            assert "harness-mailbox" not in prompt
+            assert "wait_for_message" not in prompt
+
+
+FAKE_CLAUDE = """#!/bin/sh
+# Fake claude (print mode): the prompt arrives on stdin; one result object on
+# stdout, plus a log VERDICT line so the review fallback channel answers.
+cat >/dev/null
+echo '{"type":"result","is_error":false,"session_id":"claude-1","num_turns":1,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5},"modelUsage":{"claude-fake":{}},"terminal_reason":"completed"}'
+echo "VERDICT: APPROVED"
+exit 0
+"""
+
+
+def test_claude_sessions_get_no_mailbox_instructions(store, tmp_path, monkeypatch):
+    """End to end on the claude backend: neither the worker prompt nor the
+    review prompt may instruct mailbox tool calls — Claude has no mailbox
+    tools (the server is attached via .vibe/config.toml, which only Vibe
+    reads). The VERDICT: fallback stays in the review prompt."""
+    fake_claude = _write_script(tmp_path / "fake_claude.sh", FAKE_CLAUDE)
+    runner = _runner_with_backend(tmp_path, store, "claude",
+                                  claude_bin=str(fake_claude))
+    card = store.create("Claude card", "Write a hello file.")
+    card_id = card["id"]
+
+    runner.run(card_id)
+    final = _wait_for_status(store, card_id, "done")
+
+    sdir = runner.sessions_dir / card_id
+    run_prompt = (sdir / "run-1" / "prompt.md").read_text()
+    review_prompt = (sdir / "review-1" / "prompt.md").read_text()
+    for prompt in (run_prompt, review_prompt):
+        assert "harness-mailbox" not in prompt
+        assert "wait_for_message" not in prompt
+        assert "post_message" not in prompt
+        assert "submit_verdict" not in prompt
+    # The board MCP rules stay (Claude run sessions get the server via
+    # --mcp-config), and the review prompt keeps the VERDICT: fallback.
+    assert "harness_create_card" in run_prompt
+    assert "VERDICT: APPROVED" in review_prompt
+    assert final["session"]["review"]["approved"] is True
+
+
+def test_vibe_sessions_keep_the_mailbox_instructions(store, tmp_path, fake_vibe):
+    """Control: on Vibe the same prompts keep the mailbox rules."""
+    runner = _runner_with_backend(tmp_path, store, "vibe", vibe_bin=str(fake_vibe))
+    card = store.create("Vibe card", "Write a hello file.")
+    card_id = card["id"]
+
+    runner.run(card_id)
+    _wait_for_status(store, card_id, "done")
+
+    sdir = runner.sessions_dir / card_id
+    run_prompt = (sdir / "run-1" / "prompt.md").read_text()
+    review_prompt = (sdir / "review-1" / "prompt.md").read_text()
+    assert "harness-mailbox" in run_prompt
+    assert "wait_for_message" in run_prompt
+    assert "submit_verdict" in review_prompt
+    assert "## Mailbox (MCP)" in review_prompt
 
 
 # ----------------------------------------------------------------------
