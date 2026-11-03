@@ -287,7 +287,11 @@ def test_run_done_and_accept(env):
     card = wait_for_status(env.client, card["id"], {"done"})
     session = card["session"]
     assert session["exit_code"] == 0
-    assert "cost_usd" not in session
+    # The export's cost_usd is persisted per round (worker on the session,
+    # reviewer on its record) and aggregated on the card, like the tokens.
+    assert session["cost_usd"] == 0.01
+    assert session["review"]["cost_usd"] == 0.01
+    assert session["card_cost_usd"] == pytest.approx(0.02)
     assert session["tokens"] == 42
     assert session["model"] == "fake-model"
     assert session["stop_reason"] == "end_turn"
@@ -615,7 +619,8 @@ def test_stats(env):
     stats = r.json()
     assert stats["counts"]["done"] == 1
     assert stats["counts"]["draft"] == 0
-    assert "total_cost_usd" not in stats
+    # The fake vibe reports $0.01 for the run AND for the review round.
+    assert stats["total_cost_usd"] == pytest.approx(0.02)
     # The fake vibe reports 42 tokens for the run AND for the review round:
     # the card's total is the sum of both.
     assert stats["total_tokens"] == 84
@@ -701,6 +706,52 @@ def test_stats_counts_a_legacy_card_without_a_reviews_list(env):
     final = env.client.get(f"/api/cards/{card['id']}").json()
     assert final["session"]["card_tokens"] == 1250
     assert env.client.get("/api/stats").json()["total_tokens"] == 1250
+
+
+def test_stats_sums_cost_per_round_and_per_card(env):
+    # cost_usd rides the same path as tokens: worker on the session, review
+    # rounds on their records, resolver on its own record; the card aggregate
+    # and /api/stats both derive from those per-round numbers.
+    card = create_card(env.client)
+    env.store.set_status(card["id"], "running")
+    env.store.set_status(card["id"], "done", session_patch={
+        "tokens": 1000, "cost_usd": 0.10,
+        "reviews": [{"round": 1, "tokens": 250, "cost_usd": 0.02, "approved": True}],
+        "review": {"round": 1, "tokens": 250, "cost_usd": 0.02, "approved": True},
+        "resolver": {"round": 1, "exit_code": 0, "tokens": 400, "cost_usd": 0.03},
+    })
+    final = env.client.get(f"/api/cards/{card['id']}").json()
+    assert final["session"]["card_cost_usd"] == pytest.approx(0.15)
+    stats = env.client.get("/api/stats").json()
+    assert stats["total_cost_usd"] == pytest.approx(0.15)
+
+
+def test_stats_cost_sums_across_cards(env):
+    # Two cards, each with a worker + review round: the board cost total is
+    # the sum of the per-card aggregates, like the token total.
+    for title in ("One", "Two"):
+        card = create_card(env.client, title=title)
+        env.store.set_status(card["id"], "running")
+        env.store.set_status(card["id"], "done", session_patch={
+            "tokens": 1000, "cost_usd": 0.10,
+            "reviews": [{"round": 1, "tokens": 250, "cost_usd": 0.05,
+                          "approved": True}],
+            "review": {"round": 1, "tokens": 250, "cost_usd": 0.05, "approved": True},
+        })
+    cards = env.client.get("/api/cards").json()
+    assert [n["session"]["card_cost_usd"] for n in cards] == [0.15, 0.15]
+    stats = env.client.get("/api/stats").json()
+    assert stats["total_cost_usd"] == pytest.approx(0.30)
+    assert stats["total_cost_usd"] == pytest.approx(
+        sum(n["session"]["card_cost_usd"] for n in cards))
+
+
+def test_stats_cost_is_none_until_a_card_reports_one(env):
+    # Unknown, not zero: when no round ever exported a cost, the board total
+    # stays null rather than pretending to be $0.
+    create_card(env.client)
+    stats = env.client.get("/api/stats").json()
+    assert stats["total_cost_usd"] is None
 
 
 def test_token_breakdown_recorded_from_export(tmp_path):

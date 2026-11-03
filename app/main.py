@@ -69,7 +69,7 @@ from app.runner import (
 )
 from app.settings import SettingsError, SettingsStore, describe_accept_modes
 from app.stacks import StackError, StackNotFound, StackStore
-from app.tokens import card_token_breakdown, card_tokens
+from app.tokens import card_cost_usd, card_token_breakdown, card_tokens
 from app.transcripts import TranscriptStore, format_events
 
 
@@ -950,6 +950,11 @@ def create_app(config: Config | None = None,
         # a type no card has ever reported stays None (unknown, not zero).
         breakdown_seen = {k: False for k in TOKEN_BREAKDOWN_KEYS}
         token_breakdown = {k: 0 for k in TOKEN_BREAKDOWN_KEYS}
+        # Total USD across the cards, summed like the tokens: the per-card
+        # aggregate (worker + review + resolver rounds); None stays None
+        # (unknown) until some card has ever reported a cost.
+        total_cost = 0.0
+        cost_seen = False
         total_runtime = 0.0
         finished = 0
         for card in cards:
@@ -973,6 +978,14 @@ def create_app(config: Config | None = None,
                 if v is not None:
                     token_breakdown[k] += v
                     breakdown_seen[k] = True
+            # Live sessions have no live cost counter (only tokens stream), so
+            # the recorded per-card aggregate is used as-is.
+            cost = session.get("card_cost_usd")
+            if cost is None:
+                cost = card_cost_usd(session)
+            if cost is not None:
+                total_cost += cost
+                cost_seen = True
             if session.get("started_at") and session.get("finished_at"):
                 try:
                     start = datetime.fromisoformat(session["started_at"])
@@ -988,6 +1001,7 @@ def create_app(config: Config | None = None,
             "live_tokens": live_tokens,
             "token_breakdown": {k: (token_breakdown[k] if breakdown_seen[k] else None)
                                 for k in TOKEN_BREAKDOWN_KEYS},
+            "total_cost_usd": (round(total_cost, 6) if cost_seen else None),
             "total_runtime_seconds": round(total_runtime, 3),
             "avg_runtime_seconds": round(avg, 3),
             "project": project,

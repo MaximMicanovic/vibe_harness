@@ -264,6 +264,14 @@ function fmtTokens(n) {
   return String(n);
 }
 
+/* USD cost: two decimals for amounts of a cent or more, four for smaller
+ * ones; '—' when the cost is unknown (null). */
+function fmtCost(usd) {
+  if (usd == null || isNaN(usd)) return '—';
+  if (usd >= 0.01) return '$' + usd.toFixed(2);
+  return '$' + usd.toFixed(4);
+}
+
 /* Hover suffix naming what types of tokens a counter was made of — cached,
  * output, input (in that order). Unknown types (null) are skipped; when no
  * type is known at all the suffix is empty and the tooltip stays generic. */
@@ -372,6 +380,10 @@ function renderStats() {
   if (!s) return;
   const live = backendHasLiveTokens();
   $('stat-tokens-wrap').hidden = !live;
+  // Cost is reported once per round at export time on every backend (there
+  // is no live cost counter), so it shows regardless of the backend.
+  $('stat-cost').textContent = fmtCost(s.total_cost_usd);
+  $('stat-cost-wrap').title = 'Total cost across all cards in USD (worker + review + resolver rounds)';
   if (!live) {
     $('stat-runtime').textContent = fmtDuration(s.total_runtime_seconds);
     $('stat-avg').textContent = fmtDuration(s.avg_runtime_seconds);
@@ -782,6 +794,13 @@ function buildCard(cardData, queuePos) {
       tc.title = 'Total tokens this card cost (worker + review + resolver rounds): '
         + fmtTokens(total) + ' tok' + tokenTypesSuffix(bd);
       chips.appendChild(tc);
+    }
+    if (typeof s.card_cost_usd === 'number') {
+      // The card's total USD cost — same rounds as the token chip above.
+      const cc = chip('cost', fmtCost(s.card_cost_usd));
+      cc.title = 'Total cost this card has spent in USD (worker + review + resolver rounds): '
+        + fmtCost(s.card_cost_usd);
+      chips.appendChild(cc);
     }
     if (s.verified === true) chips.appendChild(chip('verified', '✓ verified'));
     if (s.review) {

@@ -63,9 +63,11 @@ from app.config import BASE_DIR, SESSIONS_DIR, Config
 from app.gitops import GitBusyError, GitError, GitMergeConflict
 from app.tokens import (
     TOKEN_BREAKDOWN_KEYS,
+    card_cost_usd,
     card_token_breakdown,
     card_tokens,
     combine_live,
+    export_cost_usd,
 )
 from app.cards import (
     COMPLETED_STATUSES,
@@ -1618,6 +1620,10 @@ class SessionRunner:
                            if isinstance(usage, dict) else None)
         if token_breakdown is not None:
             resolver_patch["token_breakdown"] = token_breakdown
+        # The resolver's own USD cost, same as its tokens.
+        resolver_cost = export_cost_usd(export)
+        if resolver_cost is not None:
+            resolver_patch["cost_usd"] = resolver_cost
         # A refused model is why the merge is still conflicted: name it rather
         # than reporting a bare exit code.
         model_error = self._model_error(rdir, entry.get("model"), exit_code,
@@ -2426,6 +2432,9 @@ class SessionRunner:
         # Per-type breakdown (cached/output/input) for the token-counter hover
         # tooltip; None when the export carries only a total.
         token_breakdown = export_token_breakdown(usage) if isinstance(usage, dict) else None
+        # The round's USD cost from the same export (None when the backend
+        # reported none); persisted per round, summed per card by card_cost_usd.
+        cost_usd = export_cost_usd(export)
         export_config = export.get("config") or export.get("effective_config") or {}
         model = export_config.get("active_model") or export_config.get("model")
         stop_reason = export.get("stop_reason")
@@ -2457,6 +2466,8 @@ class SessionRunner:
             }
             if token_breakdown is not None:
                 outcome["token_breakdown"] = token_breakdown
+            if cost_usd is not None:
+                outcome["cost_usd"] = cost_usd
             if model_error:
                 outcome["model_error"] = model_error
             if worker_session_id:
@@ -2570,6 +2581,8 @@ class SessionRunner:
                 review_record["model_error"] = model_error
             if token_breakdown is not None:
                 review_record["token_breakdown"] = token_breakdown
+            if cost_usd is not None:
+                review_record["cost_usd"] = cost_usd
             # Supervision bookkeeping: which commit this review covered (the
             # next review diffs from it) and how many mailbox messages were
             # exchanged so far.
@@ -2845,10 +2858,11 @@ class SessionRunner:
         MCP's get_card/list_cards both read it from here, so the reason is
         computed once, in one place.
 
-        `session.card_tokens` is what the card actually cost: the worker's
-        export total plus every review and resolver round (`app/tokens.py`).
-        The chip, /api/stats and /api/split-report all read this one number, so
-        they cannot disagree.
+        `session.card_tokens` is what the card actually cost in tokens: the
+        worker's export total plus every review and resolver round
+        (`app/tokens.py`). The chip, /api/stats and /api/split-report all read
+        this one number, so they cannot disagree. `session.card_cost_usd` is
+        the same aggregate in USD (None when no round exported a cost).
 
         While a session is live, `session.live_tokens` is the per-card total
         shown on the card and summed into /api/stats: the live counter itself
@@ -2874,6 +2888,11 @@ class SessionRunner:
             card_breakdown = card_token_breakdown(session)
             if card_breakdown is not None:
                 new_session["card_token_breakdown"] = card_breakdown
+            card_cost = card_cost_usd(session)
+            # A card whose rounds never exported a cost keeps showing no cost
+            # chip, as before (None = unknown, not $0).
+            if card_cost is not None:
+                new_session["card_cost_usd"] = card_cost
             out["session"] = new_session
         live = self.live_usage(card["id"])
         if live is None:

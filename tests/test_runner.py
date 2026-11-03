@@ -21,6 +21,7 @@ from app.config import Config, load_config
 from app.gitops import GitBusyError, GitError
 from app.cards import CardRunning, CardStore
 from app.projects import ProjectStore
+from app.tokens import card_cost_usd
 from app.runner import (
     NotRunningError,
     SessionRunner,
@@ -68,10 +69,11 @@ case "$round_dir" in
         git add -A
         git commit -q -m "resolver: conclude merge"
         echo "fake resolver concluded merge"
-        # The resolver's own export: its tokens are part of the card's cost.
+        # The resolver's own export: its tokens and cost are part of the
+        # card's totals.
         mkdir -p "$OUTDIR"
         cat > "$OUTDIR/export.json" <<'JSON'
-{"usage": {"total_tokens": 77}, "exit_code": 0}
+{"cost_usd": 0.005, "usage": {"total_tokens": 77}, "exit_code": 0}
 JSON
         exit 0
         ;;
@@ -421,7 +423,13 @@ def test_run_success(store, make_runner, fake_vibe):
     assert (sdir / "workspace" / "hello.txt").exists()
 
     session = final.get("session") or {}
-    assert "cost_usd" not in session
+    # The worker round's export cost is persisted on the session (next to its
+    # tokens), and the review round's on its own record; the per-card
+    # aggregate is derived from both (app/tokens.py card_cost_usd).
+    assert session.get("cost_usd") == 0.01
+    assert session["review"]["cost_usd"] == 0.01
+    assert session["reviews"][0]["cost_usd"] == 0.01
+    assert card_cost_usd(session) == 0.02
     assert session.get("tokens") == 42
     assert session.get("model") == "fake-model"
     assert session.get("stop_reason") == "end_turn"
@@ -1101,8 +1109,10 @@ def test_git_auto_accept_conflict_resolved_by_model(store, tmp_path, fake_vibe, 
     resolver = final["session"].get("resolver") or {}
     assert resolver.get("exit_code") == 0
     assert resolver.get("workdir") == str(proj.resolve())
-    # The resolver's own export is read: its tokens are part of the card cost.
+    # The resolver's own export is read: its tokens and cost are part of the
+    # card's totals.
     assert resolver.get("tokens") == 77
+    assert resolver.get("cost_usd") == 0.005
     rdir = runner.sessions_dir / card_id / "resolve-1"
     assert (rdir / "session.log").exists()
     rprompt = (rdir / "prompt.md").read_text()
