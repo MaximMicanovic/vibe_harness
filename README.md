@@ -2,43 +2,56 @@
 
 **A local kanban board for AI coding agents.**
 
-You write a spec on a card. The harness hands it to a headless
-[Mistral Vibe](https://mistral.ai) session, which implements it on its own git
-branch in its own worktree. A second, read-only session then reviews the diff
-and runs the tests. Only then can you accept the card — and accepting merges the
-branch.
+You write a spec on a card. The harness hands it to a headless agent CLI —
+[Mistral Vibe](https://mistral.ai) or
+[Claude Code](https://claude.com/claude-code) — which implements it on its own
+git branch in its own worktree. A second, read-only session then reviews the
+diff and runs the tests. Only then can you accept the card — and accepting
+merges the branch.
 
 ## Why
 
 Coding agents are good at a single task and bad at being trusted. A chat window
-gives you no review gate, no isolation, no record, and no way to run five things
-at once without them stepping on each other.
+gives you no review gate, no isolation, no record, and no parallel runs.
 
 Vibe Harness puts the agent behind a board:
 
-- **A spec, not a conversation.** Each card is a self-contained brief. The
-  session that implements it starts fresh, so it cannot drift from what you
-  asked for over a long chat.
+- **A spec, not a conversation.** Each card is a self-contained brief, and the
+  session that implements it starts fresh — it cannot drift over a long chat.
 - **Nothing ships unreviewed.** A separate reviewer session inspects the diff
   and runs the test suite itself. A card cannot be accepted without an approval,
   and cannot be merged with red tests.
-- **You can see what changed.** Hold **D** and click a card: the diff the
-  reviewer judged opens in a floating popup, with its verdict, reason, model and
-  token count next to it — and the same diff still readable after accept,
-  because the card branch and its worktree are kept.
 - **Isolation by default.** Every card runs on `harness/<card-id>` in a linked
   git worktree, so several cards in one repository run concurrently and your
   working copy stays on your branch.
 - **A record you keep.** Prompts, logs, token usage and cost for every round
   stay on the card. Runs survive a server restart.
-- **The agent can use the board.** Run sessions get an MCP server with ~30
-  tools: split a spec into sub-cards, chain them with dependencies, stack cards
-  into decks, archive finished work — and ask *you* a question on the card when
-  the spec is genuinely ambiguous.
+- **The agent can use the board.** Run sessions get an MCP server with 38
+  tools: split a spec into sub-cards, chain them with dependencies, stack cards,
+  archive finished work — and ask *you* a question on the card when the spec is
+  genuinely ambiguous.
 
-It is a **Vibe-only** tool: it shells out to the `vibe` CLI in headless mode and
-reads Vibe's `export.json` for token usage and run metadata. No other agent CLIs
-are supported.
+The harness is a board, not an agent: it drives a headless CLI and reads back
+what that CLI reports. **Mistral Vibe** and **Claude Code** are both supported,
+and the model you pick for a role decides which one runs it — there is no
+separate backend switch. Each keeps its own flags and its own export parsing;
+everything downstream is backend-agnostic.
+
+## What else it does
+
+- **C + click** — a live activity popup showing what the model is doing right
+  now, with an input to steer a running session.
+- **D + click** — the diff, with line numbers, side-by-side mode, word-level
+  highlighting and syntax colours.
+- **Accept all** — merge the whole Done column, one at a time.
+- **Revert** — undo an accepted card's merge and reopen it.
+- **PR mode** — accept by opening a pull request with the verdict as the body.
+- **Search** — across the board and the archives.
+- **Notifications** — a desktop ping when a card finishes.
+- **Concurrency cap** — a queue instead of ten sessions at once.
+- **Sleep guard** — the machine stays awake while cards run.
+- **Transcripts** — every session kept, compressed, per project.
+- **Duplication review** — the reviewer checks for copy-paste and redundancy.
 
 ## Quickstart
 
@@ -49,14 +62,19 @@ uvicorn app.main:app --reload --reload-dir app --port 8734
 ```
 
 Open <http://127.0.0.1:8734>, register a project from the **Project** dropdown
-(**＋ Add project…** at the bottom), write a card, and press **Run with Vibe**.
+(**＋ Add project…** at the bottom), write a card, and press **▶ Run** (the
+button still says *Run with Vibe*; the backend follows the model you pick).
 
 Always pass `--reload-dir app`: card worktrees live under `sessions/`, and
 watching those makes every agent edit restart the server.
 
-**Requirements:** Python 3.12+, [uv](https://docs.astral.sh/uv/), the `vibe` CLI
-on `PATH`, and a Vibe API key configured for it (`vibe --setup`). The dashboard
-itself needs no key — it only shells out to `vibe`.
+## Requirements
+
+- Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+- **Either** the `vibe` CLI **or** the `claude` CLI on `PATH` — whichever you
+  use — authenticated for that CLI (`vibe --setup`, or `claude` logged in).
+
+The dashboard itself needs no key: it only shells out to the CLI you chose.
 
 ## Documentation
 
