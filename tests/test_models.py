@@ -415,6 +415,30 @@ def test_runner_resolves_each_session_kind(tmp_path):
     assert runner._role_model("bogus") is None
 
 
+def test_a_cards_model_field_is_not_applied_to_its_sessions(tmp_path):
+    """Sessions resolve their model from the ROLE, not from the card.
+
+    A card's `model` field is stored (the board's per-card picker writes it)
+    but `_session_model` never reads it, so `MCPTOOLS.md` documents the role
+    resolution and says the card pin is stored, not applied. If this test
+    starts failing, the runner honours the card's model now — update that row
+    (and the gotcha below it) with the new behaviour.
+    """
+    store = CardStore(tmp_path / "cards")
+    config = Config(vibe_bin=str(tmp_path / "vibe"), time_limit_seconds=30)
+    settings = _models(tmp_path)
+    settings.update({"worker": "glm-5-3"})
+    runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
+                           projects=ProjectStore(tmp_path / "projects.json"),
+                           models=settings)
+    card = store.create(title="pinned", body="spec", model="sonnet")
+    assert card["model"] == "sonnet"
+    # The role's model wins; the card's pin is ignored.
+    assert runner._session_model("run", card) == "glm-5-3"
+    assert runner._model_env("run", model=runner._session_model("run", card)) == {
+        "VIBE_ACTIVE_MODEL": "glm-5-3"}
+
+
 def test_runner_without_settings_never_overrides(tmp_path):
     store = CardStore(tmp_path / "cards")
     config = Config(vibe_bin=str(tmp_path / "vibe"), time_limit_seconds=30)
