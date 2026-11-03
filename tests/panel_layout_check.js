@@ -14,7 +14,10 @@
  *   - a corrupt, missing or unreadable stored value falls back to the defaults
  *     and never throws (private mode throws on localStorage);
  *   - makePanelDraggable reports the end of a drag through onEnd;
- *   - a resize is saved once, debounced, not on every frame;
+ *   - a native resize — which writes the inline width/height AND the used box —
+ *     is saved once, debounced, not on every frame;
+ *   - opening a panel is not a resize: the harness positioning it is not the
+ *     user's choice, even though the rendered box matches the inline style;
  *   - close + reopen and a reload restore the size and the place;
  *   - clearing localStorage returns both panels to their defaults;
  *   - both headers are drag handles.
@@ -192,25 +195,35 @@ async function main() {
   check(!!(diffHead.listeners.pointerdown && diffHead.listeners.pointermove),
     'the diff header is still the drag handle');
 
-  /* 10. A resize is saved once, debounced — not on every frame. The app
-   *     watches the panel with a ResizeObserver; the stub records it and
-   *     `fireResize` plays the user dragging the native grip, which changes
-   *     the used box without touching the inline style. */
+  /* 10. A native resize is saved once, debounced — not on every frame. The
+   *     browser's resize grip writes the inline width/height AND the used box,
+   *     so after a real resize the rendered size equals the inline style. That
+   *     is exactly what the old guard mistook for "the harness positioned it",
+   *     which is why the size was never saved. `grip` plays the browser: both
+   *     the inline style and the box move, and the ResizeObserver fires. */
   const observer = dom.resizeObservers.filter((o) => o.targets.indexOf(activityPopup) !== -1)[0];
   check(!!observer, 'the activity popup is watched for resizes');
+  const grip = (panel, width, height) => {
+    const left = parseFloat(panel.style.left) || 0;
+    const top = parseFloat(panel.style.top) || 0;
+    panel.style.width = width + 'px';
+    panel.style.height = height + 'px';
+    panel._rect = { left, top, width, height, right: left + width, bottom: top + height };
+    dom.fireResize(panel);
+  };
   delete dom.store[ACTIVITY_KEY];
-  activityPopup._rect = { left: 312, top: 200, width: 640, height: 480, right: 952, bottom: 680 };
-  dom.fireResize(activityPopup);
+  grip(activityPopup, 640, 480);
   check(!dom.store[ACTIVITY_KEY], 'a resize is not written on every frame');
-  dom.fireResize(activityPopup);
+  grip(activityPopup, 660, 500);
   dom.runTimers();
   const resized = JSON.parse(dom.store[ACTIVITY_KEY] || '{}');
-  check(resized.width === 640 && resized.height === 480,
+  check(resized.width === 660 && resized.height === 500,
     'the debounced resize is saved, got ' + JSON.stringify(resized));
   delete activityPopup._rect;
 
   /* 10a. Opening the panel is not a resize: the anchor placement is not the
-   *      user's choice, so it is not remembered. */
+   *      user's choice, so it is not remembered. The rendered box matches the
+   *      inline style here too — only the positioning mark tells them apart. */
   delete dom.store[ACTIVITY_KEY];
   await X.openActivity('card-1', anchor);
   dom.fireResize(activityPopup);   // what the browser does when the panel shows
@@ -218,6 +231,20 @@ async function main() {
   check(!dom.store[ACTIVITY_KEY],
     'opening the panel does not save a layout the user never chose');
   X.closeActivity();
+
+  /* 10b. The layout is captured when the resize happens, not when the debounce
+   *      fires: a panel closed in between must not save its hidden 0x0 box. */
+  delete dom.store[ACTIVITY_KEY];
+  grip(activityPopup, 700, 540);
+  activityPopup._rect = { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+  activityPopup.style.width = '';
+  activityPopup.style.height = '';
+  dom.runTimers();
+  const captured = JSON.parse(dom.store[ACTIVITY_KEY] || '{}');
+  check(captured.width === 700 && captured.height === 540,
+    'the resize is captured at resize time, not at debounce time, got '
+      + JSON.stringify(captured));
+  delete activityPopup._rect;
 
   /* 11. Close and reopen restores the size and the place. */
   dom.store[ACTIVITY_KEY] = JSON.stringify({ width: 500, height: 360, left: 80, top: 90 });
@@ -276,6 +303,32 @@ async function main() {
   sameBox(box(activityPopup), { left: 312, top: 200, width: 420, height: 520 },
     'the activity popup does not read the diff layout');
   X.closeActivity();
+
+  /* 16. The diff popup remembers a native resize too, and reopening restores
+   *     the resized box — not just the place. */
+  delete dom.store[DIFF_KEY];
+  await X.openDiff('card-1', null, anchor);
+  dom.fireResize(diffPopup);   // the notification the positioning produces
+  grip(diffPopup, 800, 560);
+  dom.runTimers();
+  const diffResized = JSON.parse(dom.store[DIFF_KEY] || '{}');
+  check(diffResized.width === 800 && diffResized.height === 560,
+    'a native resize of the diff popup is saved, got ' + JSON.stringify(diffResized));
+  delete diffPopup._rect;
+  X.closeDiff();
+  await X.openDiff('card-1', null, anchor);
+  sameBox(box(diffPopup), { left: 312, top: 148, width: 800, height: 560 },
+    'reopening the diff popup restores the resized box');
+  X.closeDiff();
+
+  /* 16a. Opening the diff popup is not a resize either. */
+  delete dom.store[DIFF_KEY];
+  await X.openDiff('card-1', null, anchor);
+  dom.fireResize(diffPopup);
+  dom.runTimers();
+  check(!dom.store[DIFF_KEY],
+    'opening the diff popup does not save a layout the user never chose');
+  X.closeDiff();
 
   const result = { ok: failures.length === 0, failures };
   console.log(JSON.stringify(result, null, 2));
