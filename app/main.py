@@ -143,8 +143,14 @@ class SettingsIn(BaseModel):
 
 
 class ModelsIn(BaseModel):
-    """Per-role model choice: {role: alias}. An empty alias clears the role."""
-    models: dict[str, str] = Field(default_factory=dict)
+    """One role's model choice: the model and the backend that runs it.
+
+    An empty `model` clears the role (it goes back to inheriting). `backend` is
+    the platform that runs the model; omitted, it is inferred from the model.
+    """
+    role: str
+    model: str = ""
+    backend: str | None = None
 
 
 class QuestionIn(BaseModel):
@@ -765,17 +771,19 @@ def create_app(config: Config | None = None,
 
     # --- models (per-role) ---------------------------------------------------
     # Which model each kind of session runs on: the worker (run-N), the
-    # reviewer (review-N) and the merge-conflict resolver (resolve-N). The
-    # runner pins the choice per spawn with VIBE_ACTIVE_MODEL, so the user's
+    # reviewer (review-N) and the merge-conflict resolver (resolve-N). Choosing
+    # a model chooses the platform too — the list carries both backends — so
+    # there is no separate global backend control. The runner pins the choice
+    # per spawn (VIBE_ACTIVE_MODEL for Vibe, --model for Claude), so the user's
     # own ~/.vibe/config.toml is never rewritten.
     @app.get("/api/models")
     def get_models():
-        return describe_models(models)
+        return describe_models(models, config=config)
 
     @app.put("/api/models")
     def put_models(payload: ModelsIn):
-        models.update(payload.models)
-        return describe_models(models)
+        models.set(payload.role, payload.model, payload.backend)
+        return describe_models(models, config=config)
 
     # --- stacks (decks) ------------------------------------------------------
     # Server state, not browser state: the MCP tools stack cards and move them

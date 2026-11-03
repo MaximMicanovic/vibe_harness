@@ -41,8 +41,24 @@ All optional, via environment variables:
 Each kind of session can run on its own model, chosen in the sidebar's
 **Models** panel and stored in `models.json` at the harness root (`GET/PUT
 /api/models`). The roles are the worker (`run-N`, including fixer rounds), the
-reviewer (`review-N`) and the merge resolver (`resolve-N`); a role left on
-**inherit** runs on the backend's own default.
+reviewer (`review-N`) and the merge resolver (`resolve-N`).
+
+**Choosing a model chooses the platform.** The picker lists both: the Vibe
+aliases from `~/.vibe/config.toml` plus Claude's `sonnet` / `opus` / `haiku`,
+and an "other…" entry for a full name like `claude-sonnet-4-6`. There is no
+separate global Backend control — it was a second control for the same decision,
+and the two could contradict each other (`claude` + a Vibe model cannot run).
+`PUT /api/models` takes `{role, model, backend}` and refuses a backend that does
+not offer the model (400). A backend whose CLI is not installed still lists its
+models, disabled with the reason.
+
+`models.json` is `{"models": {role: {"model": "...", "backend": "vibe"|"claude"}}}`.
+A flat `{role: alias}` file (the old shape) still reads — every entry was
+written for Vibe — and is rewritten in the new shape on the next save.
+
+Resolution order: a role with its own choice uses its own model and backend; a
+role on **inherit** follows the worker's choice; if the worker inherits too,
+the fallback is **Vibe** with the CLI's own default model (`active_model`).
 
 The backend decides how the choice is passed (`Backend.build_cmd(model=…)`):
 
@@ -59,3 +75,17 @@ model; it never falls back to the default and looks successful. A refused
 review model fails the card immediately rather than looping a fixer + review
 round per step, and a refused resolver model is named in the failure detail
 instead of a bare exit code.
+
+The worker's backend is pinned per card run: a fixer round resumes the worker
+session (`--resume <session-id>`), and a Vibe session id cannot be resumed by
+Claude, so the resolved backend is recorded on the card's session
+(`session.backend`) when the run starts and the fixer rounds use that. Changing
+the worker's model mid-run therefore cannot switch backends under a resume; if
+the new model belongs to the other platform, the resumed round runs on the
+pinned backend's own default. The reviewer and the resolver are always fresh
+sessions, so they may use a different backend than the worker.
+
+The token counter follows the resolved backend: only Vibe streams live counts,
+so it is hidden exactly when the worker's resolved backend is Claude.
+`settings.json` keeps `backend` as the internal fallback (default `vibe`) for a
+role with no choice at all; nothing in the UI writes it.

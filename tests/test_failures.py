@@ -451,7 +451,10 @@ def _claude_env(tmp_path, models: dict, script: str = FAKE_CLAUDE_BAD_MODEL, **k
 
     settings = SettingsStore(tmp_path / "settings.json")
     settings.set_backend("claude")
-    model_settings = ModelSettings(tmp_path / "models.json")
+    # A hermetic Vibe catalog: `offers()` reads it, and a test must not depend
+    # on the machine's ~/.vibe/config.toml.
+    model_settings = ModelSettings(tmp_path / "models.json",
+                                   home=tmp_path / "no-vibe-home")
     model_settings.update(models)
     return make_env(tmp_path, script=script, settings=settings,
                     models=model_settings, claude_bin=str(tmp_path / "fake_vibe.sh"),
