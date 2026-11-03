@@ -28,6 +28,7 @@ from app.models import (
 from app.cards import CardStore
 from app.projects import ProjectStore
 from app.runner import SessionRunner
+from app.settings import SettingsStore
 
 FAKE_VIBE = "#!/bin/sh\nexit 0\n"
 
@@ -239,6 +240,103 @@ def test_spawned_session_gets_the_role_model(tmp_path, monkeypatch):
     card = store.create("A card", "spec")
     runner._spawn(card["id"], kind="run", prompt="do it")
     assert captured["env"].get("VIBE_ACTIVE_MODEL") == "glm-5-3"
+
+
+# ----------------------------------------------------------------------
+# the model reaches the CLI, whichever backend runs the session
+# ----------------------------------------------------------------------
+
+def _claude_runner(tmp_path, models: ModelSettings) -> SessionRunner:
+    """A runner on the Claude backend, with `models` as the role choices."""
+    store = CardStore(tmp_path / "cards")
+    config = Config(vibe_bin=str(tmp_path / "vibe"),
+                    claude_bin=str(tmp_path / "claude"),
+                    time_limit_seconds=30, mailbox=False)
+    backend_settings = SettingsStore(tmp_path / "settings.json")
+    backend_settings.set_backend("claude")
+    return SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
+                         projects=ProjectStore(tmp_path / "projects.json"),
+                         settings=backend_settings, models=models)
+
+
+def _capture_spawn(monkeypatch, runner: SessionRunner) -> dict:
+    """Record the command line of the next spawned session."""
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 4242
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env") or {}
+        return FakeProc()
+
+    monkeypatch.setattr("app.runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(runner, "_finalize", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_finalize_resolver", lambda *a, **k: None)
+    return captured
+
+
+def test_build_cmd_passes_the_role_model_for_every_kind(tmp_path):
+    """The worker, the reviewer and the resolver each get their own model."""
+    models = ModelSettings(tmp_path / "models.json")
+    models.update({"worker": "glm-5-3", "review": "mistral-large-4-0-3",
+                   "resolver": "zai-glm-5-3-flash"})
+    runner = _claude_runner(tmp_path, models)
+    for kind, expected in (("run", "glm-5-3"),
+                           ("review", "mistral-large-4-0-3"),
+                           ("resolve", "zai-glm-5-3-flash")):
+        cmd = runner._build_cmd(tmp_path / "p.md", tmp_path, tmp_path, kind)
+        assert cmd[cmd.index("--model") + 1] == expected
+
+
+def test_build_cmd_without_a_role_model_adds_no_flag(tmp_path):
+    runner = _claude_runner(tmp_path, ModelSettings(tmp_path / "models.json"))
+    cmd = runner._build_cmd(tmp_path / "p.md", tmp_path, tmp_path, "run")
+    assert "--model" not in cmd
+
+
+def test_build_cmd_keeps_vibe_on_the_env_var(tmp_path):
+    """Vibe has no --model flag: the choice stays in VIBE_ACTIVE_MODEL."""
+    store = CardStore(tmp_path / "cards")
+    config = Config(vibe_bin=str(tmp_path / "vibe"), time_limit_seconds=30)
+    models = ModelSettings(tmp_path / "models.json")
+    models.update({"worker": "glm-5-3"})
+    runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
+                           models=models)
+    cmd = runner._build_cmd(tmp_path / "p.md", tmp_path, tmp_path, "run")
+    assert "--model" not in cmd
+    assert runner._model_env("run") == {"VIBE_ACTIVE_MODEL": "glm-5-3"}
+
+
+def test_spawned_review_gets_the_review_model(tmp_path, monkeypatch):
+    """The reviewer is its own role: its model must reach the CLI too."""
+    models = ModelSettings(tmp_path / "models.json")
+    models.update({"worker": "glm-5-3", "review": "mistral-large-4-0-3"})
+    runner = _claude_runner(tmp_path, models)
+    captured = _capture_spawn(monkeypatch, runner)
+    card = runner.store.create("A card", "spec")
+    # A review round only follows a run round.
+    runner.store.set_status(card["id"], "running")
+    runner._spawn(card["id"], kind="review", prompt="review it")
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "mistral-large-4-0-3"
+
+
+def test_spawned_resolver_gets_the_resolver_model(tmp_path, monkeypatch):
+    """The resolver is its own role: it must not run on the worker's model."""
+    models = ModelSettings(tmp_path / "models.json")
+    models.update({"worker": "glm-5-3", "resolver": "zai-glm-5-3-flash"})
+    runner = _claude_runner(tmp_path, models)
+    captured = _capture_spawn(monkeypatch, runner)
+    card = runner.store.create("A card", "spec")
+    runner.store.patch_session(card["id"], {"git": {"branch": "b",
+                                                    "base_branch": "main"}})
+    runner._spawn_resolver(runner.store.get(card["id"]))
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "zai-glm-5-3-flash"
 
 
 # ----------------------------------------------------------------------

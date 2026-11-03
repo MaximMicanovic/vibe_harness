@@ -189,6 +189,27 @@ def test_crashed_with_a_git_error():
     assert "nothing to commit" in out["detail"]
 
 
+def test_model_rejected_names_the_model():
+    """A refused model is not a generic crash: the detail names the model, so
+    the dropped choice is visible instead of looking like a random failure."""
+    out = classify(card(session={
+        "exit_code": 1, "verified": None, "review": None,
+        "stop_reason": "model_error",
+        "model_error": "the backend rejected the model 'claude-nope'",
+    }))
+    assert out["kind"] == "model_rejected"
+    assert "claude-nope" in out["detail"]
+
+
+def test_model_rejected_from_a_review_round():
+    out = classify(card(status="done", session={
+        "review": {"approved": False, "exhausted": True, "via": "log",
+                   "model_error": "the backend rejected the model 'claude-nope'"},
+    }))
+    assert out["kind"] == "model_rejected"
+    assert "claude-nope" in out["detail"]
+
+
 # ----------------------------------------------------------------- priority
 
 def test_stopped_by_user_beats_timeout():
@@ -239,6 +260,8 @@ def test_every_kind_is_reachable():
         card(status="done", session={"review": {"approved": False,
                                                 "no_verdict": True,
                                                 "exhausted": True}}),
+        card(session={"exit_code": 1, "review": None,
+                      "model_error": "the backend rejected the model 'x'"}),
         card(session={"exit_code": 1, "review": None}),
     ):
         out = classify(c)
@@ -383,3 +406,72 @@ def test_runner_marks_a_review_round_without_a_verdict(tmp_path):
         final = wait_for_status(e.client, c["id"], {"done"})
         assert final["session"]["review"]["no_verdict"] is True
         assert final["session"]["failure"]["kind"] == "no_verdict"
+
+
+FAKE_CLAUDE_BAD_MODEL = """#!/bin/sh
+# Fake Claude Code refusing the model it was given: the API answers 404 and the
+# CLI exits non-zero.
+cat > /dev/null
+echo 'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-nope"}}'
+exit 1
+"""
+
+FAKE_CLAUDE_BAD_REVIEW_MODEL = """#!/bin/sh
+# Fake Claude Code that runs fine but refuses the model in review mode
+# (--tools is the reviewer's flag).
+args="$@"
+cat > /dev/null
+case "$args" in
+  *--tools*)
+    echo 'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-nope"}}'
+    exit 1
+    ;;
+esac
+echo '{"type":"result","is_error":false,"session_id":"s1","num_turns":1,"total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"claude-sonnet-4-6":{}},"terminal_reason":"completed"}'
+exit 0
+"""
+
+
+def _claude_env(tmp_path, models: dict, script: str = FAKE_CLAUDE_BAD_MODEL, **kwargs):
+    """A Claude-backend env whose role models are `models` ({role: alias})."""
+    from app.models import ModelSettings
+    from app.settings import SettingsStore
+
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.set_backend("claude")
+    model_settings = ModelSettings(tmp_path / "models.json")
+    model_settings.update(models)
+    return make_env(tmp_path, script=script, settings=settings,
+                    models=model_settings, claude_bin=str(tmp_path / "fake_vibe.sh"),
+                    **kwargs)
+
+
+def test_runner_records_a_rejected_model(tmp_path):
+    """An unknown model must fail the round, naming the model — not fall back
+    to Claude's default and look successful."""
+    e = _claude_env(tmp_path, {"worker": "claude-nope"})
+    with e.client:
+        c = create_card(e.client, title="Bad model")
+        e.client.post(f"/api/cards/{c['id']}/run")
+        final = wait_for_status(e.client, c["id"], {"failed"})
+        session = final["session"]
+        assert session["stop_reason"] == "model_error"
+        assert "claude-nope" in session["model_error"]
+        assert session["failure"]["kind"] == "model_rejected"
+        assert "claude-nope" in session["failure"]["detail"]
+
+
+def test_runner_records_a_rejected_review_model(tmp_path):
+    """The reviewer's model is refused too: the review round says so instead of
+    looking like a reviewer that simply said no."""
+    e = _claude_env(tmp_path, {"worker": "claude-sonnet-4-6",
+                               "review": "claude-nope"},
+                    script=FAKE_CLAUDE_BAD_REVIEW_MODEL, max_review_rounds=1)
+    with e.client:
+        c = create_card(e.client, title="Bad review model")
+        e.client.post(f"/api/cards/{c['id']}/run")
+        final = wait_for_status(e.client, c["id"], {"done"})
+        review = final["session"]["review"]
+        assert "claude-nope" in review["model_error"]
+        assert final["session"]["failure"]["kind"] == "model_rejected"
+        assert "claude-nope" in final["session"]["failure"]["detail"]

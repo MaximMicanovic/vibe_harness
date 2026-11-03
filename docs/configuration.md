@@ -35,3 +35,24 @@ All optional, via environment variables:
 > through run → test gate → review → accept, which knobs cap spend
 > (`--max-price`, `--time-limit`, tool allowlist, loop cap), how to route
 > sessions to cheaper Vibe agents, and a copy-paste low-token preset.
+
+## Per-role models
+
+Each kind of session can run on its own model, chosen in the sidebar's
+**Models** panel and stored in `models.json` at the harness root (`GET/PUT
+/api/models`). The roles are the worker (`run-N`, including fixer rounds), the
+reviewer (`review-N`) and the merge resolver (`resolve-N`); a role left on
+**inherit** runs on the backend's own default.
+
+The backend decides how the choice is passed (`Backend.build_cmd(model=…)`):
+
+| Backend | How the role's model reaches the CLI |
+|---|---|
+| `vibe` | `VIBE_ACTIVE_MODEL=<alias>` in the spawned session's environment. Vibe has no `--model` flag; its config layers put `VIBE_*` above `~/.vibe/config.toml`, so nothing global is rewritten and concurrent sessions cannot race each other's model. |
+| `claude` | `--model <alias>` on the command line. |
+
+The choice is passed for every spawn — worker, reviewer and resolver — so no
+role silently runs on the backend's default. If the backend refuses the model
+(Claude answers `not_found_error` and exits non-zero), the round fails with
+`stop_reason: model_error` and a `model_rejected` failure whose detail names the
+model; it never falls back to the default and looks successful.

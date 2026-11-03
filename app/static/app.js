@@ -484,6 +484,7 @@ function buildQueueChip(session) {
 const FAILURE_LABELS = {
   stopped_by_user: 'stopped by user',
   interrupted: 'interrupted',
+  model_rejected: 'model rejected',
   git_conflict: 'merge conflict',
   timeout: 'timed out',
   tests_failed: 'tests failed',
@@ -2691,8 +2692,9 @@ async function renderModelsPanel() {
   }
   sidebarBody.appendChild(el('p', 'sidebar-empty',
     'A role left on “inherit” runs on your own active_model from ~/.vibe/config.toml. '
-    + 'A chosen model is pinned for that session only (VIBE_ACTIVE_MODEL), so the global '
-    + 'config is never rewritten and two sessions cannot race each other.'));
+    + 'A chosen model is pinned for that session only — VIBE_ACTIVE_MODEL for the vibe '
+    + 'backend, --model for claude — so the global config is never rewritten and two '
+    + 'sessions cannot race each other.'));
 }
 
 async function saveBackend(key) {
