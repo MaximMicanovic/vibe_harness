@@ -50,7 +50,7 @@ COMPLETED_STATUSES = ("accepted",)
 # set to None before a session_patch is merged in.
 SESSION_KEYS = (
     "pid", "started_at", "finished_at", "exit_code", "verified",
-    "model", "tokens", "stop_reason", "workdir", "log", "export_dir",
+    "model", "tokens", "cost_usd", "stop_reason", "workdir", "log", "export_dir",
     "review", "reviews", "review_rounds", "git", "resolver", "test_output",
     "mailbox", "worker_session_id", "last_reviewed_commit",
     # The growth signal: lines added / removed by the card branch against its

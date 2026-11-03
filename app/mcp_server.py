@@ -359,7 +359,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "stats",
-        "description": "Board stats: counts by status, total tokens, total/avg runtime; optionally scoped to one project. " + _COMMON,
+        "description": "Board stats: counts by status, total tokens, total cost (USD), total/avg runtime; optionally scoped to one project. " + _COMMON,
         "inputSchema": {
             "type": "object",
             "properties": {"project": {"type": "string"}},
