@@ -1968,6 +1968,85 @@ def test_review_diff_ignores_base_moves(store, tmp_path, fake_vibe, projects):
 
 
 @git_test
+def test_review_diff_full_mode_ignores_last_reviewed_commit(store, tmp_path, fake_vibe, projects):
+    """review_diff=0 gives the reviewer the WHOLE card diff: with full=True the
+    base is always the merge-base of the card branch and its base branch, never
+    `last_reviewed_commit`. The default (review_diff=1) keeps the
+    last-reviewed-commit..HEAD range."""
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    gitops.ensure_repo(proj)
+    (proj / "base.txt").write_text("base\n")
+    _git(["add", "-A"], proj)
+    _git(["commit", "-q", "-m", "base"], proj)
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe, projects)
+    card = store.create("Diff card", "spec", project="my-app")
+    branch = f"harness/{card['id']}"
+    wt = runner.sessions_dir / card["id"] / "worktree"
+    git_info = gitops.prepare_card_branch(proj, branch, wt)
+    (wt / "card.txt").write_text("card work\n")
+    _git(["add", "-A"], wt)
+    _git(["commit", "-q", "-m", "card work"], wt)
+    head = _git(["rev-parse", "HEAD"], wt)
+    merge_base = _git(["merge-base", git_info["base_branch"], branch], proj)
+    assert head != merge_base
+
+    session = {"git": git_info, "last_reviewed_commit": head}
+
+    # Default (review_diff=1): diff since the last reviewed commit — here HEAD,
+    # so the range is empty.
+    diff, rng = runner._review_diff(session, wt)
+    assert rng.startswith(head[:12])
+    assert "card.txt" not in diff
+
+    # Full (review_diff=0): the whole card diff from the merge-base.
+    diff, rng = runner._review_diff(session, wt, full=True)
+    assert rng.startswith(merge_base[:12])
+    assert "card.txt" in diff
+
+
+@git_test
+def test_review_prompt_gets_full_card_diff_when_review_diff_disabled(store, tmp_path, projects,
+                                                                      fake_vibe_round, monkeypatch):
+    """VIBE_HARNESS_REVIEW_DIFF=0: the fresh reviewer gets the WHOLE card diff
+    (merge-base of the card branch and its base .. HEAD in the card worktree)
+    instead of no diff at all — in every round, not just round 1."""
+    monkeypatch.setenv("FAKE_REVIEW", "reject-once")
+    proj = tmp_path / "my-app"
+    proj.mkdir()
+    projects.create("my-app", str(proj))
+    runner = _make_runner_with_projects(store, tmp_path, fake_vibe_round, projects,
+                                        test_cmd="echo TESTS-PASS-123; exit 0",
+                                        review_diff=False)
+    card = store.create("Diff card", "Write a hello file.", project="my-app")
+    card_id = card["id"]
+
+    runner.run(card_id)
+    final = _wait_for_status(store, card_id, "done")
+    assert final["session"]["review"]["approved"] is True
+
+    sdir = runner.sessions_dir / card_id
+    git_info = final["session"]["git"]
+    merge_base = _git(["merge-base", git_info["base_branch"], git_info["branch"]], proj)
+    last_reviewed = final["session"]["last_reviewed_commit"]
+    assert last_reviewed and last_reviewed != merge_base
+
+    p1 = (sdir / "review-1" / "prompt.md").read_text()
+    assert "diff --git" in p1 and "hello.txt" in p1
+    assert "No git diff is available" not in p1
+    assert f"git diff {merge_base[:12]}.." in p1       # round 1: whole card diff
+
+    # Round 2 also gets the FULL card diff (merge-base..HEAD), not
+    # last-reviewed..HEAD.
+    p2 = (sdir / "review-2" / "prompt.md").read_text()
+    assert "diff --git" in p2 and "hello.txt" in p2
+    assert "No git diff is available" not in p2
+    assert f"git diff {merge_base[:12]}.." in p2
+    assert f"git diff {last_reviewed[:12]}.." not in p2
+
+
+@git_test
 def test_mailbox_attached_to_card_worktree(store, tmp_path, fake_vibe, projects):
     """The per-card MCP mailbox is attached via .vibe/config.toml in the card's
     linked worktree (kept out of git via info/exclude), the mailbox state dir

@@ -62,7 +62,7 @@ class Config:
     ask_user_timeout_seconds: int = 600      # default wait for the MCP ask_user tool (per question)
     worker_resume: bool = True              # resume the worker session across fix rounds (vibe --resume)
     mailbox: bool = True                    # per-card MCP mailbox (worker <-> reviewer) via .vibe/config.toml
-    review_diff: bool = True                # fresh reviewer only gets git diff since last review + test output
+    review_diff: bool = True                # reviewer diff scope: True = git diff since last review; False = whole card diff (merge-base..HEAD)
     tdd: bool = True                        # worker prompts (run + fixer rounds) instruct test-driven development
     prevent_sleep: bool = True              # hold an idle-sleep inhibitor while cards run or wait
     max_concurrent: int = 3                 # concurrent agent sessions; 0 = unlimited (sidebar setting overrides)

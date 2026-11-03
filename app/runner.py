@@ -370,7 +370,8 @@ def review_prompt_template(body: str, diff: str | None = None,
                            duplication_root: Path | None = None,
                            *, mailbox: bool = True) -> str:
     """Fresh-reviewer prompt, scoped small on purpose: the
-    spec + the diff since the last reviewed commit + the harness-run test
+    spec + the diff (since the last reviewed commit, or the whole card diff
+    when review_diff is off) + the harness-run test
     output + the mechanical duplication report. When `mailbox` is set, the
     reviewer may also question the persistent worker through the
     harness-mailbox MCP tools and must submit a structured verdict via
@@ -2194,14 +2195,17 @@ class SessionRunner:
         except OSError:
             return None
 
-    def _review_diff(self, session: dict, ws: Path) -> tuple[str | None, str | None]:
-        """The diff a fresh reviewer should look at: `git diff
-        <last-reviewed-commit>..HEAD` in the card's worktree.
+    def _review_diff(self, session: dict, ws: Path, full: bool = False) -> tuple[str | None, str | None]:
+        """The diff a fresh reviewer should look at: `git diff <base>..HEAD` in
+        the card's worktree.
 
         The base is the commit the previous review round covered
         (``session.last_reviewed_commit``), else the MERGE-BASE of the card
-        branch and its base branch. The merge-base matters: diffing from the
-        base TIP makes a branch that is merely behind its base look like it
+        branch and its base branch. With ``full=True`` (config.review_diff is
+        false) the base is ALWAYS the merge-base — the WHOLE card diff,
+        ignoring ``last_reviewed_commit``.
+        The merge-base matters: diffing from the base TIP makes a branch that
+        is merely behind its base look like it
         reverts whatever landed there since, and the reviewer rejects the card
         for someone else's commit.
         Returns (diff_text, range_description); (None, None) when the run is
@@ -2213,7 +2217,7 @@ class SessionRunner:
         if not wt:
             return None, None
         try:
-            base = session.get("last_reviewed_commit")
+            base = None if full else session.get("last_reviewed_commit")
             if not base:
                 base_ref = git_info.get("base_branch") or "HEAD"
                 base = gitops.run_git(["merge-base", base_ref, "HEAD"],
@@ -2511,9 +2515,11 @@ class SessionRunner:
                     # the diff since the last reviewed commit + the test
                     # output (small context, independent judgment).
                     handover = {k: v for k, v in outcome.items() if k != "finished_at"}
-                    diff_text = diff_range = None
-                    if self.config.review_diff:
-                        diff_text, diff_range = self._review_diff(session, ws)
+                    # review_diff=true: the diff since the last reviewed commit
+                    # (small context); false: the WHOLE card diff
+                    # (merge-base..HEAD). Sandbox runs still get (None, None).
+                    diff_text, diff_range = self._review_diff(
+                        session, ws, full=not self.config.review_diff)
                     test_tail = None
                     if tested is not None:
                         test_tail = tested[1][-REVIEW_TEST_OUTPUT_MAX_CHARS:]
