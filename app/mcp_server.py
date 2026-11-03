@@ -327,7 +327,8 @@ TOOLS: list[dict] = [
         "description": (
             "List a card's stored session transcripts: one metadata row per "
             "round (round, session_id, created_at, raw_bytes, gz_bytes). The "
-            "transcripts live compressed in the harness's SQLite store; read "
+            "transcripts live compressed in the card's project store "
+            "(`.vibe-harness/transcripts.db`); read "
             "one with get_transcript. " + _COMMON),
         "inputSchema": {
             "type": "object",

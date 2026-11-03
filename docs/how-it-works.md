@@ -39,27 +39,46 @@ Each round's vibe session directory (`export/session/`: journal, chunks, tool
 results) is the only record of what the model actually did, so it is kept — but
 compressed, not as loose files. When a round finalizes (`_record_outcome`, and
 `_record_resolver_outcome` for a merge resolver), the harness tars and gzips
-`export/session/` into `transcripts.db` (SQLite, one row per `(card, round)`)
-and then removes the directory. `export.json` stays where it is: it is what the
-harness reads for tokens, model and stop reason, so the token accounting is
-unchanged.
+`export/session/` into the store of the card's **project** (SQLite, one row per
+`(card, round)`) and then removes the directory. `export.json` stays where it
+is: it is what the harness reads for tokens, model and stop reason, so the
+token accounting is unchanged.
 
+- **One store per project.** A card's transcripts live in
+  `<project>/.vibe-harness/transcripts.db`, so they belong to the project they
+  came from and leave with it. A card with no project (a sandbox run) — or one
+  whose project no longer exists — uses the harness store,
+  `<harness root>/.vibe-harness/transcripts.db`. `VIBE_HARNESS_TRANSCRIPTS_DB`
+  still wins: one explicit store for everything.
+- **Never dirties the project.** Creating a project's store adds
+  `.vibe-harness/` to that repo's `.git/info/exclude` — local-only, so the
+  tracked `.gitignore` is never modified and the user's repo gains no committed
+  change. A project folder that is not a git repository is fine (nothing to
+  exclude).
 - **A failed save never fails the round.** The capture is best effort: on any
   error it logs a warning and leaves the directory in place, so nothing is
   lost.
 - **Backfill** imports the directories written before the store existed:
-  `POST /api/transcripts/backfill` walks `sessions/*/*/export/session/`, stores
-  each round and removes the directory. It is idempotent — a round already in
-  the store is skipped, never duplicated.
-- **Reading them back:** `GET /api/transcripts/stats` (rows, raw/gz bytes,
-  compression ratio), `GET /api/cards/<id>/transcripts` (metadata rows),
+  `POST /api/transcripts/backfill` walks `sessions/*/*/export/session/`, looks
+  up each card's project, stores the round in THAT project's store and removes
+  the directory. It is idempotent — a round already in the store is skipped,
+  never duplicated.
+- **Migration.** The old harness-root `transcripts.db` (where every project's
+  rounds used to land) is drained on first use: each row moves to the store of
+  its card's project, a row whose card has no project stays in the harness
+  store, and the old file is removed once it is empty. Idempotent — a second
+  run finds nothing to move.
+- **Reading them back:** `GET /api/transcripts/stats` (one row per store —
+  project + harness — plus the totals, raw/gz bytes and compression ratio),
+  `GET /api/cards/<id>/transcripts` (metadata rows),
   `GET /api/cards/<id>/transcripts/<round>` (the tar.gz as a download) and
   `GET /api/cards/<id>/transcripts/<round>/events` (the journal parsed into the
   same events the live activity feed shows). The MCP exposes the last two as
   `harness_list_transcripts` and `harness_get_transcript` — a model reads the
   parsed text, never the blob.
-- **Never published:** `transcripts.db` (and its `-wal`/`-shm` files) is in
-  `.gitignore`, like `sessions/`.
+- **Never published:** `.vibe-harness/` is in each repo's `.git/info/exclude`
+  (and `transcripts.db*` is in the harness root's `.gitignore`), like
+  `sessions/`.
 
 ## Duplication and redundancy
 

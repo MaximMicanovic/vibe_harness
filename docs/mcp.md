@@ -34,8 +34,9 @@ dashboard's HTTP API, so the dashboard stays the single writer):
   stored session transcripts: one metadata row per round, and one
   round's journal parsed into text (assistant output, reasoning, tool
   calls and results, capped at `limit` events). The transcripts are
-  compressed in `transcripts.db`; a model reads the parsed text, never
-  the blob.
+  compressed in the card's project store
+  (`<project>/.vibe-harness/transcripts.db`); a model reads the parsed text,
+  never the blob.
 - `harness_ask_user` — **ask you a question on the card**: the model
   calls it when the spec is ambiguous and a wrong guess would be costly. The
   question appears on the card (with optional multiple-choice buttons and a

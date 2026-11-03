@@ -113,6 +113,37 @@ def run_git(args: list[str], cwd: Path, check: bool = True) -> subprocess.Comple
     return proc
 
 
+def exclude_from_git(ws: Path, entry: str) -> bool:
+    """Add `entry` (e.g. `.vibe/`) to the repo's worktree-local `info/exclude`.
+
+    Local-only by design: the tracked `.gitignore` is never touched, so a
+    harness file never becomes a committed change in the user's repo. Returns
+    True when the exclude holds the entry afterwards, False when `ws` is not a
+    git repository (a plain folder is fine — there is nothing to exclude).
+    """
+    try:
+        proc = run_git(["rev-parse", "--git-path", "info/exclude"], ws, check=False)
+    except OSError:
+        return False
+    if proc.returncode != 0:
+        return False
+    raw = proc.stdout.strip()
+    path = Path(raw) if raw.startswith("/") else ws / raw
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        # Line-exact: `.vibe/` must not be "already there" because
+        # `.vibe-harness/` is.
+        if entry in (line.strip() for line in content.splitlines()):
+            return True
+        if content and not content.endswith("\n"):
+            content += "\n"
+        path.write_text(content + entry + "\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 def repo_root(path: Path) -> Path | None:
     """The enclosing repository root, or None if `path` is not inside a repo."""
     proc = run_git(["rev-parse", "--show-toplevel"], path, check=False)

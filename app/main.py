@@ -191,9 +191,11 @@ def create_app(config: Config | None = None,
                                      models=models, settings=settings)
     if runner.settings is None:
         runner.settings = settings
-    # The compressed transcript store the runner writes on finalize; the API
-    # reads the same one (a caller may pass its own, e.g. a temp db in tests).
-    transcripts = transcripts or runner.transcripts
+    # The compressed transcript stores the runner writes on finalize; the API
+    # reads the same ones through `runner.transcripts_for` (a caller may pass
+    # its own, e.g. a temp db in tests).
+    if transcripts is not None:
+        runner.transcripts = transcripts
     # The stack store prunes against the card store, so it has to live beside
     # it: falling back to the project's STACKS_FILE would let an app built
     # with a temp card store (every test app) prune the real board against
@@ -483,24 +485,26 @@ def create_app(config: Config | None = None,
     # --- transcripts (compressed session transcripts) -------------------------
     @app.get("/api/transcripts/stats")
     def transcript_stats():
-        # How many rounds are stored and how well they compressed.
-        return transcripts.stats()
+        # Per-store rows (one per project + the harness store) and the totals.
+        return runner.transcript_stats()
 
     @app.post("/api/transcripts/backfill")
     def transcript_backfill():
-        # Import the export/session/ directories that predate the store and
-        # remove them. Idempotent: an already-stored round is skipped.
-        return transcripts.backfill(runner.sessions_dir)
+        # Import the export/session/ directories that predate the store into
+        # the store of each round's project, and remove them. Idempotent: an
+        # already-stored round is skipped.
+        return runner.backfill_transcripts()
 
     @app.get("/api/cards/{card_id}/transcripts")
     def card_transcripts(card_id: str):
-        store.get(card_id)          # CardNotFound -> 404
-        return transcripts.list(card_id)
+        card = store.get(card_id)          # CardNotFound -> 404
+        return runner.transcripts_for(card).list(card_id)
 
     @app.get("/api/cards/{card_id}/transcripts/{round}")
     def card_transcript(card_id: str, round: str):
         # The raw tar.gz, for a human debugging a round offline.
-        blob = transcripts.get(card_id, round)
+        card = store.get(card_id)          # CardNotFound -> 404
+        blob = runner.transcripts_for(card).get(card_id, round)
         if blob is None:
             raise HTTPException(status_code=404,
                                 detail=f"no transcript for {card_id} {round}")
@@ -514,7 +518,8 @@ def create_app(config: Config | None = None,
                                                   le=activity.MAX_LIMIT)):
         # The debugging surface a model can read: the stored journal parsed
         # into the same events the live activity feed shows.
-        store.get(card_id)          # CardNotFound -> 404
+        card = store.get(card_id)          # CardNotFound -> 404
+        transcripts = runner.transcripts_for(card)
         if not transcripts.has(card_id, round):
             raise HTTPException(status_code=404,
                                 detail=f"no transcript for {card_id} {round}")

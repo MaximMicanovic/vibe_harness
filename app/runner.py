@@ -78,7 +78,7 @@ from app.cards import (
 )
 from app.projects import ProjectStore
 from app.models import ModelSettings
-from app.transcripts import TranscriptStore
+from app.transcripts import DB_FILENAME, HARNESS_DIR, TranscriptStore, project_store
 from app.questions import QuestionStore
 # Imported for real, not under `if TYPE_CHECKING:`: the module uses
 # `from __future__ import annotations`, so `settings: SettingsStore | None` is a
@@ -540,10 +540,21 @@ class SessionRunner:
         # Which agent CLI to drive (vibe / claude). None = the default backend.
         self.settings = settings
         # Compressed session transcripts: every finalized round's
-        # export/session/ directory moves into this store (see _capture_transcript).
-        # It lives beside the sessions it indexes (BASE_DIR in production, the
-        # temp dir in tests); VIBE_HARNESS_TRANSCRIPTS_DB still wins.
-        self.transcripts = transcripts or TranscriptStore(base_dir=self.sessions_dir.parent)
+        # export/session/ directory moves into the store of the card's PROJECT
+        # (see transcripts_for), so a project's transcripts live with it. This
+        # is the harness store: the rounds of cards with no project (sandbox
+        # runs) and the fallback when a card's project is gone. It lives beside
+        # the sessions it indexes (BASE_DIR in production, the temp dir in
+        # tests); VIBE_HARNESS_TRANSCRIPTS_DB still wins.
+        self.transcripts = transcripts or TranscriptStore(
+            base_dir=self.sessions_dir.parent / HARNESS_DIR)
+        # project path -> its store, so one project does not open a new
+        # connection per call. Guarded by _transcripts_lock (reentrant: the
+        # migration below resolves stores while holding it).
+        self._transcript_stores: dict[str, TranscriptStore] = {}
+        self._transcripts_lock = threading.RLock()
+        # The one-time drain of the old harness-root store runs on first use.
+        self._transcripts_migrated = False
         # Per-card Q&A (model asks the user on the card via the MCP ask_user
         # tool); shared with the app's HTTP endpoints when the app built us.
         self.questions = questions or QuestionStore(self.sessions_dir)
@@ -1860,8 +1871,131 @@ class SessionRunner:
         """
         return (backend or self.backend()).read_export(rdir)
 
+    # ------------------------------------------------------- transcripts
+
+    def transcripts_for(self, card: dict | None) -> TranscriptStore:
+        """The store a card's transcripts belong to, cached per project path.
+
+        `<project>/.vibe-harness/transcripts.db`, so a project's transcripts
+        live with the project they belong to. A card with no project (a
+        sandbox run) — or one whose project no longer exists — uses the
+        harness store. VIBE_HARNESS_TRANSCRIPTS_DB still wins: one explicit
+        store for everything.
+        """
+        self.migrate_transcripts()
+        path = self._project_path(card)
+        if path is None:
+            return self.transcripts
+        key = str(path)
+        with self._transcripts_lock:
+            store = self._transcript_stores.get(key)
+            if store is None:
+                store = project_store(path)
+                self._transcript_stores[key] = store
+            return store
+
+    def _project_path(self, card: dict | None) -> Path | None:
+        """The card's project folder, or None (no project / project gone)."""
+        name = (card or {}).get("project")
+        if not name or self.projects is None:
+            return None
+        path = (self.projects.get(name) or {}).get("path")
+        return Path(path) if path else None
+
+    def _card_or_none(self, card_id: str) -> dict | None:
+        """The card, or None when it was deleted (its rounds are still stored)."""
+        try:
+            return self.store.get(card_id)
+        except CardNotFound:
+            return None
+
+    def migrate_transcripts(self) -> dict:
+        """Drain the old harness-root store into the per-project stores.
+
+        One-time (on first use) and idempotent: `<harness root>/transcripts.db`
+        used to hold every project's rounds. Each row moves to the store of its
+        card's project; a row whose card has no project — or whose project is
+        gone — stays in the harness store, never dropped. The old file is
+        removed once it is empty. Never raises: a broken migration must not
+        fail a round.
+        """
+        with self._transcripts_lock:
+            if self._transcripts_migrated:
+                return {"moved": 0, "kept": 0}
+            self._transcripts_migrated = True
+            # The harness root is a repository too: keep its own store out of
+            # git the same way (a no-op when it is not one).
+            gitops.exclude_from_git(self.sessions_dir.parent, f"{HARNESS_DIR}/")
+            try:
+                return self._migrate_transcripts()
+            except Exception as exc:
+                print(f"WARNING: transcript migration failed: {exc!r}")
+                return {"moved": 0, "kept": 0}
+
+    def _migrate_transcripts(self) -> dict:
+        legacy = TranscriptStore(db_path=self.sessions_dir.parent / DB_FILENAME)
+        if not legacy.db_path.exists():
+            return {"moved": 0, "kept": 0}
+        rows_by_card: dict[str, list[dict]] = {}
+        for row in legacy.list():
+            rows_by_card.setdefault(row["card_id"], []).append(row)
+        moved = kept = 0
+        for card_id in sorted(rows_by_card):
+            rows = rows_by_card[card_id]
+            target = self.transcripts_for(self._card_or_none(card_id))
+            if target.db_path == legacy.db_path:
+                # One explicit store (VIBE_HARNESS_TRANSCRIPTS_DB): the rows
+                # are already where they belong.
+                kept += len(rows)
+                continue
+            try:
+                moved += target.copy_from(legacy, {card_id})
+            except Exception as exc:
+                print(f"WARNING: could not migrate transcripts for {card_id}: {exc!r}")
+                kept += len(rows)
+                continue
+            legacy.delete(card_id)
+        if legacy.stats()["rows"] == 0:
+            legacy.remove()
+        return {"moved": moved, "kept": kept}
+
+    def transcript_stats(self) -> dict:
+        """Per-store rows plus the totals: every project store + the harness one.
+
+        One row per database file, so it is obvious where the bytes are. The
+        harness's own project resolves to the harness store (the same file), so
+        it is reported once.
+        """
+        self.migrate_transcripts()
+        stores: list[tuple[str | None, TranscriptStore]] = [(None, self.transcripts)]
+        for project in (self.projects.list() if self.projects is not None else []):
+            stores.append((project["name"],
+                           self.transcripts_for({"project": project["name"]})))
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for name, store in stores:
+            key = str(store.db_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"project": name, "path": key, **store.stats()})
+        raw_bytes = sum(row["raw_bytes"] for row in rows)
+        gz_bytes = sum(row["gz_bytes"] for row in rows)
+        return {"rows": sum(row["rows"] for row in rows),
+                "raw_bytes": raw_bytes, "gz_bytes": gz_bytes,
+                "ratio": round(raw_bytes / gz_bytes, 2) if gz_bytes else 0.0,
+                "stores": rows}
+
+    def backfill_transcripts(self) -> dict:
+        """Import every on-disk round into the store of its card's project."""
+        self.migrate_transcripts()
+        return self.transcripts.backfill(
+            self.sessions_dir,
+            store_for=lambda card_id: self.transcripts_for(
+                self._card_or_none(card_id)))
+
     def _capture_transcript(self, card_id: str, round_name: str, rdir: Path) -> None:
-        """Move one round's session transcript into the compressed store.
+        """Move one round's session transcript into the card's project store.
 
         `export/session/` is the vibe journal + chunks: worth keeping for
         debugging, but ~1 GB of loose files. It is stored as one tar.gz blob
@@ -1874,7 +2008,8 @@ class SessionRunner:
         if not session_dir.is_dir():
             return
         try:
-            self.transcripts.save(card_id, round_name, session_dir)
+            self.transcripts_for(self._card_or_none(card_id)).save(
+                card_id, round_name, session_dir)
         except Exception as exc:
             print(f"WARNING: could not store transcript {card_id} {round_name}: {exc!r}")
             return

@@ -64,26 +64,7 @@ def _exclude_vibe_from_git(ws: Path) -> bool:
     """Add `.vibe/` to the worktree-local info/exclude so the managed
     `.vibe/config.toml` never shows up as an untracked/dirty file in the
     card's worktree. Returns True when the exclude was written."""
-    try:
-        proc = gitops.run_git(["rev-parse", "--git-path", "info/exclude"], ws,
-                              check=False)
-    except OSError:
-        return False
-    if proc.returncode != 0:
-        return False
-    raw = proc.stdout.strip()
-    path = Path(raw) if raw.startswith("/") else ws / raw
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
-        if ".vibe/" in content:
-            return True
-        if content and not content.endswith("\n"):
-            content += "\n"
-        path.write_text(content + ".vibe/\n", encoding="utf-8")
-        return True
-    except OSError:
-        return False
+    return gitops.exclude_from_git(ws, ".vibe/")
 
 
 def setup_mailbox(ws: Path, sdir: Path) -> dict:
