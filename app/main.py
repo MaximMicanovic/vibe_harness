@@ -1,4 +1,8 @@
-"""FastAPI app: HTTP API + static dashboard. Run with:  uvicorn app.main:app --reload --reload-dir app --port 8734
+"""FastAPI app: HTTP API + static dashboard.
+
+Serve from config (VIBE_HARNESS_HOST / VIBE_HARNESS_PORT) with `python -m
+app.main` or the `vibe-harness` console script — both call serve(), which
+binds the socket via uvicorn. `uvicorn app.main:app` keeps working as-is.
 """
 from __future__ import annotations
 
@@ -1046,3 +1050,32 @@ def __getattr__(name: str):
     built = create_app()
     globals()["app"] = built
     return built
+
+
+def serve() -> None:
+    """Bind the dashboard socket from config and serve app.main:app.
+
+    The real entrypoint (`python -m app.main`, the `vibe-harness` console
+    script): unlike a bare `uvicorn app.main:app`, this makes
+    VIBE_HARNESS_HOST / VIBE_HARNESS_PORT genuinely control the bind, so
+    Config.api_base_url() and the /api/server/restart relaunch agree with the
+    port actually listening. Reload is confined to the app/ package, never
+    sessions/ — card worktrees live there (same as the restart relaunch's
+    `--reload-dir app`).
+    """
+    import uvicorn
+
+    config = load_config()
+    print(f"vibe-harness serving {config.api_base_url()} "
+          f"(host={config.host}, port={config.port})")
+    uvicorn.run(
+        "app.main:app",
+        host=config.host,
+        port=config.port,
+        reload=True,
+        reload_dirs=[str(Path(__file__).resolve().parent)],
+    )
+
+
+if __name__ == "__main__":
+    serve()
