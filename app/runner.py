@@ -97,6 +97,9 @@ LIVE_USAGE_SCAN_INTERVAL = 2.0
 # sessions via the VIBE_MCP_SERVERS env var so the model can talk to the board.
 MCP_SERVER_PATH = Path(__file__).resolve().parent / "mcp_server.py"
 
+#: "not given" for the model arguments below: resolve the role's own choice.
+_UNSET = object()
+
 
 def _num(value) -> int | None:
     """A finite int for numeric values (bool excluded), else None."""
@@ -677,22 +680,78 @@ class SessionRunner:
         """MCP server alias for prompts/env, or None when the MCP is disabled."""
         return self.config.mcp_server_name if self.config.mcp_enabled else None
 
+    def _role_choice(self, kind: str) -> dict:
+        """The model + backend one session kind resolves to.
+
+        A role with its own choice uses it; "inherit" follows the worker's
+        choice, backend included; when the worker inherits too, the fallback is
+        Vibe with the CLI's own default model.
+        """
+        if self.models is None:
+            return {"model": None, "backend": self.backend().key}
+        return self.models.resolve_session(kind)
+
     def _role_model(self, kind: str) -> str | None:
         """The model chosen for one session kind, or None to inherit.
 
         The backend decides how it is passed: Claude takes `--model`, Vibe has
         no such flag and reads VIBE_ACTIVE_MODEL from the environment.
         """
-        return self.models.model_for_session(kind) if self.models else None
+        return self._role_choice(kind)["model"]
 
-    def _model_env(self, kind: str) -> dict:
-        """VIBE_ACTIVE_MODEL for one session kind, or {} when the role inherits.
+    def _role_backend(self, kind: str) -> Backend:
+        """The backend that runs the model chosen for one session kind."""
+        return get_backend(self._role_choice(kind)["backend"])
+
+    def _pinned_backend(self, card: dict | None, kind: str,
+                        resume: str | None) -> str | None:
+        """The backend a resumed worker round must keep.
+
+        A fixer round resumes the worker session (`--resume <id>`), and a Vibe
+        session id cannot be resumed by Claude. The backend is recorded on the
+        card's session when the run starts, so changing the worker's model
+        mid-run cannot switch backends under the resume.
+        """
+        if kind != "run" or not resume or not card:
+            return None
+        return (card.get("session") or {}).get("backend")
+
+    def _session_backend(self, kind: str, card: dict | None = None,
+                         resume: str | None = None) -> Backend:
+        """The backend for one session: the card's pin for a resumed worker
+        round, else the role's resolved backend."""
+        pinned = self._pinned_backend(card, kind, resume)
+        return get_backend(pinned or self._role_choice(kind)["backend"])
+
+    def _session_model(self, kind: str, card: dict | None = None,
+                       resume: str | None = None) -> str | None:
+        """The model for one session, keeping a resumed round on its backend.
+
+        The role's model may have moved to the other platform since the run
+        started; the resumed session keeps its pinned backend, so it runs on
+        that backend's own default instead of a model it cannot run.
+        """
+        model = self._role_model(kind)
+        if model and self.models is not None:
+            backend = self._session_backend(kind, card, resume)
+            if not self.models.offers(backend.key, model):
+                return None
+        return model
+
+    def _model_env(self, kind: str, backend: Backend | None = None,
+                   model: str | None | object = _UNSET) -> dict:
+        """VIBE_ACTIVE_MODEL for one session, or {} when nothing is pinned.
 
         Vibe's config layers put VIBE_* env vars above the user's config.toml,
         so this pins the model for this one spawned session — the global config
         is never rewritten, and two sessions cannot race each other's model.
+        Claude takes `--model` instead, so it gets no env var.
         """
-        model = self._role_model(kind)
+        backend = backend or self._role_backend(kind)
+        if backend.key != "vibe":
+            return {}
+        if model is _UNSET:
+            model = self._role_model(kind)
         return {"VIBE_ACTIVE_MODEL": model} if model else {}
 
     def _session_env(self, card_id: str) -> dict:
@@ -830,9 +889,13 @@ class SessionRunner:
         with self._lock:
             if card_id in self._registry:
                 return
+            # A worker round keeps the platform pinned on the card's session;
+            # a review/resolver round is fresh, so its role's backend applies.
+            pinned = session.get("backend") if kind == "run" else None
             entry = {"proc": _AdoptedProc(pid, rdir / "export" / "export.json"),
                      "kind": kind, "round": round_no,
                      "stop_requested": False, "adopted": True,
+                     "backend": pinned or self._role_backend(kind).key,
                      "model": self._role_model(kind)}
             self._registry[card_id] = entry
         target = self._finalize_resolver if kind == "resolve" else self._finalize
@@ -1431,16 +1494,18 @@ class SessionRunner:
             encoding="utf-8")
 
         ws, _is_sandbox, trust_flags = self._resolve_ws(card)
-        backend = self.backend()
+        # The resolver is its own role: it can run on its own model, and a
+        # fresh session may use a different backend than the worker.
+        backend = self._role_backend("resolve")
+        model = self._role_model("resolve")
         log_path = rdir / "session.log"
         log_file = open(log_path, "ab")
         try:
             # kind="resolve": the resolver is its own role, so it gets its own
             # model (and, for Vibe, the same non-review flags a run gets).
             cmd = self._build_cmd(prompt_path, ws, rdir, kind="resolve",
-                                  backend=backend) + trust_flags
-            # The resolver is its own role: it can run on its own model.
-            env = {**os.environ, **self._model_env("resolve")}
+                                  backend=backend, model=model) + trust_flags
+            env = {**os.environ, **self._model_env("resolve", backend, model)}
             stdin_file = open(prompt_path, "rb") if backend.prompt_on_stdin else None
             try:
                 proc = subprocess.Popen(
@@ -1458,7 +1523,8 @@ class SessionRunner:
             self._registry[card_id] = {"proc": proc, "stop_requested": False,
                                       "kind": "resolve", "round": round_no,
                                       "resumed": False,
-                                      "model": self._role_model("resolve"),
+                                      "backend": backend.key,
+                                      "model": model,
                                       "live_tokens": None, "live_breakdown": None,
                                       "vibe_session_id": None,
                                       "usage_offsets": {}, "usage_scanned_at": 0.0}
@@ -1502,7 +1568,10 @@ class SessionRunner:
         # missing from every number on the board.
         round_no = entry.get("round") or resolver.get("round") or 1
         rdir = self.sessions_dir / card_id / f"resolve-{round_no}"
-        export = self._read_export(rdir)
+        # The round's own backend: a resolver may run on a different platform
+        # than the worker, and each backend writes its output somewhere else.
+        backend = get_backend(entry.get("backend"))
+        export = self._read_export(rdir, backend)
         self._capture_transcript(card_id, f"resolve-{round_no}", rdir)
         usage = export.get("usage") or export.get("token_usage") or {}
         resolver_patch = {
@@ -1517,7 +1586,8 @@ class SessionRunner:
             resolver_patch["token_breakdown"] = token_breakdown
         # A refused model is why the merge is still conflicted: name it rather
         # than reporting a bare exit code.
-        model_error = self._model_error(rdir, entry.get("model"), exit_code)
+        model_error = self._model_error(rdir, entry.get("model"), exit_code,
+                                        backend)
         if model_error:
             resolver_patch["model_error"] = model_error
         root = Path(git_info["repo"]) if git_info.get("repo") else None
@@ -1665,14 +1735,20 @@ class SessionRunner:
         # a resolver (a retry accept spawns a fresh one).
 
     def backend(self) -> Backend:
-        """The agent CLI this session will drive (vibe / claude)."""
+        """The fallback agent CLI (vibe / claude) when no model is chosen.
+
+        The platform now comes from the model choice (see `_role_backend`);
+        `settings.backend` is only the internal fallback for a role that has no
+        choice at all.
+        """
         key = self.settings.backend() if self.settings else None
         return get_backend(key)
 
     def _build_cmd(self, prompt_path: Path, ws: Path, rdir: Path,
                    kind: str, resume: str | None = None,
                    backend: Backend | None = None,
-                   mcp_config: Path | None = None) -> list[str]:
+                   mcp_config: Path | None = None,
+                   model: str | None | object = _UNSET) -> list[str]:
         """The command line for one session. kind: 'run', 'review' or 'resolve'.
 
         `resume` (a session id from a previous round's export) resumes that
@@ -1681,11 +1757,12 @@ class SessionRunner:
         (no resume). The flags themselves belong to the backend, including how
         the role's model is passed (`--model` for Claude, nothing for Vibe).
         """
-        backend = backend or self.backend()
+        backend = backend or self._role_backend(kind)
+        if model is _UNSET:
+            model = self._role_model(kind)
         return backend.build_cmd(config=self.config, prompt_path=prompt_path,
                                  ws=ws, rdir=rdir, kind=kind, resume=resume,
-                                 mcp_config=mcp_config,
-                                 model=self._role_model(kind))
+                                 mcp_config=mcp_config, model=model)
 
     def _claude_mcp_config(self, rdir: Path, card_id: str) -> Path:
         """Write the `--mcp-config` file that gives a Claude run the board tools.
@@ -1808,7 +1885,8 @@ class SessionRunner:
                     "VIBE_HARNESS_MAILBOX_ROUND": round_key,
                     "VIBE_HARNESS_MAILBOX_SERVER": str(mailbox.SERVER_SCRIPT)})
 
-        backend = self.backend()
+        backend = self._session_backend(kind, card, resume)
+        model = self._session_model(kind, card, resume)
         log_path = rdir / "session.log"
         log_file = open(log_path, "ab")
         try:
@@ -1825,8 +1903,9 @@ class SessionRunner:
                         run_env.update(env)
                     env = run_env
             cmd = self._build_cmd(prompt_path, ws, rdir, kind, resume=resume,
-                                  backend=backend, mcp_config=mcp_config) + trust_flags
-            env.update(self._model_env(kind))
+                                  backend=backend, mcp_config=mcp_config,
+                                  model=model) + trust_flags
+            env.update(self._model_env(kind, backend, model))
             stdin_file = open(prompt_path, "rb") if backend.prompt_on_stdin else None
             try:
                 proc = subprocess.Popen(
@@ -1847,11 +1926,12 @@ class SessionRunner:
             self._registry[card_id] = {"proc": proc, "stop_requested": False,
                                       "kind": kind, "round": round_no,
                                       "resumed": resume is not None,
-                                      # The model this round asked for: the
-                                      # export only reports the model that
-                                      # actually ran, which is exactly what a
-                                      # rejected choice never produces.
-                                      "model": self._role_model(kind),
+                                      # The backend and model this round asked
+                                      # for: the export only reports the model
+                                      # that actually ran, which is exactly
+                                      # what a rejected choice never produces.
+                                      "backend": backend.key,
+                                      "model": model,
                                       "live_tokens": None, "live_breakdown": None,
                                       "vibe_session_id": None,
                                       "usage_offsets": {}, "usage_scanned_at": 0.0}
@@ -1865,6 +1945,12 @@ class SessionRunner:
             "log": str(log_path),
             "export_dir": str(rdir / "export"),
         }
+        if kind == "run":
+            # Pin the platform for this card's worker session: a fixer round
+            # resumes this session id, and a Vibe id cannot be resumed by
+            # Claude (nor the other way round). Only a run writes it — a review
+            # or resolver round on the other backend must not repin the worker.
+            patch["backend"] = backend.key
         if kind == "review":
             rounds = (card.get("session") or {}).get("review_rounds") or 0
             patch["review_rounds"] = rounds + 1
@@ -1896,7 +1982,8 @@ class SessionRunner:
         return (backend or self.backend()).read_export(rdir)
 
     def _model_error(self, rdir: Path, model: str | None,
-                     exit_code: int | None) -> str | None:
+                     exit_code: int | None,
+                     backend: Backend | None = None) -> str | None:
         """The backend's reason for refusing `model`, or None.
 
         A rejected model exits non-zero like any other crash, so the cause has
@@ -1911,7 +1998,7 @@ class SessionRunner:
                                                     errors="replace")
         except OSError:
             return None
-        return self.backend().model_error(text, model)
+        return (backend or self.backend()).model_error(text, model)
 
     # ------------------------------------------------------- transcripts
 
@@ -2293,7 +2380,11 @@ class SessionRunner:
         high_water_patch = ({"live_high_water": high_water}
                             if high_water is not None else {})
 
-        export = self._read_export(rdir)
+        # The round's own backend: the worker, the reviewer and the resolver
+        # can each run on a different platform, and each backend writes its
+        # output somewhere else.
+        backend = get_backend(entry.get("backend"))
+        export = self._read_export(rdir, backend)
         self._capture_transcript(card_id, f"{kind}-{entry['round']}", rdir)
         usage = export.get("usage") or export.get("token_usage") or {}
         tokens = usage.get("total_tokens", usage.get("total"))
@@ -2305,7 +2396,8 @@ class SessionRunner:
         stop_reason = export.get("stop_reason")
         # A model the backend refused: the round failed for that reason, so say
         # so instead of reporting a generic crash (or a silent fallback).
-        model_error = self._model_error(rdir, entry.get("model"), exit_code)
+        model_error = self._model_error(rdir, entry.get("model"), exit_code,
+                                        backend)
         if model_error:
             stop_reason = "model_error"
         # The vibe session id — the resume key for the next fixer round.

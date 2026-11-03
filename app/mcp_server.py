@@ -789,13 +789,16 @@ def tool_list_models(args: dict) -> object:
     if not isinstance(data, dict):
         return data
     return {
-        "models": [{"alias": m["alias"], "display_name": m.get("display_name"),
+        "models": [{"alias": m["alias"], "label": m.get("label"),
+                    "backend": m.get("backend"),
                     "thinking": m.get("thinking")} for m in data.get("models", [])],
         "roles": [{"role": r["key"], "model": r.get("effective"),
+                   "backend": r.get("effective_backend"),
                    "inherited": r.get("inherited")} for r in data.get("roles", [])],
         "default_model": data.get("default_model"),
         "card": ("Pass `model` to create_card/update_card to pin a card to one "
-                 "of these aliases; omit it to inherit the worker role's model."),
+                 "of these aliases; omit it to inherit the worker role's model. "
+                 "The alias's `backend` is the platform that runs it."),
     }
 
 

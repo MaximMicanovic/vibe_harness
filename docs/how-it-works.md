@@ -510,8 +510,12 @@ while the card is running/reviewing and stops when it leaves those states.
 ## Backends: Vibe or Claude
 
 The harness is a board, not an agent — it drives a headless CLI and reads back
-what that CLI reports. Two are supported, chosen in the sidebar's **Models**
-panel (or `PUT /api/settings {"backend": "claude"}`):
+what that CLI reports. Two are supported. There is no global backend control:
+the sidebar's **Models** panel lists both platforms' models, and picking one
+sets the backend for that role (see
+[Configuration](configuration.md#per-role-models)). `settings.json` keeps
+`backend` as the internal fallback (default `vibe`) for a role with no choice at
+all; nothing in the UI writes it.
 
 | | `vibe` (default) | `claude` |
 |---|---|---|
@@ -527,6 +531,14 @@ A backend owns three things: the command line, where its output lands, and how
 to normalize that output into the shape the rest of the harness speaks
 (`usage`, `session_id`, `config.active_model`, `stop_reason`). Everything
 downstream — the review loop, git, archives, the board — is backend-agnostic.
+
+The worker's backend is pinned per card run (`session.backend`): a fixer round
+resumes the worker session, and a Vibe session id cannot be resumed by Claude,
+so changing the worker's model mid-run cannot switch backends under the resume.
+The reviewer and the resolver are always fresh sessions, so they may run on a
+different backend than the worker. The token counter follows the resolved
+backend — only Vibe streams live counts, so it is hidden exactly when the
+worker's resolved backend is Claude.
 
 Two caveats for `claude`:
 

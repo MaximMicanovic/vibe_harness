@@ -53,7 +53,7 @@ const state = {
   sidebarProjectOpen: new Set(),  // project names expanded in the archive browser
   sidebarArchiveProjects: new Set(),  // '<archiveId>::<project>' keys the user folded away
   archiveProjects: new Map(),  // archive id -> its project groups (GET /api/archives/<id>), cached for the sidebar
-  models: null,          // GET /api/models: { roles, models, default_model }
+  models: null,          // GET /api/models: { roles, models, resolved_backend }
   settings: null,        // GET /api/settings: { backend, backends, failure_kinds, … }
   diffCardId: null,      // card whose diff popup is open
   diffRange: 'card',     // 'card' | 'round' | 'worktree'
@@ -361,9 +361,10 @@ async function action(fn) {
 /* Only Vibe streams live token counts (it writes a session journal the harness
  * tails). Claude reports usage once, in its final result object, so a live
  * counter would sit at zero for the whole run — hide it rather than show a
- * number that never moves. */
+ * number that never moves. The platform comes from the resolved model choice
+ * (picking a model IS picking the backend), not from settings.backend. */
 function backendHasLiveTokens() {
-  return !state.settings || state.settings.backend !== 'claude';
+  return !state.models || state.models.resolved_backend !== 'claude';
 }
 
 function renderStats() {
@@ -410,7 +411,7 @@ function buildCardModelPicker(card) {
   select.appendChild(inherit);
   const models = (state.models && state.models.models) || [];
   for (const m of models) {
-    const opt = el('option', '', m.display_name || m.alias);
+    const opt = el('option', '', m.label || m.alias);
     opt.value = m.alias;
     select.appendChild(opt);
   }
@@ -2606,42 +2607,36 @@ async function loadModels() {
   return state.models;
 }
 
+/* The value of the picker's "type a full Claude model name" entry. */
+const OTHER_MODEL = '__other__';
+
+/* The pickable models grouped by the platform that runs them. The picker shows
+ * one list: picking a model picks its backend, so there is no second control
+ * to contradict it. The group label is the backend's own label from
+ * GET /api/settings, so the two cannot drift. */
+function modelGroups(models, backends) {
+  const groups = [];
+  for (const m of models || []) {
+    let group = groups.find((g) => g.key === m.backend);
+    if (!group) {
+      const info = (backends || []).find((b) => b.key === m.backend);
+      group = { key: m.backend, label: info ? info.label : m.backend, models: [] };
+      groups.push(group);
+    }
+    group.models.push(m);
+  }
+  return groups;
+}
+
 async function renderModelsPanel() {
   const [data, settings] = await Promise.all([api('/api/models'), api('/api/settings')]);
   state.models = data;
   state.settings = settings;
   sidebarBody.textContent = '';
 
-  // Which agent CLI the harness drives. This sits above the per-role models
-  // because it decides what those models even mean.
-  const backendRow = el('div', 'model-role backend-role');
-  const backendLabel = el('label', '', 'Backend');
-  backendLabel.htmlFor = 'backend-select';
-  backendRow.appendChild(backendLabel);
-  const backendSelect = el('select');
-  backendSelect.id = 'backend-select';
-  for (const b of settings.backends) {
-    const opt = el('option', '', b.label + (b.available ? '' : ' — not installed'));
-    opt.value = b.key;
-    opt.disabled = !b.available;
-    backendSelect.appendChild(opt);
-  }
-  backendSelect.value = settings.backend;
-  backendSelect.title = 'Which agent CLI the harness spawns for every session';
-  backendSelect.addEventListener('change', () => {
-    saveBackend(backendSelect.value).catch(showError);
-  });
-  backendRow.appendChild(backendSelect);
-  const chosen = settings.backends.find((b) => b.key === settings.backend);
-  backendRow.appendChild(el('p', 'model-hint',
-    chosen && chosen.available
-      ? 'Sessions run on ' + chosen.label + ' (' + chosen.binary + ').'
-      : 'This backend is not installed — runs will fail until ' + (chosen ? chosen.binary : 'it') + ' is on PATH.'));
-  sidebarBody.appendChild(backendRow);
-
   // How accepting a card ships the change: merge locally, or open a pull
-  // request (push the branch, verdict as the PR body). It sits next to the
-  // backend because it decides what the Accept button even does.
+  // request (push the branch, verdict as the PR body). It sits above the
+  // per-role models because it decides what the Accept button even does.
   const acceptRow = el('div', 'model-role backend-role');
   const acceptLabel = el('label', '', 'Accept mode');
   acceptLabel.htmlFor = 'accept-mode-select';
@@ -2672,40 +2667,63 @@ async function renderModelsPanel() {
 
     const select = el('select');
     select.id = id;
-    const inherit = el('option', '', '— inherit (' + (data.default_model || 'config') + ') —');
+    const inherit = el('option', '',
+      '— inherit (' + (role.effective || 'CLI default') + ') —');
     inherit.value = '';
     select.appendChild(inherit);
-    for (const m of data.models) {
-      const opt = el('option', '', m.display_name + (m.thinking ? ' · ' + m.thinking : ''));
-      opt.value = m.alias;
-      select.appendChild(opt);
+    // One list, both platforms: picking a model picks the backend that runs
+    // it, so there is no separate Backend control to contradict it.
+    for (const group of modelGroups(data.models, settings.backends)) {
+      const og = el('optgroup');
+      og.label = group.label;
+      for (const m of group.models) {
+        const opt = el('option', '', m.label + (m.thinking ? ' · ' + m.thinking : ''));
+        opt.value = m.alias;
+        opt.dataset.backend = m.backend;
+        opt.disabled = !m.available;
+        if (!m.available) opt.title = m.reason || (group.label + ' is not installed');
+        og.appendChild(opt);
+      }
+      select.appendChild(og);
+    }
+    // Claude also takes a full model name typed by hand (claude-sonnet-4-6).
+    const other = el('option', '', 'Other Claude model…');
+    other.value = OTHER_MODEL;
+    select.appendChild(other);
+    // A role pinned to a name that is not in the list (a full Claude model
+    // typed by hand) still shows it instead of falling back to "inherit".
+    if (role.model && !data.models.some((m) => m.alias === role.model)) {
+      const pinned = el('option', '', role.model);
+      pinned.value = role.model;
+      pinned.dataset.backend = role.backend;
+      select.appendChild(pinned);
     }
     select.value = role.model || '';
     select.disabled = !role.available;
     select.title = role.description;
     select.addEventListener('change', () => {
-      saveRoleModel(role.key, select.value).catch(showError);
+      if (select.value === OTHER_MODEL) {
+        const typed = (window.prompt('Claude model name (e.g. claude-sonnet-4-6)') || '').trim();
+        if (!typed) {
+          select.value = role.model || '';
+          return;
+        }
+        saveRoleModel(role.key, typed, 'claude').catch(showError);
+        return;
+      }
+      const chosen = data.models.find((m) => m.alias === select.value);
+      saveRoleModel(role.key, select.value, chosen ? chosen.backend : null).catch(showError);
     });
     row.appendChild(select);
     row.appendChild(el('p', 'model-hint', role.description));
     sidebarBody.appendChild(row);
   }
   sidebarBody.appendChild(el('p', 'sidebar-empty',
-    'A role left on “inherit” runs on your own active_model from ~/.vibe/config.toml. '
-    + 'A chosen model is pinned for that session only — VIBE_ACTIVE_MODEL for the vibe '
-    + 'backend, --model for claude — so the global config is never rewritten and two '
-    + 'sessions cannot race each other.'));
-}
-
-async function saveBackend(key) {
-  state.settings = await api('/api/settings', {
-    method: 'PUT', body: JSON.stringify({ backend: key }),
-  });
-  // The token counter depends on the backend, so the board and the stats bar
-  // have to be redrawn, not just the panel.
-  renderStats();
-  renderBoard();
-  await renderModelsPanel();
+    'Picking a model picks the platform that runs it: the list carries both Vibe '
+    + 'and Claude models, and a role left on “inherit” follows the worker (all-inherit '
+    + 'runs on Vibe\'s own default). A chosen model is pinned for that session only — '
+    + 'VIBE_ACTIVE_MODEL for Vibe, --model for Claude — so the global config is never '
+    + 'rewritten and two sessions cannot race each other.'));
 }
 
 async function saveAcceptMode(key) {
@@ -2717,11 +2735,16 @@ async function saveAcceptMode(key) {
   await renderModelsPanel();
 }
 
-async function saveRoleModel(role, model) {
-  const patch = {};
-  patch[role] = model;
-  const data = await api('/api/models', { method: 'PUT', body: JSON.stringify({ models: patch }) });
+async function saveRoleModel(role, model, backend) {
+  const data = await api('/api/models', {
+    method: 'PUT',
+    body: JSON.stringify({ role: role, model: model, backend: backend || null }),
+  });
   state.models = data;
+  // The token counter follows the resolved backend, so the board and the stats
+  // bar are redrawn too, not just the panel.
+  renderStats();
+  renderBoard();
   await renderModelsPanel();
 }
 

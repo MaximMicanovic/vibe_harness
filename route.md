@@ -2,9 +2,11 @@
 
 How vibe-harness routes work through the pipeline, and how to keep token usage
 low. Every session is a headless agent CLI run — `vibe` by default, `claude`
-when the backend setting says so — and the harness reads each run's output for
-token usage. How a model is pinned depends on the backend: Vibe has no
-`--model` flag (it reads `VIBE_ACTIVE_MODEL`), Claude takes `--model` (see §3).
+when the role's chosen model is a Claude one — and the harness reads each run's
+output for token usage. Choosing a model chooses the platform: the picker lists
+both, and there is no separate global backend control. How a model is pinned
+depends on the backend: Vibe has no `--model` flag (it reads
+`VIBE_ACTIVE_MODEL`), Claude takes `--model` (see §3).
 
 ## 0. Project folders: git init + agent.md + route.md
 
@@ -319,9 +321,29 @@ Each kind of session can run on its own model, chosen in the board's sidebar
 | Merge conflict | `resolve-N` | Resolves a conflicted merge on accept |
 | Orchestrator | — | No session yet: the worker splits a spec into sub-cards itself |
 
-A role left on **inherit** runs on the user's own `active_model`. A chosen
-model reaches the CLI the way that backend accepts it — `Backend.build_cmd`
-takes a `model` argument and each backend decides:
+**Choosing a model IS choosing the platform.** The picker shows one list with
+both platforms — the Vibe aliases from `~/.vibe/config.toml` plus Claude's
+`sonnet` / `opus` / `haiku`, and an "other…" entry for a full name like
+`claude-sonnet-4-6` — and picking one sets the backend for that role. There is
+no separate global Backend control: it was a second control for the same
+decision, and the two could contradict each other (`claude` + a Vibe model is a
+combination that cannot run). `PUT /api/models` takes `{role, model, backend}`
+and refuses a backend that does not offer the model (400). A backend whose CLI
+is not installed still lists its models, disabled with the reason.
+
+`models.json` is `{"models": {role: {"model": "...", "backend": "vibe"|"claude"}}}`.
+A flat `{role: alias}` file (the old shape) still reads — every entry was
+written for Vibe — and is rewritten in the new shape on the next save.
+
+Resolution order:
+
+1. a role with its own choice uses its own model **and** backend;
+2. a role on **inherit** follows the worker's choice (model and backend);
+3. if the worker inherits too, the fallback is **Vibe** with the CLI's own
+   default model (`active_model`).
+
+A chosen model reaches the CLI the way that backend accepts it —
+`Backend.build_cmd` takes a `model` argument and each backend decides:
 
 | Backend | How the role's model is passed |
 |---|---|
@@ -339,6 +361,20 @@ identically), and a refused **resolver** model is named in the failure detail
 rather than reported as a bare exit code. `GET/PUT /api/models` is the API;
 `app/models.py` owns the store. The orchestrator role is offered but disabled:
 nothing would use it.
+
+**The worker's backend is pinned per card run.** A fixer round resumes the
+worker session (`--resume <session-id>`), and a Vibe session id cannot be
+resumed by Claude. The resolved backend is recorded on the card's session
+(`session.backend`) when the run starts, and the fixer rounds use that — so
+changing the worker's model mid-run cannot switch backends under a resume. If
+the new model belongs to the other platform, the resumed round runs on the
+pinned backend's own default instead. The reviewer and the resolver are always
+fresh sessions, so they may use a different backend than the worker.
+
+The token counter follows the resolved backend: only Vibe streams live counts,
+so it is hidden exactly when the worker's resolved backend is Claude.
+`settings.json` keeps `backend` as the internal fallback (default `vibe`) for a
+role with no choice at all; nothing in the UI writes it.
 
 ## 4. Write cards so the first run succeeds
 
