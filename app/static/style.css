@@ -249,6 +249,36 @@ body {
 .error-banner[hidden] { display: none; }
 .error-banner span { flex: 1; word-break: break-word; }
 
+/* ---------------- Green-gate banner (no test command configured) ---------------- */
+
+.gate-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 16px 0;
+  padding: 10px 14px;
+  background: var(--q-bg);
+  border: 1px solid var(--q-border);
+  border-radius: 8px;
+  color: var(--q-ink);
+  font-size: 14px;
+}
+
+.gate-banner[hidden] { display: none; }
+.gate-banner span { flex: 1; word-break: break-word; }
+
+/* Loud in-panel warning (settings sidebar) — same amber as the banner. */
+.settings-warning {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  background: var(--q-bg);
+  border: 1px solid var(--q-border);
+  border-radius: 8px;
+  color: var(--q-ink);
+  font-size: 13px;
+  word-break: break-word;
+}
+
 /* ---------------- Sidebar ---------------- */
 
 /* The shell holds the sidebar rail and the board side by side. The rail is
@@ -1113,6 +1143,7 @@ body {
 .chip-review-rejected { background: #f8d7da; color: #842029; }
 .chip-test-failed { background: #f8d7da; color: #842029; font-weight: 700; }
 .chip-review-exhausted { background: #fff3cd; color: #664d03; }
+.chip-card-warning { background: var(--q-bg); color: var(--q-ink); border: 1px solid var(--q-border); }
 .chip-git { background: #e2e8f0; color: #1e293b; }
 /* The pull request an accepted card shipped as: a link, styled like a chip. */
 .chip-pr { background: #dbeafe; color: #1e40af; font-weight: 700; text-decoration: none; }

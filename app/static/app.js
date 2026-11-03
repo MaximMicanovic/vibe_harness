@@ -86,6 +86,10 @@ const emptyBoard = $('empty-board');
 const EMPTY_BOARD_TEXT = emptyBoard.textContent;
 const errorBanner = $('error-banner');
 const errorText = $('error-text');
+// The green-gate banner: shown whenever no test command is configured, so the
+// "accepts are not test-gated" state is impossible to miss on the board.
+const gateBanner = $('gate-banner');
+const gateBannerText = $('gate-banner-text');
 
 const editorOverlay = $('editor-overlay');
 const editorHeading = $('editor-heading');
@@ -806,8 +810,10 @@ function buildCard(cardData, queuePos) {
     if (s.review) {
       if (s.review.approved === true) chips.appendChild(chip('reviewed', '✓ reviewed'));
       else if (s.review.exhausted === true) {
-        const rc = chip('review-exhausted', '⚠ review rounds exhausted — accept manually');
-        rc.title = s.review.reason || 'reviewer never approved';
+        const rc = chip('review-exhausted', '⚠ review rounds exhausted — Accept needs force');
+        rc.title = (s.review.reason || 'reviewer never approved')
+          + ' — the loop ran out of rounds without an approval; accepting '
+          + 'requires the explicit force override (the Accept button asks first)';
         chips.appendChild(rc);
       } else if (s.review.approved === false) {
         const isTest = s.review.source === 'test';
@@ -867,6 +873,17 @@ function buildCard(cardData, queuePos) {
     }
     if (s.model) chips.appendChild(chip('model', s.model));
     if (cardData.auto_accept) chips.appendChild(chip('auto-accept', 'auto-accept on'));
+    // Server-attached accept-gate warnings (e.g. no test command configured,
+    // or an exhausted review that needs the force override) — full text on
+    // hover, short label on the chip.
+    if (Array.isArray(cardData.warnings)) {
+      for (const w of cardData.warnings) {
+        const label = w.length > 46 ? w.slice(0, 45) + '…' : w;
+        const wc = chip('card-warning', '⚠ ' + label);
+        wc.title = w;
+        chips.appendChild(wc);
+      }
+    }
   }
   if (chips.childNodes.length > 0) card.appendChild(chips);
 
@@ -2489,6 +2506,19 @@ async function renderKeysPanel() {
 
 /* --- settings: the concurrency cap and browser-side preferences --- */
 
+/* The green-gate banner over the board: GET /api/settings carries
+ * test_cmd_configured, and when it is false the accept-time test gate is OFF —
+ * accepts still work (the board must not deadlock), but loudly flagged. */
+function renderGateBanner() {
+  const off = !!(state.settings && state.settings.test_cmd_configured === false);
+  gateBanner.hidden = !off;
+  if (off) {
+    gateBannerText.textContent = '⚠ No test command configured (test_cmd / '
+      + 'VIBE_HARNESS_TEST_CMD unset) — the accept-time test gate is OFF: cards '
+      + 'can be accepted with red tests. Set test_cmd to arm the gate.';
+  }
+}
+
 /* The concurrency cap. The runner reads it per run, so a change applies to the
  * next Run click without a restart; cards over the cap wait in Draft and start
  * automatically, oldest queue time first, as sessions end. */
@@ -2581,6 +2611,21 @@ async function renderSettingsPanel() {
       + 'override that. Only `sudo pmset -a disablesleep 1` does, and it is a '
       + 'system-wide root setting the harness will not touch.'));
   }
+
+  /* The green gate: with no test command configured, accepts are not gated by
+   * tests. Accepts still work — the board must not deadlock — but this is the
+   * loud in-panel flag for it. */
+  if (settings.test_cmd_configured === false) {
+    sidebarBody.appendChild(el('p', 'settings-warning',
+      '⚠ No test command configured (test_cmd / VIBE_HARNESS_TEST_CMD is '
+      + 'unset) — the accept-time test gate is OFF: a done card can be accepted '
+      + 'even with red tests. Set test_cmd in the config to make every accept '
+      + 'run the tests first.'));
+  } else if (settings.test_cmd) {
+    sidebarBody.appendChild(el('p', 'sidebar-empty',
+      'Test gate armed: ' + settings.test_cmd));
+  }
+  renderGateBanner();
 }
 
 async function savePreventSleep(on) {
@@ -2611,8 +2656,9 @@ async function loadSettings() {
   }
   // The failure filter is built from the classifier's kinds, which arrive with
   // the settings: repaint it now that they are known (the first paint used the
-  // fallback list).
+  // fallback list). The green-gate banner rides on the same payload.
   renderFailureFilter();
+  renderGateBanner();
   return state.settings;
 }
 
@@ -3479,9 +3525,13 @@ async function openEditor(cardId) {
     btnAccept.title = prMode
       ? 'Push the card branch and open a pull request with the review verdict as its body'
       : 'Merge the card branch into the base branch';
+    if (exhausted) {
+      btnAccept.title += ' — the review rounds were exhausted without an approval: '
+        + 'this sends the explicit force override after a confirmation';
+    }
     acceptHint.textContent = prMode
-      ? 'Open PR is available once the reviewer approves the card — or after the review rounds are exhausted, as a manual accept.'
-      : 'Accept is available once the reviewer approves the card — or after the review rounds are exhausted, as a manual accept.';
+      ? 'Open PR is available once the reviewer approves the card — or after the review rounds are exhausted, with an explicit force confirmation.'
+      : 'Accept is available once the reviewer approves the card — or after the review rounds are exhausted, with an explicit force confirmation.';
     // An accepted card shipped as a PR links to it.
     const prUrl = (card.session && card.session.pr_url) || '';
     cardPrLink.hidden = !prUrl;
@@ -3642,7 +3692,19 @@ btnStop.addEventListener('click', () => action(async () => {
 }));
 
 btnAccept.addEventListener('click', () => action(async () => {
-  await api('/api/cards/' + encodeURIComponent(state.editorCardId) + '/accept', { method: 'POST' });
+  const id = state.editorCardId;
+  if (!id) return;
+  const card = await api('/api/cards/' + encodeURIComponent(id));
+  const review = (card.session && card.session.review) || {};
+  const opts = { method: 'POST' };
+  if (review.exhausted === true && review.approved !== true) {
+    // An exhausted review loop is NOT an approval: accepting needs the
+    // explicit force override, so the click asks for it first.
+    if (!window.confirm('The review rounds were exhausted without an approval. '
+        + 'Accept this card anyway (force)?')) return;
+    opts.body = JSON.stringify({ force: true });
+  }
+  await api('/api/cards/' + encodeURIComponent(id) + '/accept', opts);
   closeEditor();
 }));
 

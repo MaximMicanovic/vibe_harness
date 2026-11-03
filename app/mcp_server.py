@@ -261,14 +261,24 @@ TOOLS: list[dict] = [
             "Accept a done card (test gate, then ship it: in accept_mode "
             "'local' the git branch is merged into the base branch; in 'pr' "
             "mode the branch is pushed and a pull request is opened with the "
-            "review verdict as its body). Only possible with an approved "
-            "review (or an exhausted review loop). Only one accept merges "
+            "review verdict as its body). Possible with an approved review; "
+            "a card whose review loop was exhausted WITHOUT an approval "
+            "(review.exhausted) additionally needs the explicit force=true "
+            "override — pass it only when you deliberately accept an "
+            "unapproved, exhausted card. Only one accept merges "
             "into a repository at a time: a second accept for the same repo "
             "is queued (session.accept_queued + queue_reason) and merged "
             "automatically when the repo frees. " + _COMMON),
         "inputSchema": {
             "type": "object",
-            "properties": {"card_id": {"type": "string"}},
+            "properties": {
+                "card_id": {"type": "string"},
+                "force": {"type": "boolean",
+                          "description": "Explicit override to accept a card whose "
+                                         "review loop was exhausted without an "
+                                         "approval (review.exhausted). Refused (409) "
+                                         "for any other card. Default false."},
+            },
             "required": ["card_id"],
         },
     },
@@ -763,7 +773,10 @@ def tool_stop_card(args: dict) -> object:
 
 
 def tool_accept_card(args: dict) -> object:
-    return _api().post(f"/api/cards/{args['card_id']}/accept")
+    # force rides along only when asked for: an exhausted review loop is
+    # accepted only via the explicit override, never by default.
+    payload = {"force": True} if args.get("force") else None
+    return _api().post(f"/api/cards/{args['card_id']}/accept", payload)
 
 
 def tool_accept_all_cards(args: dict) -> object:
