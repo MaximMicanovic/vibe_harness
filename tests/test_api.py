@@ -2052,6 +2052,51 @@ def test_settings_empty_patch_keeps_the_accept_mode(env):
     assert r.json()["accept_mode"] == "pr"
 
 
+# ----------------------------------------------------------------------
+# prevent_sleep: the sleep-guard toggle is persisted like the other settings,
+# so a server restart does not revert it to the VIBE_HARNESS_PREVENT_SLEEP
+# env default.
+# ----------------------------------------------------------------------
+
+def test_settings_persist_and_round_trip_prevent_sleep(env):
+    r = env.client.put("/api/settings", json={"prevent_sleep": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["prevent_sleep"] is False
+    assert env.runner.sleep_guard.enabled is False
+    # Persisted: a fresh store over the same settings.json reads it back.
+    assert SettingsStore(env.tmp_path / "settings.json").prevent_sleep(True) is False
+    # The GET round-trips for the UI.
+    assert env.client.get("/api/settings").json()["prevent_sleep"] is False
+    # ...and back on, without touching the other settings.
+    r = env.client.put("/api/settings", json={"prevent_sleep": True})
+    assert r.json()["prevent_sleep"] is True
+    assert env.runner.sleep_guard.enabled is True
+    assert SettingsStore(env.tmp_path / "settings.json").prevent_sleep(False) is True
+    assert r.json()["backend"] == "vibe"
+
+
+def test_settings_restore_prevent_sleep_at_startup(tmp_path):
+    """A stored toggle wins over the env default when the server starts."""
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.set_prevent_sleep(False)
+    e = make_env(tmp_path, settings=settings, prevent_sleep=True)
+    with e.client:
+        assert e.runner.sleep_guard.enabled is False
+        assert e.client.get("/api/settings").json()["prevent_sleep"] is False
+
+
+def test_settings_prevent_sleep_keeps_the_env_default_at_startup(tmp_path):
+    """No stored value: the VIBE_HARNESS_PREVENT_SLEEP default still applies."""
+    e = make_env(tmp_path / "a", prevent_sleep=False)
+    with e.client:
+        assert e.runner.sleep_guard.enabled is False
+        assert e.client.get("/api/settings").json()["prevent_sleep"] is False
+    e = make_env(tmp_path / "b", prevent_sleep=True)
+    with e.client:
+        assert e.runner.sleep_guard.enabled is True
+        assert e.client.get("/api/settings").json()["prevent_sleep"] is True
+
+
 @git_test
 def test_accept_in_pr_mode_opens_a_pull_request(tmp_path, monkeypatch):
     """pr mode over HTTP: accept pushes the branch and opens a PR (stubbed),

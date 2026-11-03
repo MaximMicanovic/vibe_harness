@@ -239,6 +239,10 @@ def create_app(config: Config | None = None,
         # suspends the session process, the CLI gives up and reports
         # `interrupted` (exit 3) — a card that looks failed but was only
         # paused. The inhibitor is a child process, so it dies with the server.
+        # A stored prevent_sleep setting wins over the env default
+        # (VIBE_HARNESS_PREVENT_SLEEP); with nothing stored the config value
+        # the runner was built with stays.
+        runner.sleep_guard.enabled = settings.prevent_sleep(config.prevent_sleep)
         try:
             runner.sleep_guard.start(runner.has_pending_work)
         except Exception as exc:
@@ -741,6 +745,10 @@ def create_app(config: Config | None = None,
         `accept_modes` the choices the panel offers. `failure_kinds` is
         `failures.KINDS` — the board builds its failure filter from it, so a
         new kind reaches the UI without a second copy to keep in sync.
+        `prevent_sleep` is the effective sleep-guard toggle (the stored
+        setting, else Config.prevent_sleep) and `sleep_held`/`sleep_supported`
+        describe the inhibitor itself, so the panel can show whether the
+        machine is currently being kept awake.
         """
         return {"backend": settings.backend(),
                 "failure_kinds": list(failures.KINDS),
@@ -768,6 +776,9 @@ def create_app(config: Config | None = None,
         if payload.accept_mode is not None:
             settings.set_accept_mode(payload.accept_mode)
         if payload.prevent_sleep is not None:
+            # Persist like the other settings so a restart keeps the toggle;
+            # the in-memory guard follows immediately.
+            settings.set_prevent_sleep(bool(payload.prevent_sleep))
             runner.sleep_guard.enabled = bool(payload.prevent_sleep)
             if not runner.sleep_guard.enabled:
                 runner.sleep_guard.release()

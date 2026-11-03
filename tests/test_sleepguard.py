@@ -7,6 +7,7 @@ inhibitor process is stubbed so nothing here depends on the platform.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -16,6 +17,7 @@ from app.cards import CardStore
 from app.config import Config
 from app.projects import ProjectStore
 from app.runner import SessionRunner
+from app.settings import SettingsStore
 from app.sleepguard import SleepGuard
 
 
@@ -208,3 +210,35 @@ def test_guard_is_disabled_by_config(tmp_path):
                            sessions_dir=tmp_path / "sessions",
                            projects=ProjectStore(tmp_path / "projects.json"))
     assert runner.sleep_guard.enabled is False
+
+
+# ------------------------------------------------- settings.json persistence
+# The toggle is a board setting like any other: once PUT /api/settings stores
+# it, a server restart must read the same value back instead of falling to the
+# VIBE_HARNESS_PREVENT_SLEEP env default.
+
+def test_settings_prevent_sleep_falls_back_to_the_config_value(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    assert store.prevent_sleep(True) is True      # unset -> Config fallback
+    assert store.prevent_sleep(False) is False
+
+
+def test_settings_prevent_sleep_survives_a_reload(tmp_path):
+    path = tmp_path / "settings.json"
+    store = SettingsStore(path)
+    assert store.set_prevent_sleep(False) is False
+    # A fresh store over the same file (a server restart) reads it back.
+    assert SettingsStore(path).prevent_sleep(True) is False
+    assert store.set_prevent_sleep(True) is True
+    assert SettingsStore(path).prevent_sleep(False) is True
+    # ...and writing it does not clobber the other settings.
+    store.set_max_concurrent(2)
+    assert SettingsStore(path).prevent_sleep(False) is True
+    assert SettingsStore(path).max_concurrent(3) == 2
+
+
+def test_settings_ignores_a_corrupt_prevent_sleep(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"prevent_sleep": "yes"}), encoding="utf-8")
+    assert SettingsStore(path).prevent_sleep(True) is True
+    assert SettingsStore(path).prevent_sleep(False) is False
