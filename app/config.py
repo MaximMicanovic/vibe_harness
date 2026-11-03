@@ -72,6 +72,14 @@ class Config:
         if self.accept_cmd and not self.test_cmd:
             self.test_cmd = self.accept_cmd
 
+    @property
+    def test_cmd_configured(self) -> bool:
+        """True when a test command is set, i.e. the review + accept gates
+        actually run tests. False means the green gate is OFF (accepts are
+        still allowed — the board must not deadlock — but the board surfaces
+        the missing gate loudly via GET /api/settings and card warnings)."""
+        return bool(self.test_cmd)
+
     def vibe_available(self) -> bool:
         return shutil.which(self.vibe_bin) is not None
 

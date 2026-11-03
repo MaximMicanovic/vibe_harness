@@ -1095,8 +1095,13 @@ class SessionRunner:
             return self.settings.accept_mode(self.config.accept_mode)
         return self.config.accept_mode
 
-    def accept_card(self, card_id: str) -> dict:
+    def accept_card(self, card_id: str, *, force: bool = False) -> dict:
         """Accept a done card: gate first, then ship it.
+
+        `force` is the explicit override for a card whose review loop was
+        exhausted without an approval (review.exhausted): without it the
+        review gate refuses (InvalidTransition -> 409). It is refused for any
+        other card. auto_accept and the accept-all drain never pass it.
 
         In `pr` mode the branch is pushed and a pull request is opened instead
         of merging locally (see `_accept_with_pr`). In `local` mode the card
@@ -1122,10 +1127,15 @@ class SessionRunner:
         branch + linked worktree are KEPT, so the card's diff stays
         inspectable after accept (``GET /api/cards/<id>/diff``).
         """
-        card = self.store.check_accept(card_id)
+        card = self.store.check_accept(card_id, force=force)
+        if force:
+            # Remember the override on the session so the resolver-conclude
+            # path (_conclude_resolved_merge) can finish THIS accept without
+            # re-asking — and no other path can pick it up.
+            self.store.patch_session(card_id, {"accept_forced": True})
         git_info = (card.get("session") or {}).get("git")
         if self.accept_mode() == "pr":
-            result = self._accept_with_pr(card, git_info)
+            result = self._accept_with_pr(card, git_info, force=force)
         else:
             repo = Path(git_info["repo"]) if git_info and git_info.get("repo") else None
             if repo is not None:
@@ -1136,7 +1146,7 @@ class SessionRunner:
                 if not self._claim_accept_repo(repo):
                     return self._queue_accept(card, repo)
             try:
-                result = self._accept_card_locked(card, git_info)
+                result = self._accept_card_locked(card, git_info, force=force)
             finally:
                 # A resolver owns the merge now: the repo stays locked until it
                 # concludes (_conclude_resolved_merge) or fails.
@@ -1147,7 +1157,8 @@ class SessionRunner:
             result = self._drop_from_accept_queue(card_id) or result
         return result
 
-    def _accept_card_locked(self, card: dict, git_info: dict | None) -> dict:
+    def _accept_card_locked(self, card: dict, git_info: dict | None,
+                            *, force: bool = False) -> dict:
         """The accept itself, with the card's repo already claimed."""
         card_id = card["id"]
         if git_info and gitops.merge_in_progress(Path(git_info["repo"])):
@@ -1165,7 +1176,7 @@ class SessionRunner:
                     **git_info, "merged": True, "resolving": False,
                     "merge_conflict": False, "merge_error": None,
                     "merged_at": now_iso()}})
-                accepted = self.store.accept(card_id)
+                accepted = self.store.accept(card_id, force=force)
                 try:
                     self._drain_dependents()
                 except Exception:
@@ -1175,7 +1186,7 @@ class SessionRunner:
         # before merging/accepting (raises TestFailedError -> 409 otherwise).
         self._green_gate(card)
         if not git_info:
-            accepted = self.store.accept(card_id)
+            accepted = self.store.accept(card_id, force=force)
         else:
             try:
                 merged = gitops.merge_card_branch(git_info)
@@ -1188,7 +1199,7 @@ class SessionRunner:
             self.store.patch_session(card_id, {"git": {
                 **git_info, "merged": True, "resolving": False,
                 "merge_conflict": False, "merge_error": None, **merged}})
-            accepted = self.store.accept(card_id)
+            accepted = self.store.accept(card_id, force=force)
         # Accepted counts as completed: start drafts waiting on this card.
         try:
             self._drain_dependents()
@@ -1367,7 +1378,14 @@ class SessionRunner:
                     return
                 card_id = card["id"]
                 try:
-                    self.accept_card(card_id)
+                    # The drain finishes accepts the user already authorized:
+                    # force rides along only when the original accept was
+                    # explicitly forced (session.accept_forced) — accept-all
+                    # never sets it, so an exhausted card queued by a batch
+                    # is refused here and left in Done with the error.
+                    self.accept_card(
+                        card_id,
+                        force=bool((card.get("session") or {}).get("accept_forced")))
                 except Exception as exc:
                     # Green gate / git problem: leave the card in Done and drop
                     # it out of the batch so it renders below the button again.
@@ -1444,7 +1462,8 @@ class SessionRunner:
                 return
             time.sleep(1.0)
 
-    def _accept_with_pr(self, card: dict, git_info: dict | None) -> dict:
+    def _accept_with_pr(self, card: dict, git_info: dict | None,
+                         *, force: bool = False) -> dict:
         """Accept in `pr` mode: push the card branch and open a pull request.
 
         Preflight first (gh installed, `gh auth status` green, an `origin`
@@ -1485,7 +1504,7 @@ class SessionRunner:
             "git": {**git_info, "merged": False, "resolving": False,
                     "merge_conflict": False, "merge_error": None},
         })
-        accepted = self.store.accept(card_id)
+        accepted = self.store.accept(card_id, force=force)
         # Accepted counts as completed: start drafts waiting on this card.
         try:
             self._drain_dependents()
@@ -1709,7 +1728,9 @@ class SessionRunner:
             patch({"merged": True, "merge_conflict": False, "merge_error": None,
                    "merge_commit": head, "merge_was_ff": False,
                    "merged_at": now_iso()})
-            self.store.accept(card_id)
+            # force only when the original accept was explicitly forced.
+            self.store.accept(card_id,
+                              force=bool(session.get("accept_forced")))
         except GitError as exc:
             patch({"merge_error": str(exc)})
         except TestFailedError as exc:
@@ -2283,7 +2304,9 @@ class SessionRunner:
         workspace right before the card is accepted/merged. Raises
         TestFailedError (-> 409) on failure; records verified=True on pass and
         returns the passing output (the PR body quotes it), or None when no
-        test command is configured.
+        test command is configured. The unset case NEVER blocks the accept
+        (the board must not deadlock) — it is surfaced loudly instead:
+        `test_cmd_configured` in GET /api/settings and the card's `warnings`.
         """
         if not self.config.test_cmd:
             return None
@@ -2630,6 +2653,9 @@ class SessionRunner:
                     **review_patch,
                 })
                 if done.get("auto_accept"):
+                    # Only the approved path ever auto-accepts, and never with
+                    # force: an exhausted review loop is always the user's
+                    # explicit call (POST .../accept {"force": true}).
                     try:
                         self.accept_card(card_id)
                     except Exception:
@@ -2876,6 +2902,10 @@ class SessionRunner:
         live counter otherwise. `session.live_token_breakdown` carries the same
         combination for the per-type split (cached/output/input) shown on
         hover. The store's card is never mutated — the session dict is copied.
+
+        A card in 'done' also gets a top-level `warnings` list when the accept
+        gate has something loud to say: no test command configured (the green
+        gate is off) and/or an exhausted review that needs the force override.
         """
         out = dict(card)
         session = card.get("session")
@@ -2901,17 +2931,31 @@ class SessionRunner:
                 new_session["card_cost_usd"] = card_cost
             out["session"] = new_session
         live = self.live_usage(card["id"])
-        if live is None:
-            return out
-        session = out.get("session") or {}
-        recorded = session.get("card_tokens") or 0
-        value = combine_live(recorded, live)
-        new_session = {**session, "live_tokens": value}
-        breakdown = merge_token_breakdown(card_token_breakdown(session),
-                                          live.get("breakdown"), live["cumulative"])
-        if breakdown is not None:
-            new_session["live_token_breakdown"] = breakdown
-        out["session"] = new_session
+        if live is not None:
+            session = out.get("session") or {}
+            recorded = session.get("card_tokens") or 0
+            value = combine_live(recorded, live)
+            new_session = {**session, "live_tokens": value}
+            breakdown = merge_token_breakdown(card_token_breakdown(session),
+                                              live.get("breakdown"), live["cumulative"])
+            if breakdown is not None:
+                new_session["live_token_breakdown"] = breakdown
+            out["session"] = new_session
+        # Accept-gate warnings for a card waiting in Done: attached here (not
+        # persisted) so the board AND the MCP see them from /api/cards.
+        if card.get("status") == "done":
+            warnings: list[str] = []
+            if not self.config.test_cmd_configured:
+                warnings.append(
+                    "no test command configured (test_cmd unset) — accepting "
+                    "this card is NOT gated by tests")
+            review = (card.get("session") or {}).get("review") or {}
+            if review.get("approved") is not True and review.get("exhausted") is True:
+                warnings.append(
+                    "review rounds exhausted without an approval — accepting "
+                    "this card requires the explicit force override")
+            if warnings:
+                out["warnings"] = warnings
         return out
 
     def recover_stale(self) -> None:

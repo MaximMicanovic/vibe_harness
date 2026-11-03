@@ -303,17 +303,44 @@ def test_accept_requires_approved_review(store: CardStore):
     assert store.accept(other["id"])["status"] == "accepted"
 
 
-def test_accept_allowed_when_review_rounds_exhausted(store: CardStore):
-    """done + review.exhausted (loop cap hit): the user may accept manually."""
+def test_accept_after_review_rounds_exhausted_requires_force(store: CardStore):
+    """done + review.exhausted (loop cap hit): the user may accept manually,
+    but ONLY with an explicit force — a bare accept is refused, so an
+    exhausted review loop can never be accepted by accident."""
     card = store.create("T", "b")
     store.set_status(card["id"], "running")
     store.set_status(card["id"], "done",
                      session_patch={"review": {"approved": False,
                                                "exhausted": True,
                                                "reason": "bugs found"}})
-    accepted = store.accept(card["id"])
+    with pytest.raises(InvalidTransition):
+        store.accept(card["id"])                       # no force -> refused
+    with pytest.raises(InvalidTransition):
+        store.check_accept(card["id"])                 # same for the gate
+    assert store.get(card["id"])["status"] == "done"   # nothing mutated
+
+    accepted = store.accept(card["id"], force=True)
     assert accepted["status"] == "accepted"
     assert accepted["accepted"] is True
+
+
+def test_force_is_only_valid_when_the_review_was_exhausted(store: CardStore):
+    """force=True is refused everywhere else: it is an override for the
+    exhausted-review case only, never for an approved or missing review."""
+    approved = store.create("T", "b")
+    store.set_status(approved["id"], "running")
+    store.set_status(approved["id"], "done",
+                     session_patch={"review": {"approved": True}})
+    with pytest.raises(InvalidTransition):
+        store.accept(approved["id"], force=True)
+    # A plain accept of an approved card still works (force not needed).
+    assert store.accept(approved["id"])["status"] == "accepted"
+
+    unreviewed = store.create("T2", "b")
+    store.set_status(unreviewed["id"], "running")
+    store.set_status(unreviewed["id"], "done")        # no review at all
+    with pytest.raises(InvalidTransition):
+        store.accept(unreviewed["id"], force=True)
 
 
 def test_reviewing_blocks_edit_delete_reset(store: CardStore):

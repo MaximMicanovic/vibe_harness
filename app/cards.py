@@ -358,35 +358,53 @@ class CardStore:
         self._write(self._find_path(card_id), card["body"], md)
         return self.get(card_id)
 
-    def check_accept(self, card_id: str) -> dict:
+    def check_accept(self, card_id: str, *, force: bool = False) -> dict:
         """Validate the accept gate without mutating; returns the card.
 
         Raises InvalidTransition when the card cannot be accepted.
+
+        Normally the reviewer must have approved. When the review/fix loop
+        exhausted its rounds (review.exhausted) the card is done but
+        unapproved: it can only be accepted with the explicit `force`
+        override — a bare accept is refused, so an exhausted loop is never
+        accepted by accident. `force` is refused in every other case (it is
+        an override for the exhausted-review path only).
         """
         card = self._card_from_post(self._get_post(card_id))
         if card["status"] != "done":
             raise InvalidTransition(
                 f"cannot accept card in status {card['status']!r}; must be 'done'")
         review = (card.get("session") or {}).get("review") or {}
-        # Normally the reviewer must have approved. Exception: when the
-        # review/fix loop exhausted its rounds (review.exhausted), the card is
-        # done but unapproved — the user accepts it manually.
-        if review.get("approved") is not True and review.get("exhausted") is not True:
+        approved = review.get("approved") is True
+        exhausted = review.get("exhausted") is True and not approved
+        if force and not exhausted:
             raise InvalidTransition(
-                "card has no approved review — it must be reviewed before it "
-                "can be accepted")
-        return card
+                "force is only valid when the review loop was exhausted "
+                "without an approval (review.exhausted) — this card does not "
+                "need an override")
+        if approved:
+            return card
+        if exhausted:
+            if not force:
+                raise InvalidTransition(
+                    "the review loop was exhausted without an approval — "
+                    "accepting this card requires the explicit override "
+                    "(force=true)")
+            return card
+        raise InvalidTransition(
+            "card has no approved review — it must be reviewed before it "
+            "can be accepted")
 
-    def accept(self, card_id: str) -> dict:
+    def accept(self, card_id: str, *, force: bool = False) -> dict:
         """done -> accepted, but only with an approved review on record.
 
         A card can only be accepted after the reviewer has approved it; the
         review loop normally guarantees this, and this gate also covers cards
         that finished before their last review. When the review/fix loop
         exhausted its rounds (review.exhausted), acceptance is the user's
-        manual call.
+        explicit manual call (`force=True`) — never automatic.
         """
-        card = self.check_accept(card_id)
+        card = self.check_accept(card_id, force=force)
         post = self._get_post(card_id)
         md = dict(post.metadata)
         md["status"] = "accepted"

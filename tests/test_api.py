@@ -406,9 +406,9 @@ def test_accept_all_queues_each_card_once_under_two_simultaneous_clicks(env, mon
     release = threading.Event()
     real_accept = env.runner.accept_card
 
-    def blocked_accept(card_id):
+    def blocked_accept(card_id, **kwargs):
         assert release.wait(10), "the drain was never released"
-        return real_accept(card_id)
+        return real_accept(card_id, **kwargs)
 
     monkeypatch.setattr(env.runner, "accept_card", blocked_accept)
 
@@ -484,7 +484,8 @@ def test_auto_accept_field_update(env):
 
 def test_accept_after_review_rounds_exhausted(tmp_path):
     """Loop cap hit -> done but unapproved (review.exhausted); the user
-    accepts manually. auto_accept does not fire without an approval."""
+    accepts manually, but ONLY via the explicit force override.
+    auto_accept does not fire without an approval."""
     e = make_env(tmp_path, script=FAKE_VIBE_ALWAYS_REJECT, max_review_rounds=1)
     with e.client:
         card = create_card(e.client, title="Stuck", auto_accept=True)
@@ -492,9 +493,57 @@ def test_accept_after_review_rounds_exhausted(tmp_path):
         final = wait_for_status(e.client, card["id"], {"done"})
         assert final["session"]["review"]["exhausted"] is True
         assert final["accepted"] is False
+        # A bare accept is refused: the exhausted review is not an approval.
         r = e.client.post(f"/api/cards/{card['id']}/accept")
+        assert r.status_code == 409
+        assert "force" in r.json()["detail"]
+        assert e.client.get(f"/api/cards/{card['id']}").json()["status"] == "done"
+        # The explicit override accepts it.
+        r = e.client.post(f"/api/cards/{card['id']}/accept", json={"force": True})
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "accepted"
+
+
+def test_accept_force_is_refused_when_review_was_approved(env):
+    """force is an override for the exhausted case only: on an approved card
+    the endpoint refuses it (409), while a plain accept still works."""
+    card_id = _make_done(env, "Approved")
+    r = env.client.post(f"/api/cards/{card_id}/accept", json={"force": True})
+    assert r.status_code == 409
+    assert "force" in r.json()["detail"]
+    assert env.client.get(f"/api/cards/{card_id}").json()["status"] == "done"
+    r = env.client.post(f"/api/cards/{card_id}/accept")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "accepted"
+
+
+def _make_exhausted_done(env, title):
+    """A card sitting in Done with an exhausted, unapproved review."""
+    card = create_card(env.client, title=title, body="x")
+    env.store.set_status(card["id"], "running")
+    env.store.set_status(card["id"], "done",
+                         session_patch={"review": {"approved": False,
+                                                   "exhausted": True,
+                                                   "reason": "bugs found"}})
+    return card["id"]
+
+
+def test_accept_all_does_not_force_exhausted_cards(env):
+    """accept-all queues every Done card, but an exhausted card is NOT
+    force-accepted by the batch: it stays Done with the refusal recorded as
+    accept_error, while the approved cards around it still merge."""
+    good = _make_done(env, "Good")
+    stuck = _make_exhausted_done(env, "Stuck")
+    r = env.client.post("/api/cards/accept-all")
+    assert r.status_code == 200
+    assert sorted(r.json()["queued"]) == sorted([good, stuck])
+
+    assert _wait_accepted(env, [good]) == ["accepted"]
+    # The exhausted card is left in Done for an explicit per-card force.
+    stuck_now = env.client.get(f"/api/cards/{stuck}").json()
+    assert stuck_now["status"] == "done"
+    assert stuck_now["session"].get("accept_queued") is False
+    assert "force" in (stuck_now["session"].get("accept_error") or "")
 
 
 def test_run_failure_marks_failed(tmp_path):
@@ -1359,15 +1408,23 @@ def test_test_gate_rejection_and_accept_gate(tmp_path):
         assert not (e.sessions_dir / card["id"] / "review-1").exists()
         assert (e.sessions_dir / card["id"] / "run-1").exists()
 
-        # Accept gate: tests still failing -> 409, card stays done.
+        # Accept gate: the review was exhausted, so a bare accept is refused
+        # on the review gate (409, mentions force) before tests even run.
         r = e.client.post(f"/api/cards/{card['id']}/accept")
+        assert r.status_code == 409
+        assert "force" in r.json()["detail"]
+        assert e.client.get(f"/api/cards/{card['id']}").json()["status"] == "done"
+
+        # With the explicit force override, the test gate applies: tests still
+        # failing -> 409, card stays done.
+        r = e.client.post(f"/api/cards/{card['id']}/accept", json={"force": True})
         assert r.status_code == 409
         assert "tests failed" in r.json()["detail"]
         assert e.client.get(f"/api/cards/{card['id']}").json()["status"] == "done"
 
-        # Tests green -> accept succeeds and records verified.
+        # Tests green -> forced accept succeeds and records verified.
         (ws / "FAIL").unlink()
-        r = e.client.post(f"/api/cards/{card['id']}/accept")
+        r = e.client.post(f"/api/cards/{card['id']}/accept", json={"force": True})
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "accepted"
         assert r.json()["session"]["verified"] is True
@@ -2050,6 +2107,58 @@ def test_settings_empty_patch_keeps_the_accept_mode(env):
     r = env.client.put("/api/settings", json={})
     assert r.status_code == 200
     assert r.json()["accept_mode"] == "pr"
+
+
+# ----------------------------------------------------------------------
+# test_cmd visibility: the accept-time green gate is OFF unless a test
+# command is configured, and that must be loud in GET /api/settings (the
+# board renders a banner from it) — while accepts stay possible.
+# ----------------------------------------------------------------------
+
+def test_settings_expose_whether_a_test_cmd_is_configured(env, tmp_path):
+    """GET /api/settings carries test_cmd_configured: False by default (no
+    test_cmd -> gate off) and True when one is configured."""
+    data = env.client.get("/api/settings").json()
+    assert data["test_cmd_configured"] is False
+
+    e2 = make_env(tmp_path / "gated", test_cmd="exit 0")
+    with e2.client:
+        data2 = e2.client.get("/api/settings").json()
+        assert data2["test_cmd_configured"] is True
+
+
+def test_accept_still_possible_when_no_test_cmd_is_configured(env):
+    """No test_cmd -> the green gate is off, but accepting an approved card
+    must NOT be blocked (the board would deadlock otherwise)."""
+    card_id = _make_done(env, "No gate")
+    r = env.client.post(f"/api/cards/{card_id}/accept")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "accepted"
+    # verified stays unset: no test command ever ran.
+    assert r.json()["session"].get("verified") is None
+
+
+def test_done_cards_warn_loudly_when_the_test_gate_is_off(env, tmp_path):
+    """A card waiting in Done carries a visible warning when no test command
+    is configured, and when its review was exhausted it warns that accept
+    needs the force override. Cards not awaiting accept carry no warning."""
+    stuck = _make_exhausted_done(env, "Stuck")
+    card = env.client.get(f"/api/cards/{stuck}").json()
+    warnings = card.get("warnings") or []
+    assert any("test command" in w for w in warnings)
+    assert any("force" in w for w in warnings)
+
+    draft = create_card(env.client, title="Draft")
+    assert "warnings" not in env.client.get(f"/api/cards/{draft['id']}").json()
+
+    # With a test command configured, the gate warning disappears (the force
+    # warning for the exhausted review stays).
+    e2 = make_env(tmp_path / "gated", test_cmd="exit 0")
+    with e2.client:
+        stuck2 = _make_exhausted_done(e2, "Stuck2")
+        warnings2 = e2.client.get(f"/api/cards/{stuck2}").json().get("warnings") or []
+        assert not any("test command" in w for w in warnings2)
+        assert any("force" in w for w in warnings2)
 
 
 # ----------------------------------------------------------------------

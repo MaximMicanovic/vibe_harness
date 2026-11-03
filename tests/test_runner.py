@@ -19,7 +19,7 @@ import pytest
 from app import gitops, mailbox
 from app.config import Config, load_config
 from app.gitops import GitBusyError, GitError
-from app.cards import CardRunning, CardStore
+from app.cards import CardRunning, CardStore, InvalidTransition
 from app.projects import ProjectStore
 from app.tokens import card_cost_usd
 from app.runner import (
@@ -789,8 +789,11 @@ def test_review_loop_cap_requires_manual_accept(store, make_runner, fake_vibe, m
     # auto_accept only fires on approval: the card stays done, unaccepted.
     assert final["status"] == "done"
     assert final["accepted"] is False
-    # Manual acceptance is allowed once the rounds are exhausted.
-    accepted = store.accept(card_id)
+    # Manual acceptance once the rounds are exhausted needs the explicit
+    # force override — a bare accept is refused.
+    with pytest.raises(InvalidTransition):
+        store.accept(card_id)
+    accepted = store.accept(card_id, force=True)
     assert accepted["status"] == "accepted"
 
 
@@ -1781,12 +1784,15 @@ def test_test_gate_rejection_loops_fixer_then_exhausts(store, make_runner, fake_
     assert "BOOM-OUTPUT" in fix_prompt
     assert "Write a hello file." in fix_prompt
 
-    # Exhausted -> manual accept is allowed, but the accept-time green gate
-    # still blocks while the tests fail.
-    with pytest.raises(TestFailedError):
+    # Exhausted -> manual accept needs the explicit force override (a bare
+    # accept is refused), and the accept-time green gate still blocks while
+    # the tests fail.
+    with pytest.raises(InvalidTransition):
         runner.accept_card(card_id)
+    with pytest.raises(TestFailedError):
+        runner.accept_card(card_id, force=True)
     runner.config.test_cmd = "exit 0"   # tests fixed by hand
-    accepted = runner.accept_card(card_id)
+    accepted = runner.accept_card(card_id, force=True)
     assert accepted["status"] == "accepted"
     assert accepted["session"]["verified"] is True
 

@@ -163,7 +163,7 @@ function makeEl(tag) {
  * markup, so mirror them here (an overlay that starts "visible" would swallow
  * the keyboard shortcuts). */
 const HIDDEN_BY_DEFAULT = [
-  'search-hint', 'search-results', 'error-banner', 'sidebar-panel',
+  'search-hint', 'search-results', 'error-banner', 'gate-banner', 'sidebar-panel',
   'empty-board', 'editor-overlay', 'log-overlay', 'diff-overlay',
   'archives-overlay', 'projects-overlay', 'depends-field', 'accept-hint',
   'btn-stop', 'btn-accept', 'btn-archive', 'btn-log',

@@ -146,6 +146,13 @@ class SettingsIn(BaseModel):
     prevent_sleep: bool | None = None
 
 
+class AcceptIn(BaseModel):
+    """POST /api/cards/{id}/accept body. `force` is the explicit override for
+    a card whose review loop was exhausted without an approval — refused for
+    any other card (409). Absent body = plain accept."""
+    force: bool = False
+
+
 class ModelsIn(BaseModel):
     """One role's model choice: the model and the backend that runs it.
 
@@ -457,13 +464,15 @@ def create_app(config: Config | None = None,
         return Response(status_code=204)
 
     @app.post("/api/cards/{card_id}/accept")
-    def accept_card(card_id: str):
+    def accept_card(card_id: str, payload: AcceptIn | None = None):
         # Gate + git merge + (on conflict) resolver spawn, all inside the
         # runner. GitError -> 409 (dirty tree, resolver already running, ...).
         # A second accept for a repo that is already merging is not an error:
         # the card comes back queued (session.accept_queued + queue_reason) and
-        # merges automatically when the repo frees.
-        return runner.accept_card(card_id)
+        # merges automatically when the repo frees. {"force": true} is the
+        # explicit override for an exhausted-but-unapproved review only;
+        # without it the review gate raises InvalidTransition -> 409.
+        return runner.accept_card(card_id, force=bool(payload and payload.force))
 
     @app.post("/api/cards/accept-all")
     def accept_all_cards():
@@ -749,6 +758,11 @@ def create_app(config: Config | None = None,
         setting, else Config.prevent_sleep) and `sleep_held`/`sleep_supported`
         describe the inhibitor itself, so the panel can show whether the
         machine is currently being kept awake.
+
+        `test_cmd_configured` says whether the accept-time green gate is
+        armed: False means no test command is set, so accepts are NOT
+        test-gated (they stay possible — the board must not deadlock — but
+        the UI shows a loud warning from this flag).
         """
         return {"backend": settings.backend(),
                 "failure_kinds": list(failures.KINDS),
@@ -757,6 +771,9 @@ def create_app(config: Config | None = None,
                 "running": runner.running_count(),
                 "accept_mode": settings.accept_mode(config.accept_mode),
                 "accept_modes": describe_accept_modes(),
+                # Green gate: armed only when a test command is configured.
+                "test_cmd_configured": config.test_cmd_configured,
+                "test_cmd": config.test_cmd,
                 # Sleep guard: whether the machine is currently being kept
                 # awake, and whether this platform can do it at all.
                 "prevent_sleep": runner.sleep_guard.enabled,

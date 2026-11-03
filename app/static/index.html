@@ -47,6 +47,13 @@
     <button id="error-dismiss" class="icon-btn" title="Dismiss">×</button>
   </div>
 
+  <!-- Green-gate warning: visible whenever no test command is configured, so
+       "accepts are not test-gated" is impossible to miss (app.js fills it from
+       GET /api/settings' test_cmd_configured). -->
+  <div id="gate-banner" class="gate-banner" hidden>
+    <span id="gate-banner-text"></span>
+  </div>
+
   <div class="shell">
     <!-- Sidebar: a rail of buttons that opens one panel at a time. -->
     <aside class="sidebar" id="sidebar">
