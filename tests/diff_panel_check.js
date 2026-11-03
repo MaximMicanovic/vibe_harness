@@ -918,6 +918,35 @@ check(tokOf(cssTokens, '@media') && tokOf(cssTokens, '@media').cls === 'tok-keyw
 check(tokOf(cssTokens, 'min-width') && tokOf(cssTokens, 'min-width').cls === 'tok-attr',
   'a hyphenated CSS property is an attribute, got ' + JSON.stringify(cssTokens));
 
+/* 16g1. A `$` in a CSS/SCSS line is a variable, not a crash. The identifier
+ *       guard and the identifier regex must accept the same first characters:
+ *       when they disagreed, `$brand` threw and the whole diff failed to
+ *       render. */
+check(X.highlightLang('theme.scss') === 'css', 'a .scss path is css');
+const scssDecl = HL('$brand: #4c8dff;', 'css', {}).tokens;
+check(tokOf(scssDecl, '$brand') && tokOf(scssDecl, '$brand').cls === 'tok-attr',
+  'an SCSS variable declaration is an attribute, got ' + JSON.stringify(scssDecl));
+const scssUse = HL('.a { color: $brand; }', 'css', {}).tokens;
+const scssValue = scssUse.find((t) => t.text.indexOf('$brand') !== -1);
+check(scssValue && scssValue.cls === '',
+  'an SCSS variable used as a value is plain, got ' + JSON.stringify(scssUse));
+
+/* 16g2. An .scss file in a diff renders instead of taking the popup down. */
+X.renderDiff({ range: 'card', diff: [
+  'diff --git a/theme.scss b/theme.scss',
+  '--- a/theme.scss',
+  '+++ b/theme.scss',
+  '@@ -1,2 +1,2 @@',
+  '-$brand: #4c8dff;',
+  '+$brand: #e08a2e;',
+  ' .a { color: $brand; }',
+].join('\n'), truncated: false, files: [], review: null });
+const scssRows = getEl('diff-body').querySelectorAll('.diff-row');
+const scssRow = scssRows.find((r) => codeText(r.querySelector('.diff-code')) === '$brand: #e08a2e;');
+check(!!scssRow, 'an .scss diff renders');
+check(textOf(scssRow.querySelector('.tok-attr')) === '$brand',
+  'the SCSS variable is a token span, got ' + JSON.stringify(textOf(scssRow)));
+
 /* 16g. A JavaScript and a CSS file in the same diff each use their own rules. */
 const mixedDiff = [
   'diff --git a/app.js b/app.js',
@@ -1036,6 +1065,22 @@ const bigMs = Date.now() - bigStart;
 check(bigMs < 1000, 'a 4000-line diff renders in well under a second, took ' + bigMs + 'ms');
 check(getEl('diff-body').querySelectorAll('.tok-keyword').length > 0,
   'the big diff is highlighted');
+
+/* 16l. The scanner is total: no character it accepts may throw. A guard that
+ *      accepts a character its regex cannot match (the `$` in CSS) used to
+ *      take the whole popup down, so every printable character is fed to
+ *      every language. */
+const PRINTABLE = Array.from({ length: 95 }, (_, k) => String.fromCharCode(32 + k)).join('');
+for (const lang of ['python', 'javascript', 'css', 'html', 'markdown', 'json', 'plain']) {
+  let threw = null;
+  try {
+    for (const ch of PRINTABLE) HL(ch, lang, {});
+    HL(PRINTABLE, lang, {});
+  } catch (err) {
+    threw = err;
+  }
+  check(!threw, 'highlightLine never throws on ' + lang + ': ' + (threw && threw.message));
+}
 
 return { ok: failures.length === 0, failures };
 }

@@ -4636,8 +4636,10 @@ function spaceEnd(text, i) {
 
 const NUMBER_RE = /^(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?)/;
 const WORD_RE = /^[A-Za-z_$][\w$]*/;
-// CSS property names are hyphenated (`min-width`), so the dash stays inside.
-const CSS_WORD_RE = /^[A-Za-z_][\w-]*/;
+// CSS/SCSS identifiers: a hyphenated property (`min-width`) or an SCSS
+// variable (`$brand`). The first-character class must cover every character
+// the identifier branch below accepts, or the scan would throw on the rest.
+const CSS_WORD_RE = /^[$A-Za-z_][\w$-]*/;
 const OP_CHARS = '+-*/%=<>!&|^~@?';
 
 /* Python, JavaScript, CSS and JSON: one scanner, four rule sets. */
@@ -4735,16 +4737,21 @@ function scanCode(text, state, rules) {
       continue;
     }
     if (/[A-Za-z_$]/.test(ch)) {
-      const word = (rules.css ? CSS_WORD_RE : WORD_RE).exec(text.slice(i))[0];
-      const after = text[i + word.length];
-      let cls = '';
-      if (rules.keywords.has(word)) cls = 'tok-keyword';
-      else if (rules.fnCall && after === '(') cls = 'tok-fn';
-      else if (rules.css && !inValue && after === ':') cls = 'tok-attr';
-      else if (rules.css && !inValue) cls = 'tok-tag';
-      pushToken(tokens, word, cls);
-      i += word.length;
-      continue;
+      const m = (rules.css ? CSS_WORD_RE : WORD_RE).exec(text.slice(i));
+      // No match means the guard and the regex disagree: fall through to the
+      // single-character handling instead of throwing on a null match.
+      if (m) {
+        const word = m[0];
+        const after = text[i + word.length];
+        let cls = '';
+        if (rules.keywords.has(word)) cls = 'tok-keyword';
+        else if (rules.fnCall && after === '(') cls = 'tok-fn';
+        else if (rules.css && !inValue && after === ':') cls = 'tok-attr';
+        else if (rules.css && !inValue) cls = 'tok-tag';
+        pushToken(tokens, word, cls);
+        i += word.length;
+        continue;
+      }
     }
     if (OP_CHARS.includes(ch)) {
       let j = i + 1;
