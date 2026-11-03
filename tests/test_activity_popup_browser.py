@@ -157,6 +157,90 @@ def test_the_popup_polls_new_events(page):
     )
 
 
+#: The stored layout of the activity popup (see PANEL_LAYOUT_PREFIX in app.js).
+ACTIVITY_LAYOUT = "vibe-harness:panel:activity"
+
+
+def _stored_layout(page):
+    return page.evaluate(
+        "() => { const raw = localStorage.getItem('%s');"
+        " return raw ? JSON.parse(raw) : null; }" % ACTIVITY_LAYOUT)
+
+
+def _drag_corner(page, popup, dx, dy):
+    """Drag the native `resize: both` grip in the bottom-right corner."""
+    box = popup.bounding_box()
+    x = box["x"] + box["width"] - 3
+    y = box["y"] + box["height"] - 3
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + dx, y + dy, steps=10)
+    page.mouse.up()
+
+
+def test_a_native_corner_drag_remembers_the_size(page):
+    """The bug this card fixes: the position was saved, the size never was.
+
+    A native `resize: both` drag writes the element's inline width/height, so
+    the old guard — "the rendered box matches the inline style, so the harness
+    positioned it" — returned early on every real resize.
+    """
+    _open_with_c(page)
+    popup = page.locator("#activity-popup")
+    before = popup.bounding_box()
+    assert (before["width"], before["height"]) == (420, 520)
+
+    _drag_corner(page, popup, 140, 120)
+    after = popup.bounding_box()
+    assert after["width"] > before["width"] + 100
+    assert after["height"] > before["height"] + 80
+
+    # The write is debounced (PANEL_RESIZE_DEBOUNCE_MS), so wait for it.
+    page.wait_for_function(
+        "() => { const raw = localStorage.getItem('%s');"
+        " if (!raw) return false; const s = JSON.parse(raw);"
+        " return s.width > 500 && s.height > 600; }" % ACTIVITY_LAYOUT,
+        timeout=3000,
+    )
+    saved = _stored_layout(page)
+    assert saved["width"] == pytest.approx(after["width"], abs=1)
+    assert saved["height"] == pytest.approx(after["height"], abs=1)
+
+
+def test_the_resized_box_survives_close_and_reload(page):
+    _open_with_c(page)
+    popup = page.locator("#activity-popup")
+    _drag_corner(page, popup, 140, 120)
+    resized = popup.bounding_box()
+    page.wait_for_function(
+        "() => !!localStorage.getItem('%s')" % ACTIVITY_LAYOUT, timeout=3000)
+
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "() => document.getElementById('activity-popup').hidden", timeout=2000)
+    _open_with_c(page)
+    reopened = page.locator("#activity-popup").bounding_box()
+    assert reopened["width"] == pytest.approx(resized["width"], abs=1)
+    assert reopened["height"] == pytest.approx(resized["height"], abs=1)
+
+    page.reload()
+    page.wait_for_selector(".card")
+    _open_with_c(page)
+    reloaded = page.locator("#activity-popup").bounding_box()
+    assert reloaded["width"] == pytest.approx(resized["width"], abs=1)
+    assert reloaded["height"] == pytest.approx(resized["height"], abs=1)
+
+
+def test_opening_with_nothing_stored_keeps_the_default_size(page):
+    """The positioning itself is not a user resize: it must not be saved."""
+    _open_with_c(page)
+    box = page.locator("#activity-popup").bounding_box()
+    assert (box["width"], box["height"]) == (420, 520)
+    # Longer than the resize debounce: a positioning write would have landed.
+    page.wait_for_timeout(500)
+    assert _stored_layout(page) is None
+
+
 def test_plain_click_still_opens_the_editor(page):
     page.click(".card-title")
     page.wait_for_selector("#editor-overlay:not([hidden])")

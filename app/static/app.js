@@ -3696,9 +3696,9 @@ const PANEL_GAP = 12;   // distance from the card and the viewport edge
 const PANEL_LAYOUT_PREFIX = 'vibe-harness:panel:';   // + the panel's key
 const PANEL_RESIZE_DEBOUNCE_MS = 250;   // a corner drag must not write per frame
 
-/* The panel's current box. The rendered size is what counts: the native resize
- * grip changes the used size, not the inline style. A hidden panel reports a
- * 0x0 box, so fall back to the inline geometry then. */
+/* The panel's current box. The rendered size is what counts — a native resize
+ * grip writes the inline width/height too, so the inline style is only a
+ * fallback for a hidden panel, which reports a 0x0 box. */
 function panelLayout(panel) {
   const rect = panel.getBoundingClientRect ? panel.getBoundingClientRect() : null;
   const shown = rect && rect.width > 0 && rect.height > 0;
@@ -3754,14 +3754,10 @@ function rememberPanelLayout(panel, key) {
   if (typeof ResizeObserver !== 'function') return save;
   let timer = null;
   let pending = null;
-  const same = (a, b) => Math.abs(a - b) < 1;   // sub-pixel layout rounding
   const observer = new ResizeObserver(() => {
-    const layout = panelLayout(panel);
-    // Opening the panel sets the inline size; only a native resize — which the
-    // inline style never sees — is the user's own choice.
-    if (same(layout.width, parseFloat(panel.style.width))
-      && same(layout.height, parseFloat(panel.style.height))) return;
-    pending = layout;
+    // The harness just placed the panel: that box is not the user's choice.
+    if (panel.dataset.positioning) { delete panel.dataset.positioning; return; }
+    pending = panelLayout(panel);
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
@@ -3770,6 +3766,19 @@ function rememberPanelLayout(panel, key) {
   });
   observer.observe(panel);
   return save;
+}
+
+/* Mark the box the harness is about to set as its own, so the observer above
+ * can skip the notification it produces. Comparing the rendered box with the
+ * inline style cannot do this: a native `resize: both` drag writes the inline
+ * width/height too, so after any real resize the two match. The observer
+ * consumes the mark; the timer clears it when the positioning did not change
+ * the box (no notification then), so the next real resize is still saved. Not
+ * requestAnimationFrame: frame callbacks run before the observer's, which would
+ * drop the mark before the observer could see it. */
+function markPanelPositioning(panel) {
+  panel.dataset.positioning = '1';
+  setTimeout(() => { delete panel.dataset.positioning; }, 0);
 }
 
 /* Place a panel next to the clicked card, clamped to the viewport: to its
@@ -4052,6 +4061,7 @@ function openActivity(cardId, anchor) {
   activityFeed.textContent = '';
   activityJump.hidden = true;
   activityPopup.hidden = false;
+  markPanelPositioning(activityPopup);
   positionFloatingPanel(activityPopup, anchor, ACTIVITY_WIDTH, ACTIVITY_HEIGHT,
     loadPanelLayout('activity'));
   updateActivityHeader();
@@ -4716,6 +4726,7 @@ async function openDiff(cardId, range, anchor) {
   const card = state.cards.find((n) => n.id === cardId);
   diffHeading.textContent = 'Diff — ' + (card ? card.title : cardId);
   diffPopup.hidden = false;
+  markPanelPositioning(diffPopup);
   positionFloatingPanel(diffPopup, anchor, DIFF_WIDTH, DIFF_HEIGHT,
     loadPanelLayout('diff'));
   renderDiffRanges();

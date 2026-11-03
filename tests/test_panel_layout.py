@@ -3,12 +3,13 @@
 The panels live in the served front-end (`app/static/app.js` + `style.css`), so
 the reproducer boots the *served* app.js under Node with the shared DOM stub
 (`tests/panel_layout_check.js`) and checks that both popups drag by their
-header, that a resize is saved once (debounced, not per frame), that the layout
-round-trips through `localStorage` under `vibe-harness:panel:<key>`, that a
-corrupt or unreadable value falls back to the defaults, and that clearing
-`localStorage` returns both panels to their defaults. The CSS side — the resize
-grip, the size floors and the strip of padding the grip sits in — is asserted
-here.
+header, that a native resize — which writes the inline width/height *and* the
+used box — is saved once (debounced, not per frame), that opening a panel is
+not mistaken for a resize, that the layout round-trips through `localStorage`
+under `vibe-harness:panel:<key>`, that a corrupt or unreadable value falls back
+to the defaults, and that clearing `localStorage` returns both panels to their
+defaults. The CSS side — the resize grip, the size floors and the strip of
+padding the grip sits in — is asserted here.
 """
 from __future__ import annotations
 
@@ -93,3 +94,20 @@ def test_the_layout_is_stored_per_panel(env):
     # Both panels read their own saved layout on open.
     assert "loadPanelLayout('activity')" in js
     assert "loadPanelLayout('diff')" in js
+
+
+def test_the_open_path_marks_its_own_positioning(env):
+    """The observer must not mistake the harness placing a panel for a resize.
+
+    Comparing the rendered box with the inline style cannot tell them apart: a
+    native `resize: both` drag writes the inline width/height too, so after any
+    real resize the two match — that wrong premise is why the size was never
+    saved. The open path marks the panel instead.
+    """
+    js = env.client.get("/app.js").text
+    assert "same(layout.width, parseFloat(panel.style.width))" not in js
+    assert "dataset.positioning" in js
+    for opener in ("openActivity", "openDiff"):
+        body = js[js.index("function " + opener + "("):]
+        body = body[:body.index("\n}\n")]
+        assert "markPanelPositioning(" in body, opener
