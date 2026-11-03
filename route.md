@@ -1,10 +1,10 @@
 # route.md — Routing guide: spend tokens where they matter
 
 How vibe-harness routes work through the pipeline, and how to keep token usage
-low. This is a Vibe-CLI-only tool: every session is a headless `vibe` run, and
-the harness reads each run's `export.json` for token usage. There is no
-per-session `--model` flag on the CLI — model routing happens through Vibe
-agents (see §3).
+low. Every session is a headless agent CLI run — `vibe` by default, `claude`
+when the backend setting says so — and the harness reads each run's output for
+token usage. How a model is pinned depends on the backend: Vibe has no
+`--model` flag (it reads `VIBE_ACTIVE_MODEL`), Claude takes `--model` (see §3).
 
 ## 0. Project folders: git init + agent.md + route.md
 
@@ -262,7 +262,7 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   `sessions/<id>/workspace`. Smaller working directory + smaller allowlist =
   smaller prompts.
 
-## 3. Model routing (Vibe agents, not CLI flags)
+## 3. Model routing (the backend decides how a model is passed)
 
 The `vibe` CLI has no `--model` flag; the model comes from Vibe's config
 (`~/.vibe/config.toml` → `active_model`, currently
@@ -320,11 +320,25 @@ Each kind of session can run on its own model, chosen in the board's sidebar
 | Orchestrator | — | No session yet: the worker splits a spec into sub-cards itself |
 
 A role left on **inherit** runs on the user's own `active_model`. A chosen
-model is pinned for that one spawned session with `VIBE_ACTIVE_MODEL` — Vibe's
-config layers put `VIBE_*` env vars *above* `~/.vibe/config.toml`, so the
-global config is never rewritten and two concurrent sessions cannot race each
-other's model. `GET/PUT /api/models` is the API; `app/models.py` owns the
-store. The orchestrator role is offered but disabled: nothing would use it.
+model reaches the CLI the way that backend accepts it — `Backend.build_cmd`
+takes a `model` argument and each backend decides:
+
+| Backend | How the role's model is passed |
+|---|---|
+| `vibe` | `VIBE_ACTIVE_MODEL` in the spawned env (Vibe has no `--model` flag). Vibe's config layers put `VIBE_*` env vars *above* `~/.vibe/config.toml`, so the global config is never rewritten and two concurrent sessions cannot race each other's model. |
+| `claude` | `--model <alias>` on the command line. |
+
+The choice is passed for **every** spawn — worker (`run-N`), reviewer
+(`review-N`) and merge resolver (`resolve-N`) — so no role silently runs on the
+backend's default. A model the backend refuses (Claude answers `not_found_error`
+and exits non-zero) fails the round with `stop_reason: model_error` and a
+`model_rejected` failure naming the model; it never falls back to the default
+and looks successful. A refused **review** model fails the card at once instead
+of looping a fixer + review round per step (the same model would fail
+identically), and a refused **resolver** model is named in the failure detail
+rather than reported as a bare exit code. `GET/PUT /api/models` is the API;
+`app/models.py` owns the store. The orchestrator role is offered but disabled:
+nothing would use it.
 
 ## 4. Write cards so the first run succeeds
 

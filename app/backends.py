@@ -47,8 +47,19 @@ class Backend:
 
     def build_cmd(self, *, config: Config, prompt_path: Path, ws: Path,
                   rdir: Path, kind: str, resume: str | None,
-                  mcp_config: Path | None) -> list[str]:
+                  mcp_config: Path | None,
+                  model: str | None = None) -> list[str]:
         raise NotImplementedError
+
+    def model_error(self, text: str, model: str | None) -> str | None:
+        """The one-line reason this CLI refused `model`, or None.
+
+        A rejected model exits non-zero like any other crash, so the cause has
+        to be read back out of the round's log — otherwise the dropped choice
+        looks like a random failure (or, worse, like a success on the default
+        model). Backends that cannot reject a model return None.
+        """
+        return None
 
     def export_path(self, rdir: Path) -> Path:
         """Where this backend's raw output lands for one round."""
@@ -85,7 +96,11 @@ class VibeBackend(Backend):
 
     def build_cmd(self, *, config: Config, prompt_path: Path, ws: Path,
                   rdir: Path, kind: str, resume: str | None,
-                  mcp_config: Path | None) -> list[str]:
+                  mcp_config: Path | None,
+                  model: str | None = None) -> list[str]:
+        # `model` is ignored on purpose: Vibe has no `--model` flag. The runner
+        # pins the choice for this one session with VIBE_ACTIVE_MODEL in the
+        # spawned environment instead (see SessionRunner._model_env).
         cmd = [self.binary(config)]
         if resume:
             cmd += ["--resume", resume]
@@ -129,13 +144,30 @@ class ClaudeBackend(Backend):
     #: read-only `--agent ask`.
     REVIEW_TOOLS = ("Read", "Grep", "Glob", "Bash")
 
+    #: What Claude prints when it refuses a model name. The API answers
+    #: `not_found_error` for an unknown model; the CLI itself says "issue with
+    #: the selected model" when the alias is not one it knows.
+    MODEL_ERROR_MARKERS = (
+        "not_found_error",
+        "model_not_found",
+        "invalid model",
+        "unknown model",
+        "issue with the selected model",
+        "may not exist or you may not have access",
+    )
+
     def binary(self, config: Config) -> str:
         return config.claude_bin
 
     def build_cmd(self, *, config: Config, prompt_path: Path, ws: Path,
                   rdir: Path, kind: str, resume: str | None,
-                  mcp_config: Path | None) -> list[str]:
+                  mcp_config: Path | None,
+                  model: str | None = None) -> list[str]:
         cmd = [self.binary(config), "-p", "--output-format", "json"]
+        if model:
+            # Claude takes the model as a flag; without it the CLI silently
+            # runs on its own default and the picker's choice is dropped.
+            cmd += ["--model", model]
         if resume:
             cmd += ["--resume", resume]
         if config.max_price_usd is not None:
@@ -160,6 +192,16 @@ class ClaudeBackend(Backend):
         # Claude prints its result object on stdout, which the runner tees into
         # session.log (the reviewer's VERDICT line has to stay greppable there).
         return rdir / "session.log"
+
+    def model_error(self, text: str, model: str | None) -> str | None:
+        if not model:
+            return None
+        for line in text.splitlines():
+            lowered = line.lower()
+            if any(marker in lowered for marker in self.MODEL_ERROR_MARKERS):
+                return (f"the backend rejected the model {model!r}: "
+                        f"{' '.join(line.split())[:300]}")
+        return None
 
     def _parse(self, text: str) -> dict:
         """The last JSON object in the log — Claude prints one result object."""

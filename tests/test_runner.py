@@ -854,10 +854,11 @@ def projects(tmp_path) -> ProjectStore:
     return ProjectStore(tmp_path / "projects.json")
 
 
-def _make_runner_with_projects(store, tmp_path, vibe_bin, projects, **config_kwargs):
+def _make_runner_with_projects(store, tmp_path, vibe_bin, projects,
+                               settings=None, models=None, **config_kwargs):
     config = Config(vibe_bin=str(vibe_bin), time_limit_seconds=30, **config_kwargs)
     return SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
-                         projects=projects)
+                         projects=projects, settings=settings, models=models)
 
 
 @git_test
@@ -992,11 +993,12 @@ def test_delete_card_removes_linked_worktree(store, tmp_path, fake_vibe, project
     assert gitops.branch_exists(proj, git_info["branch"])   # kept for manual recovery
 
 
-def _conflict_setup(store, tmp_path, projects, vibe_bin):
+def _conflict_setup(store, tmp_path, projects, vibe_bin, **runner_kwargs):
     """A project run whose hello.txt conflicts with the base branch on merge.
 
     Returns (runner, card_id, proj, git_info). The card is done and the base
     branch has a competing committed edit, so accepting hits a merge conflict.
+    `runner_kwargs` go to _make_runner_with_projects (settings/models/claude_bin).
     """
     proj = tmp_path / "my-app"
     proj.mkdir()
@@ -1006,7 +1008,8 @@ def _conflict_setup(store, tmp_path, projects, vibe_bin):
     _git(["add", "-A"], proj)
     _git(["commit", "-q", "-m", "base hello.txt"], proj)
 
-    runner = _make_runner_with_projects(store, tmp_path, vibe_bin, projects)
+    runner = _make_runner_with_projects(store, tmp_path, vibe_bin, projects,
+                                        **runner_kwargs)
     card = store.create("Conflict card", "Write a hello file.", project="my-app")
     runner.run(card["id"])
     done = _wait_for_status(store, card["id"], "done")
@@ -1173,6 +1176,62 @@ def test_git_resolver_failure_leaves_card_done(store, tmp_path, fake_vibe, proje
     assert g.get("resolver_error")
     assert gitops.merge_in_progress(proj)          # conflict still open, retryable
     assert Path(g["worktree"]).is_dir()            # worktree kept on conflict
+
+
+FAKE_CLAUDE_ROLE_MODELS = """#!/bin/sh
+# Fake Claude Code that refuses the model named claude-nope and succeeds on any
+# other: the worker implements, the reviewer approves, the resolver is refused.
+model=""
+review=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) model="$2"; shift 2 ;;
+    --tools) review="1"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat > /dev/null
+if [ "$model" = "claude-nope" ]; then
+  echo 'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-nope"}}'
+  exit 1
+fi
+if [ "$review" = "1" ]; then
+  echo "VERDICT: APPROVED"
+  exit 0
+fi
+echo "hello from fake claude" > hello.txt
+echo '{"type":"result","is_error":false,"session_id":"s1","num_turns":1,"total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"claude-sonnet-4-6":{}},"terminal_reason":"completed"}'
+exit 0
+"""
+
+
+@git_test
+def test_git_resolver_with_a_rejected_model_names_it(store, tmp_path, projects):
+    """A resolver whose model was refused names the model in the failure detail,
+    instead of a bare "the resolver failed (exit 1)" that hides the choice."""
+    from app.models import ModelSettings
+    from app.settings import SettingsStore
+
+    fake = _write_script(tmp_path / "fake_claude.sh", FAKE_CLAUDE_ROLE_MODELS)
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.set_backend("claude")
+    models = ModelSettings(tmp_path / "models.json")
+    models.update({"worker": "claude-sonnet-4-6", "review": "claude-sonnet-4-6",
+                   "resolver": "claude-nope"})
+    runner, card_id, proj, _git_info = _conflict_setup(
+        store, tmp_path, projects, fake, settings=settings, models=models,
+        claude_bin=str(fake))
+
+    runner.accept_card(card_id)
+    final = _wait_for_flag(store, card_id,
+                           lambda n: (n["session"]["git"] or {}).get("resolving"), False)
+    g = final["session"]["git"]
+    assert final["status"] == "done"
+    assert "claude-nope" in g["resolver_error"]
+    assert "claude-nope" in final["session"]["resolver"]["model_error"]
+    failure = runner.annotate_card(final)["session"]["failure"]
+    assert failure["kind"] == "model_rejected"
+    assert "claude-nope" in failure["detail"]
 
 
 def test_resolver_tokens_are_recorded_from_its_export(store, make_runner,

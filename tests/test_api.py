@@ -128,7 +128,7 @@ exit 0
 
 
 def make_env(tmp_path: Path, script: str = FAKE_VIBE, archives=None,
-             settings=None, **config_kwargs) -> SimpleNamespace:
+             settings=None, models=None, **config_kwargs) -> SimpleNamespace:
     cards_dir = tmp_path / "cards"
     sessions_dir = tmp_path / "sessions"
     store = CardStore(cards_dir)
@@ -144,9 +144,9 @@ def make_env(tmp_path: Path, script: str = FAKE_VIBE, archives=None,
     if settings is None:
         settings = SettingsStore(tmp_path / "settings.json")
     runner = SessionRunner(store, config, sessions_dir=sessions_dir, projects=projects,
-                           settings=settings)
+                           settings=settings, models=models)
     app = create_app(config=config, store=store, runner=runner, projects=projects,
-                     archives=archives, settings=settings)
+                     archives=archives, settings=settings, models=models)
     client = TestClient(app)
     return SimpleNamespace(client=client, store=store, runner=runner,
                            projects=projects, sessions_dir=sessions_dir,

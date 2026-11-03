@@ -16,12 +16,14 @@ Kinds, in priority order (the first match wins):
 2. `interrupted` — the session was signalled from outside (a sleeping machine
    suspends the process and the CLI gives up with `interrupted`). Not a crash:
    the work was never judged, so re-running is the right response.
-3. `git_conflict` — a merge conflict / resolver was involved.
-4. `timeout` — the session hit its time (or other) limit.
-5. `tests_failed` — the test gate rejected it.
-6. `reviewer_rejected` — the review loop ran out with a rejection.
-7. `no_verdict` — the reviewer produced no verdict at all.
-8. `crashed` — a non-zero exit (or a failed commit) with no other explanation.
+3. `model_rejected` — the backend refused the role's model, so the session
+   never ran. The detail names the model.
+4. `git_conflict` — a merge conflict / resolver was involved.
+5. `timeout` — the session hit its time (or other) limit.
+6. `tests_failed` — the test gate rejected it.
+7. `reviewer_rejected` — the review loop ran out with a rejection.
+8. `no_verdict` — the reviewer produced no verdict at all.
+9. `crashed` — a non-zero exit (or a failed commit) with no other explanation.
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from __future__ import annotations
 KINDS: tuple[str, ...] = (
     "stopped_by_user",
     "interrupted",
+    "model_rejected",
     "git_conflict",
     "timeout",
     "tests_failed",
@@ -99,6 +102,22 @@ def _git_conflict(git: dict, resolver: dict) -> dict | None:
     return None
 
 
+def _model_rejected(session: dict, review: dict, resolver: dict) -> dict | None:
+    """The backend refused the role's model: the session never ran.
+
+    Recorded by the runner as `session.model_error` (worker),
+    `review.model_error` (reviewer) or `resolver.model_error` (merge resolver).
+    It outranks everything downstream — a review that "said no" because its
+    model was rejected is not a rejection, and a resolver that "failed" because
+    its model was refused is not a merge conflict.
+    """
+    detail = (session.get("model_error") or review.get("model_error")
+              or resolver.get("model_error"))
+    if not detail:
+        return None
+    return _failure("model_rejected", str(detail))
+
+
 def _test_gate_rejected(review: dict) -> bool:
     """The last rejection came from the test gate, not from the reviewer."""
     return review.get("approved") is False and review.get("source") == "test"
@@ -164,25 +183,31 @@ def classify(card: dict) -> dict | None:
             "the session was interrupted from outside (the machine may have "
             "slept) — re-run it")
 
-    # 3. a merge conflict / resolver was involved
+    # 3. the backend refused the role's model: nothing ran, so nothing else
+    #    that follows can explain the failure better.
+    rejected = _model_rejected(session, review, resolver)
+    if rejected is not None:
+        return rejected
+
+    # 4. a merge conflict / resolver was involved
     conflict = _git_conflict(git, resolver)
     if conflict is not None:
         return conflict
 
-    # 3. the session hit its limit
+    # 5. the session hit its limit
     if timed_out:
         return _failure("timeout", "session hit the time limit")
     if stop_reason in TIMEOUT_STOP_REASONS:
         return _failure("timeout", f"session hit its limit ({stop_reason})")
 
-    # 4. the test gate rejected it
+    # 6. the test gate rejected it
     if session.get("verified") is False or _test_gate_rejected(review) or git.get("test_error"):
         rounds = _loop_rounds(session, review)
         detail = (f"tests failed after {_rounds(rounds)}" if rounds
                   else "the test command failed")
         return _failure("tests_failed", detail)
 
-    # 5. the review loop ran out with a rejection
+    # 7. the review loop ran out with a rejection
     exhausted = review.get("exhausted") is True and review.get("approved") is False
     if exhausted and not _no_verdict(review):
         rounds = _loop_rounds(session, review)
@@ -190,11 +215,11 @@ def classify(card: dict) -> dict | None:
                   else "the reviewer rejected it")
         return _failure("reviewer_rejected", detail)
 
-    # 6. the reviewer produced no verdict
+    # 8. the reviewer produced no verdict
     if _no_verdict(review):
         return _failure("no_verdict", "the reviewer produced no verdict")
 
-    # 7. non-zero exit (or a failed commit) with no other explanation
+    # 9. non-zero exit (or a failed commit) with no other explanation
     if review.get("approved") is True:
         # The reviewer approved it: a noisy exit code from the review process
         # is not a failure — the card shipped.

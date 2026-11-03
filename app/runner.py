@@ -677,6 +677,14 @@ class SessionRunner:
         """MCP server alias for prompts/env, or None when the MCP is disabled."""
         return self.config.mcp_server_name if self.config.mcp_enabled else None
 
+    def _role_model(self, kind: str) -> str | None:
+        """The model chosen for one session kind, or None to inherit.
+
+        The backend decides how it is passed: Claude takes `--model`, Vibe has
+        no such flag and reads VIBE_ACTIVE_MODEL from the environment.
+        """
+        return self.models.model_for_session(kind) if self.models else None
+
     def _model_env(self, kind: str) -> dict:
         """VIBE_ACTIVE_MODEL for one session kind, or {} when the role inherits.
 
@@ -684,7 +692,7 @@ class SessionRunner:
         so this pins the model for this one spawned session — the global config
         is never rewritten, and two sessions cannot race each other's model.
         """
-        model = self.models.model_for_session(kind) if self.models else None
+        model = self._role_model(kind)
         return {"VIBE_ACTIVE_MODEL": model} if model else {}
 
     def _session_env(self, card_id: str) -> dict:
@@ -824,7 +832,8 @@ class SessionRunner:
                 return
             entry = {"proc": _AdoptedProc(pid, rdir / "export" / "export.json"),
                      "kind": kind, "round": round_no,
-                     "stop_requested": False, "adopted": True}
+                     "stop_requested": False, "adopted": True,
+                     "model": self._role_model(kind)}
             self._registry[card_id] = entry
         target = self._finalize_resolver if kind == "resolve" else self._finalize
         threading.Thread(target=target, args=(card_id,), daemon=True).start()
@@ -1426,7 +1435,9 @@ class SessionRunner:
         log_path = rdir / "session.log"
         log_file = open(log_path, "ab")
         try:
-            cmd = self._build_cmd(prompt_path, ws, rdir, kind="run",
+            # kind="resolve": the resolver is its own role, so it gets its own
+            # model (and, for Vibe, the same non-review flags a run gets).
+            cmd = self._build_cmd(prompt_path, ws, rdir, kind="resolve",
                                   backend=backend) + trust_flags
             # The resolver is its own role: it can run on its own model.
             env = {**os.environ, **self._model_env("resolve")}
@@ -1447,6 +1458,7 @@ class SessionRunner:
             self._registry[card_id] = {"proc": proc, "stop_requested": False,
                                       "kind": "resolve", "round": round_no,
                                       "resumed": False,
+                                      "model": self._role_model("resolve"),
                                       "live_tokens": None, "live_breakdown": None,
                                       "vibe_session_id": None,
                                       "usage_offsets": {}, "usage_scanned_at": 0.0}
@@ -1503,6 +1515,11 @@ class SessionRunner:
                            if isinstance(usage, dict) else None)
         if token_breakdown is not None:
             resolver_patch["token_breakdown"] = token_breakdown
+        # A refused model is why the merge is still conflicted: name it rather
+        # than reporting a bare exit code.
+        model_error = self._model_error(rdir, entry.get("model"), exit_code)
+        if model_error:
+            resolver_patch["model_error"] = model_error
         root = Path(git_info["repo"]) if git_info.get("repo") else None
         concluded = (exit_code == 0 and root is not None
                      and not gitops.merge_in_progress(root)
@@ -1519,7 +1536,7 @@ class SessionRunner:
             git_patch = {**git_info, "resolving": False}
             if exit_code != 0:
                 git_patch["resolver_error"] = (
-                    f"resolver session exited with code {exit_code}")
+                    model_error or f"resolver session exited with code {exit_code}")
             self.store.patch_session(card_id, {"git": git_patch,
                                                "resolver": resolver_patch,
                                                **high_water_patch})
@@ -1656,17 +1673,19 @@ class SessionRunner:
                    kind: str, resume: str | None = None,
                    backend: Backend | None = None,
                    mcp_config: Path | None = None) -> list[str]:
-        """The command line for one session. kind: 'run' or 'review'.
+        """The command line for one session. kind: 'run', 'review' or 'resolve'.
 
         `resume` (a session id from a previous round's export) resumes that
         session instead of starting a new one — used for fixer rounds so the
         persistent worker keeps its cached context. Reviewers are always fresh
-        (no resume). The flags themselves belong to the backend.
+        (no resume). The flags themselves belong to the backend, including how
+        the role's model is passed (`--model` for Claude, nothing for Vibe).
         """
         backend = backend or self.backend()
         return backend.build_cmd(config=self.config, prompt_path=prompt_path,
                                  ws=ws, rdir=rdir, kind=kind, resume=resume,
-                                 mcp_config=mcp_config)
+                                 mcp_config=mcp_config,
+                                 model=self._role_model(kind))
 
     def _claude_mcp_config(self, rdir: Path, card_id: str) -> Path:
         """Write the `--mcp-config` file that gives a Claude run the board tools.
@@ -1828,6 +1847,11 @@ class SessionRunner:
             self._registry[card_id] = {"proc": proc, "stop_requested": False,
                                       "kind": kind, "round": round_no,
                                       "resumed": resume is not None,
+                                      # The model this round asked for: the
+                                      # export only reports the model that
+                                      # actually ran, which is exactly what a
+                                      # rejected choice never produces.
+                                      "model": self._role_model(kind),
                                       "live_tokens": None, "live_breakdown": None,
                                       "vibe_session_id": None,
                                       "usage_offsets": {}, "usage_scanned_at": 0.0}
@@ -1870,6 +1894,24 @@ class SessionRunner:
         it onto `usage` / `session_id` / `config.active_model` / `stop_reason`.
         """
         return (backend or self.backend()).read_export(rdir)
+
+    def _model_error(self, rdir: Path, model: str | None,
+                     exit_code: int | None) -> str | None:
+        """The backend's reason for refusing `model`, or None.
+
+        A rejected model exits non-zero like any other crash, so the cause has
+        to be read back out of the round's log: the round then fails naming the
+        model instead of looking like a random crash — or, worse, like a
+        success on the backend's own default model.
+        """
+        if not model or not exit_code:
+            return None
+        try:
+            text = (rdir / "session.log").read_text(encoding="utf-8",
+                                                    errors="replace")
+        except OSError:
+            return None
+        return self.backend().model_error(text, model)
 
     # ------------------------------------------------------- transcripts
 
@@ -2261,6 +2303,11 @@ class SessionRunner:
         export_config = export.get("config") or export.get("effective_config") or {}
         model = export_config.get("active_model") or export_config.get("model")
         stop_reason = export.get("stop_reason")
+        # A model the backend refused: the round failed for that reason, so say
+        # so instead of reporting a generic crash (or a silent fallback).
+        model_error = self._model_error(rdir, entry.get("model"), exit_code)
+        if model_error:
+            stop_reason = "model_error"
         # The vibe session id — the resume key for the next fixer round.
         worker_session_id = export.get("session_id")
 
@@ -2283,6 +2330,8 @@ class SessionRunner:
             }
             if token_breakdown is not None:
                 outcome["token_breakdown"] = token_breakdown
+            if model_error:
+                outcome["model_error"] = model_error
             if worker_session_id:
                 outcome["worker_session_id"] = worker_session_id
             if entry.get("timed_out"):
@@ -2386,6 +2435,10 @@ class SessionRunner:
                 # failure classifier can tell "the reviewer said no" from "the
                 # reviewer said nothing" without parsing the reason text.
                 review_record["no_verdict"] = True
+            if model_error:
+                # The reviewer never ran: its model was refused. Recorded so
+                # the round does not read as a reviewer that simply said no.
+                review_record["model_error"] = model_error
             if token_breakdown is not None:
                 review_record["token_breakdown"] = token_breakdown
             # Supervision bookkeeping: which commit this review covered (the
@@ -2412,6 +2465,15 @@ class SessionRunner:
                 if entry.get("timed_out"):
                     stopped_patch["timed_out"] = True
                 self.store.set_status(card_id, "stopped", session_patch=stopped_patch)
+            elif model_error:
+                # The reviewer never ran: its model was refused. Retrying the
+                # same model would fail identically, so fail the round now
+                # instead of spending a fixer + review round per loop step.
+                self.store.set_status(card_id, "failed", session_patch={
+                    "review": review_record,
+                    "finished_at": now_iso(),
+                    **review_patch,
+                })
             elif approved:
                 # Loop step 2a: approved -> done, then auto-accept if asked.
                 done = self.store.set_status(card_id, "done", session_patch={

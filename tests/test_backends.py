@@ -135,6 +135,56 @@ def test_claude_mcp_config_flag(config, tmp_path):
 
 
 # ----------------------------------------------------------------------
+# the model: a flag for Claude, an env var for Vibe
+# ----------------------------------------------------------------------
+
+def test_claude_command_carries_the_model(config, tmp_path):
+    """The picker's choice must reach the CLI: Claude takes `--model`."""
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="run",
+                                    resume=None, mcp_config=None,
+                                    model="claude-sonnet-4-6")
+    assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
+
+
+def test_claude_command_without_a_model_has_no_flag(config, tmp_path):
+    """A role left on inherit adds nothing: Claude keeps its own default."""
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="run",
+                                    resume=None, mcp_config=None)
+    assert "--model" not in cmd
+
+
+def test_vibe_command_ignores_the_model(config, tmp_path):
+    """Vibe has no `--model` flag: the runner pins VIBE_ACTIVE_MODEL instead."""
+    cmd = VibeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                  ws=tmp_path, rdir=tmp_path, kind="run",
+                                  resume=None, mcp_config=None, model="glm-5-3")
+    assert "--model" not in cmd
+    assert "glm-5-3" not in cmd
+
+
+def test_claude_names_a_rejected_model():
+    """An unknown model is an API 404: the log says so, and the detail names
+    the model that was refused."""
+    log = ('API Error: 404 {"type":"error","error":{"type":"not_found_error",'
+           '"message":"model: claude-nope"}}\n')
+    detail = ClaudeBackend().model_error(log, "claude-nope")
+    assert detail is not None
+    assert "claude-nope" in detail
+    assert "\n" not in detail
+
+
+def test_claude_model_error_ignores_other_failures():
+    assert ClaudeBackend().model_error("API Error: 500 overloaded", "sonnet") is None
+    assert ClaudeBackend().model_error("", "sonnet") is None
+    # No model was asked for, so nothing can have been rejected.
+    assert ClaudeBackend().model_error("not_found_error model: x", None) is None
+    # Vibe never rejects a model this way: it has no --model flag at all.
+    assert VibeBackend().model_error("not_found_error model: x", "x") is None
+
+
+# ----------------------------------------------------------------------
 # export normalization
 # ----------------------------------------------------------------------
 
