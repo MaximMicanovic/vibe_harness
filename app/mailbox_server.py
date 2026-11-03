@@ -42,7 +42,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-PROTOCOL_VERSION = "2024-11-05"
+PROTOCOL_VERSION = "2026-07-28"
 SERVER_NAME = "vibe-harness-mailbox"
 SERVER_VERSION = "0.1.0"
 #: Roles a spawned session can have (the ones that can wait for a message).
@@ -221,8 +221,11 @@ def _submit_verdict(approved: bool, reason: str = "") -> dict:
 
 def handle(method: str, params: dict) -> dict:
     if method == "initialize":
+        # Spec backward-compat: echo the client's requested protocolVersion
+        # when it is a string; fall back to our own only when it sends none.
+        version = params.get("protocolVersion") if isinstance(params, dict) else None
         return {
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": version if isinstance(version, str) else PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         }
