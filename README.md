@@ -26,7 +26,7 @@ Vibe Harness puts the agent behind a board:
   working copy stays on your branch.
 - **A record you keep.** Prompts, logs, token usage and cost for every round
   stay on the card. Runs survive a server restart.
-- **The agent can use the board.** Run sessions get an MCP server with 38
+- **The agent can use the board.** Run sessions get an MCP server with 35
   tools: split a spec into sub-cards, chain them with dependencies, stack cards,
   archive finished work — and ask *you* a question on the card when the spec is
   genuinely ambiguous.

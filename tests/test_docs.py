@@ -14,10 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from app import mcp_server
+
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
-MCP_SERVER = ROOT / "app" / "mcp_server.py"
 APP_DIR = ROOT / "app"
 
 #: The README is a landing page; the detail belongs in `docs/`.
@@ -36,9 +37,11 @@ def _section(text: str, heading: str) -> str:
     return match.group(1)
 
 
-def _tool_count() -> int:
-    """How many MCP tools the server declares — the number the README quotes."""
-    return _read(MCP_SERVER).count('"name":')
+def _served_tools() -> list[dict]:
+    """The tools the server advertises over `tools/list` — the real surface."""
+    resp = mcp_server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    return resp["result"]["tools"]
 
 
 def test_readme_does_not_claim_a_single_backend():
@@ -69,9 +72,15 @@ def test_readme_requirements_accept_either_cli():
 
 
 def test_readme_tool_count_matches_the_mcp_server():
-    """The quoted tool count is the one `app/mcp_server.py` actually declares."""
-    count = _tool_count()
-    assert count >= 30, "the '\"name\":' pattern no longer finds the tools"
+    """The quoted count is the served tool list, not a `"name":` source grep.
+
+    Counting `"name":` lines overcounts by three — a JSON-schema property in
+    `create_archive`, `args["name"]` in the dispatcher, and `serverInfo.name` —
+    which is how the README once claimed 38 for 35 tools. `tools/list` is what
+    a model actually sees, so that is what the README has to agree with.
+    """
+    count = len(_served_tools())
+    assert count >= 30, "the tool list no longer looks like the harness MCP"
     # Whitespace-tolerant: a reflowed line must not break the claim.
     assert re.search(rf"\b{count}\s+tools", _read(README)), (
         f"README must quote the real tool count ({count})"
