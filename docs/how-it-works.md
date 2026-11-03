@@ -168,6 +168,35 @@ shrink. A card in the review loop holds one slot at a time (run → review →
 fixer are sequential), which is what makes the cap a cap on *concurrent*
 sessions, worktrees and test suites.
 
+## The sleep guard: keep the machine awake
+
+A card run is a long-lived child process. If the machine sleeps, that process is
+suspended, the agent CLI eventually gives up and reports `interrupted` (exit 3)
+— which the board shows as a failed card even though nothing was wrong with the
+work. Three cards dying within a minute of each other after an hour is the
+signature of the OS pausing them, not of three independent failures.
+
+So while there is work pending the server holds an **idle-sleep inhibitor**
+(`app/sleepguard.py`): `caffeinate -i -s` on macOS, `systemd-inhibit
+--what=idle:sleep` on Linux, a no-op where neither exists. "Pending" is
+`SessionRunner.has_pending_work()`: a live session, a run queued for a free
+slot, an accept queued behind another merge, or a merge-conflict resolver
+running. A card merely `waiting_for` a dependency is **not** work — nothing
+happens until that dependency is merged, so holding the machine awake for it
+would keep it awake indefinitely.
+
+The inhibitor is a **child process of the server**, so it dies with it: a
+crashed or killed dashboard can never leave the machine permanently awake, and
+shutdown releases it explicitly. A watchdog re-checks every 5 s, so a card
+started right after the machine went idle still holds it.
+
+`VIBE_HARNESS_PREVENT_SLEEP=0` disables it at startup; the sidebar's
+**Settings** panel has the same toggle (disabled, with a note, on a platform
+with no inhibitor) and applies it to the running server. `GET /api/settings`
+reports `prevent_sleep`, `sleep_held` and `sleep_supported`. Closing the lid
+still sleeps the machine — only `sudo pmset -a disablesleep 1` overrides that,
+and the harness will not touch a system-wide root setting.
+
 ## Notifications: a card finishing is not silent
 
 The board polls `/api/cards` every 2 s while a card is live, so the tab already
@@ -339,6 +368,24 @@ Cards without a project or work folder run in the isolated sandbox
 (`sessions/<id>/workspace`) and do not use git — there is no repo to branch
 from or merge into.
 
+## Accept all: ship the Done column in one go
+
+The **Accept all (N)** button at the bottom of the Done column merges every card
+that is in Done **right now**, one at a time (`POST /api/cards/accept-all`).
+The batch is a **snapshot**: a card that reaches Done while the batch runs is
+not added to it — it renders below the button and the next click picks it up.
+While the batch runs the button reads **Merging… (N queued)** and is disabled,
+and each queued card shows its position (`1` = merging now).
+
+The endpoint returns `{queued: [card ids], running: bool}`. Cards already
+queued or owned by a resolver are skipped, so a second click at the same moment
+finds them queued and returns an empty batch — the read, the `accept_queued`
+patch and the decision to start the drain are one critical section under the
+accept lock. Merges are serialized because they all happen in the same main
+worktree, and a conflicted accept hands over to a resolver that the batch waits
+for before starting the next card. The same batch is available to a model as
+the `accept_all_cards` MCP tool.
+
 ## Undoing an accepted card (revert)
 
 Accept merges; a revert un-merges. `POST /api/cards/<id>/revert` (and the
@@ -506,6 +553,26 @@ via `logs/session/active/<id>.lock.json`. A card with no live session falls
 back to its last worker session's journal; a card with neither, or a journal
 that is gone, is an empty feed — never an error. The popup polls once a second
 while the card is running/reviewing and stops when it leaves those states.
+
+## Steering a running card
+
+The activity popup's footer is a two-way channel, not a log. Type guidance and
+press **Enter** (or **Send**): it posts to `POST /api/cards/<id>/messages`,
+which appends the text to the card's **mailbox** addressed to the worker
+(`from: "user"`, `to: "worker"`). The worker prompt tells the model to call
+`wait_for_message(timeout_seconds=0)` between major steps — before starting a
+new file, before running the test suite, before finishing — so the guidance
+lands at the next checkpoint instead of waiting for the run to end. The worker
+replies with `post_message(to="user", ...)`, and the popup shows both
+directions from `GET /api/cards/<id>/messages` (oldest first).
+
+The check is **non-blocking**: a run with no user messages is unaffected — it
+returns `{"none": true}` immediately, so steering costs one tool call per
+checkpoint and never stalls a session. The footer is disabled (placeholder
+"this card is not running") while the card is not live, because guidance posted
+to a finished card would sit in the mailbox with nobody to read it. Steering
+needs the mailbox MCP (`VIBE_HARNESS_MAILBOX`, on by default); with it off the
+worker never reads the mailbox.
 
 ## Backends: Vibe or Claude
 

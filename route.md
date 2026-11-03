@@ -447,7 +447,11 @@ The cheapest token is the one never spent:
   `vibe-harness:panel:<key>` — no server round-trip, no token cost. The diff
   popup's layout mode (unified / side by side) and its colourblind-safe palette
   are browser state too (`vibe.diff.palette`), so re-reading a diff costs
-  nothing extra.
+  nothing extra. The diff also gets **syntax highlighting**: a hand-written
+  tokenizer picks the language from the file path in the `diff --git` header
+  (Python, JavaScript, CSS, HTML, Markdown, JSON, plain otherwise) and carries
+  multi-line state, so a docstring or a block comment is coloured on every line
+  it spans. It runs in the browser, so it costs no tokens either.
 - **Steering costs one non-blocking tool call per checkpoint.** The popup's
   footer sends guidance to the running worker (`POST /api/cards/<id>/messages`)
   and shows the worker's replies; the same poll also reads
