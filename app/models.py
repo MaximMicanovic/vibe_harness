@@ -247,17 +247,22 @@ class ModelSettings:
         """Whether `backend` can run `model`.
 
         Vibe offers exactly the aliases its config declares. Claude offers its
-        three aliases plus any free-text model name (a full id like
-        `claude-sonnet-4-6`), but not a model another backend owns.
+        three aliases plus any full `claude-…` name typed by hand, but never a
+        model that belongs to the other platform — that is the mismatch the old
+        global Backend dropdown allowed. The check cannot lean on the local Vibe
+        config alone: a Vibe model is not Claude's even on a machine whose
+        config does not declare it.
         """
         model = (model or "").strip()
         if not model:
             return False
-        vibe_aliases = {m["alias"] for m in available_models(self._home())}
         if backend == "claude":
-            return model not in vibe_aliases
+            if model in CLAUDE_ALIASES:
+                return True
+            vibe_aliases = {m["alias"] for m in available_models(self._home())}
+            return model not in vibe_aliases and backend_for_model(model) == "claude"
         if backend == "vibe":
-            return model in vibe_aliases
+            return model in {m["alias"] for m in available_models(self._home())}
         return False
 
     # ------------------------------------------------------------------

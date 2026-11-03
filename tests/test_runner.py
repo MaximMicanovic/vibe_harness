@@ -1215,7 +1215,9 @@ def test_git_resolver_with_a_rejected_model_names_it(store, tmp_path, projects):
     fake = _write_script(tmp_path / "fake_claude.sh", FAKE_CLAUDE_ROLE_MODELS)
     settings = SettingsStore(tmp_path / "settings.json")
     settings.set_backend("claude")
-    models = ModelSettings(tmp_path / "models.json")
+    # A hermetic Vibe catalog: `offers()` reads it, and a test must not depend
+    # on the machine's ~/.vibe/config.toml.
+    models = ModelSettings(tmp_path / "models.json", home=tmp_path / "no-vibe-home")
     models.update({"worker": "claude-sonnet-4-6", "review": "claude-sonnet-4-6",
                    "resolver": "claude-nope"})
     runner, card_id, proj, _git_info = _conflict_setup(

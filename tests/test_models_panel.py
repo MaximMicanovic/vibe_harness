@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.models import ModelSettings
 from node_check import TESTS_DIR, requires_node, run_node_check
 from test_api import make_env
 
@@ -22,7 +23,10 @@ pytestmark = requires_node
 
 @pytest.fixture()
 def env(tmp_path):
-    e = make_env(tmp_path)
+    # A hermetic model store: the check stubs /api/models, and nothing here may
+    # read the real ~/.vibe/config.toml or write the harness's models.json.
+    models = ModelSettings(tmp_path / "models.json", home=tmp_path / "vibe-home")
+    e = make_env(tmp_path, models=models)
     with e.client:
         yield e
     e.client.close()

@@ -38,7 +38,7 @@ FAKE_VIBE = "#!/bin/sh\nexit 0\n"
 
 @pytest.fixture
 def settings(tmp_path) -> ModelSettings:
-    return ModelSettings(tmp_path / "models.json")
+    return _models(tmp_path)
 
 
 # ----------------------------------------------------------------------
@@ -113,7 +113,7 @@ def test_orchestrator_cannot_be_set(settings):
 def test_settings_persist_to_disk(settings, tmp_path):
     settings.set("resolver", "glm-5-3")
     assert (tmp_path / "models.json").exists()
-    again = ModelSettings(tmp_path / "models.json")
+    again = _models(tmp_path)
     assert again.get("resolver") == "glm-5-3"
 
 
@@ -182,7 +182,7 @@ def test_a_flat_entry_with_an_empty_model_is_dropped(tmp_path):
 
 def _fake_home(tmp_path: Path) -> Path:
     home = tmp_path / "vibe-home"
-    home.mkdir()
+    home.mkdir(exist_ok=True)
     (home / "config.toml").write_text(
         'active_model = "deepseek-v4-1-flash-1017"\n'
         '\n[[models]]\nalias = "mistral-large-4-0-3"\nthinking = "high"\n'
@@ -196,6 +196,16 @@ def _fake_home(tmp_path: Path) -> Path:
             ]}}}}},
     }), encoding="utf-8")
     return home
+
+
+def _models(tmp_path: Path) -> ModelSettings:
+    """A model store whose Vibe catalog is the fake home, never the real one.
+
+    `offers()` reads the Vibe config, so a store without a home would make the
+    test depend on the machine it runs on (a clean machine has no
+    `~/.vibe/config.toml` at all).
+    """
+    return ModelSettings(tmp_path / "models.json", home=_fake_home(tmp_path))
 
 
 def test_available_models_merges_config_and_catalog(tmp_path):
@@ -263,7 +273,7 @@ def test_catalog_marks_a_missing_cli_unavailable(tmp_path):
 # ----------------------------------------------------------------------
 
 def test_set_records_the_backend_of_the_model(tmp_path):
-    store = ModelSettings(tmp_path / "models.json")
+    store = _models(tmp_path)
     store.set("review", "sonnet")
     assert store.all()["review"] == {"model": "sonnet", "backend": "claude"}
     store.set("worker", "glm-5-3")
@@ -288,8 +298,50 @@ def test_a_backend_that_does_not_offer_the_model_is_rejected(tmp_path):
                                      "backend": "claude"}
 
 
+def test_a_vibe_model_is_never_offered_by_claude(tmp_path):
+    """The mismatch check cannot depend on the local Vibe config.
+
+    `claude` + a Vibe model is a combination that cannot run, whether or not
+    this machine's `~/.vibe/config.toml` happens to declare that alias — a
+    clean machine (no config at all) must reject it too.
+    """
+    empty = tmp_path / "empty-home"
+    store = ModelSettings(tmp_path / "models.json", home=empty)
+    for model in ("mistral-large-4-0-3", "glm-5-3", "zai-glm-5-3-flash",
+                  "deepseek-v4-1-flash-1017"):
+        with pytest.raises(ModelError):
+            store.set("worker", model, "claude")
+    # A model neither platform offers is not Claude's either.
+    with pytest.raises(ModelError):
+        store.set("worker", "gpt-4", "claude")
+    assert store.all() == {}
+    # Claude's own aliases and a full `claude-…` name still work.
+    store.set("worker", "sonnet", "claude")
+    store.set("review", "claude-sonnet-4-6", "claude")
+    assert store.all() == {
+        "worker": {"model": "sonnet", "backend": "claude"},
+        "review": {"model": "claude-sonnet-4-6", "backend": "claude"},
+    }
+
+
+def test_claude_aliases_stay_claudes_even_if_the_vibe_config_claims_them(tmp_path):
+    """A Vibe config that happens to declare `sonnet` does not take Claude's own
+    alias away from Claude: both platforms offer it, and each choice keeps the
+    backend it was saved with."""
+    home = _fake_home(tmp_path)
+    (home / "config.toml").write_text(
+        'active_model = "sonnet"\n[[models]]\nalias = "sonnet"\n', encoding="utf-8")
+    store = ModelSettings(tmp_path / "models.json", home=home)
+    store.set("review", "sonnet", "claude")
+    store.set("worker", "sonnet", "vibe")
+    assert store.all() == {
+        "review": {"model": "sonnet", "backend": "claude"},
+        "worker": {"model": "sonnet", "backend": "vibe"},
+    }
+
+
 def test_resolution_follows_the_worker_then_falls_back_to_vibe(tmp_path):
-    store = ModelSettings(tmp_path / "models.json")
+    store = _models(tmp_path)
     # Nothing chosen anywhere: Vibe, with the CLI's own default model.
     assert store.resolve("worker") == {"model": None, "backend": "vibe",
                                        "inherited": True, "source": None}
@@ -347,7 +399,7 @@ def test_describe_follows_the_worker_for_inheriting_roles(tmp_path, settings):
 def test_runner_resolves_each_session_kind(tmp_path):
     store = CardStore(tmp_path / "cards")
     config = Config(vibe_bin=str(tmp_path / "vibe"), time_limit_seconds=30)
-    settings = ModelSettings(tmp_path / "models.json")
+    settings = _models(tmp_path)
     settings.update({"worker": "glm-5-3", "review": "sonnet",
                      "resolver": "zai-glm-5-3-flash"})
     runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
@@ -374,7 +426,7 @@ def test_runner_without_settings_never_overrides(tmp_path):
 def test_model_env_pins_only_the_configured_roles(tmp_path):
     store = CardStore(tmp_path / "cards")
     config = Config(vibe_bin=str(tmp_path / "vibe"), time_limit_seconds=30)
-    settings = ModelSettings(tmp_path / "models.json")
+    settings = _models(tmp_path)
     settings.update({"review": "mistral-large-4-0-3"})
     runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
                            models=settings)
@@ -389,7 +441,7 @@ def test_model_env_is_empty_for_claude(tmp_path):
     """Claude takes --model; VIBE_ACTIVE_MODEL would be a lie for it."""
     store = CardStore(tmp_path / "cards")
     config = Config(vibe_bin=str(tmp_path / "vibe"), time_limit_seconds=30)
-    settings = ModelSettings(tmp_path / "models.json")
+    settings = _models(tmp_path)
     settings.update({"review": "sonnet"})
     runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
                            models=settings)
@@ -403,7 +455,7 @@ def test_spawned_session_gets_the_role_model(tmp_path, monkeypatch):
     fake.write_text(FAKE_VIBE)
     fake.chmod(0o755)
     config = Config(vibe_bin=str(fake), time_limit_seconds=30, mailbox=False)
-    settings = ModelSettings(tmp_path / "models.json")
+    settings = _models(tmp_path)
     settings.update({"worker": "glm-5-3"})
     runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
                            projects=ProjectStore(tmp_path / "projects.json"),
@@ -472,7 +524,7 @@ def _capture_spawn(monkeypatch, runner: SessionRunner) -> dict:
 def test_build_cmd_passes_the_role_model_for_every_kind(tmp_path):
     """The worker, the reviewer and the resolver each get their own model, and
     each model brings the backend that runs it."""
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "glm-5-3", "review": "sonnet",
                    "resolver": "haiku"})
     runner = _runner(tmp_path, models)
@@ -488,7 +540,7 @@ def test_build_cmd_passes_the_role_model_for_every_kind(tmp_path):
 
 
 def test_build_cmd_without_a_role_model_adds_no_flag(tmp_path):
-    runner = _runner(tmp_path, ModelSettings(tmp_path / "models.json"))
+    runner = _runner(tmp_path, _models(tmp_path))
     cmd = runner._build_cmd(tmp_path / "p.md", tmp_path, tmp_path, "run")
     assert "--model" not in cmd
 
@@ -497,7 +549,7 @@ def test_build_cmd_keeps_vibe_on_the_env_var(tmp_path):
     """Vibe has no --model flag: the choice stays in VIBE_ACTIVE_MODEL."""
     store = CardStore(tmp_path / "cards")
     config = Config(vibe_bin=str(tmp_path / "vibe"), time_limit_seconds=30)
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "glm-5-3"})
     runner = SessionRunner(store, config, sessions_dir=tmp_path / "sessions",
                            models=models)
@@ -508,7 +560,7 @@ def test_build_cmd_keeps_vibe_on_the_env_var(tmp_path):
 
 def test_spawned_review_gets_the_review_model(tmp_path, monkeypatch):
     """The reviewer is its own role: its model must reach the CLI too."""
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "glm-5-3", "review": "sonnet"})
     runner = _runner(tmp_path, models)
     captured = _capture_spawn(monkeypatch, runner)
@@ -523,7 +575,7 @@ def test_spawned_review_gets_the_review_model(tmp_path, monkeypatch):
 
 def test_spawned_resolver_gets_the_resolver_model(tmp_path, monkeypatch):
     """The resolver is its own role: it must not run on the worker's model."""
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "glm-5-3", "resolver": "haiku"})
     runner = _runner(tmp_path, models)
     captured = _capture_spawn(monkeypatch, runner)
@@ -539,7 +591,7 @@ def test_spawned_resolver_gets_the_resolver_model(tmp_path, monkeypatch):
 def test_resolver_records_a_rejected_model(tmp_path):
     """A refused resolver model is recorded on the resolver's own record, so
     the failure detail can name it instead of a bare exit code."""
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"resolver": "claude-nope"})
     runner = _runner(tmp_path, models)
     card = runner.store.create("A card", "spec")
@@ -568,7 +620,7 @@ def test_resolver_records_a_rejected_model(tmp_path):
 # ----------------------------------------------------------------------
 
 def test_run_records_the_resolved_backend_on_the_session(tmp_path, monkeypatch):
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "sonnet"})
     runner = _runner(tmp_path, models)
     captured = _capture_spawn(monkeypatch, runner)
@@ -582,7 +634,7 @@ def test_fixer_resume_keeps_the_pinned_backend(tmp_path, monkeypatch):
     """The worker starts on Claude; the user switches it to a Vibe model while
     the run is live. The fixer round resumes the Claude session id, so it must
     stay on Claude — a Vibe session id cannot be resumed by Claude."""
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "sonnet"})
     runner = _runner(tmp_path, models)
     captured = _capture_spawn(monkeypatch, runner)
@@ -603,7 +655,7 @@ def test_fixer_resume_keeps_the_pinned_backend(tmp_path, monkeypatch):
 
 def test_fixer_resume_keeps_vibe_when_the_worker_moves_to_claude(tmp_path,
                                                                  monkeypatch):
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "glm-5-3"})
     runner = _runner(tmp_path, models)
     captured = _capture_spawn(monkeypatch, runner)
@@ -623,7 +675,7 @@ def test_a_review_round_does_not_overwrite_the_pinned_backend(tmp_path,
                                                               monkeypatch):
     """Only the worker's run pins the platform: a review round on the other
     backend must not repin the card's worker session."""
-    models = ModelSettings(tmp_path / "models.json")
+    models = _models(tmp_path)
     models.update({"worker": "glm-5-3", "review": "sonnet"})
     runner = _runner(tmp_path, models)
     _capture_spawn(monkeypatch, runner)
