@@ -2012,11 +2012,24 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
   --diff-del: #c0504d;
   --diff-add-fill: rgba(46, 158, 99, 0.10);
   --diff-del-fill: rgba(192, 80, 77, 0.10);
-  --diff-add-word: rgba(46, 158, 99, 0.32);
-  --diff-del-word: rgba(192, 80, 77, 0.32);
+  --diff-add-word: rgba(46, 158, 99, 0.24);
+  --diff-del-word: rgba(192, 80, 77, 0.24);
   --diff-ink: #d8e0ea;
   --diff-dim: #8b93a7;
   --diff-hunk: #7aa2f7;
+  /* Syntax highlighting: the token colour is the text, the row tint stays the
+   * background. Every colour keeps 4.5:1 against the base, the add/del fill
+   * and the word-diff tint in BOTH palettes (tests/test_diff_panel.py). */
+  --tok-keyword: #dcaaff;
+  --tok-string: #b8f0b0;
+  --tok-comment: #b6c1d3;
+  --tok-number: #ffb87a;
+  --tok-fn: #9dc0ff;
+  --tok-op: #a8e8ff;
+  --tok-punct: #c8d0de;
+  --tok-tag: #ffaab1;
+  --tok-attr: #ffd98a;
+  --tok-heading: #9dc0ff;
   flex: 1 1 auto;
   overflow: auto;
   margin: 0;
@@ -2035,8 +2048,8 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
   --diff-del: #e08a2e;
   --diff-add-fill: rgba(76, 141, 255, 0.12);
   --diff-del-fill: rgba(224, 138, 46, 0.12);
-  --diff-add-word: rgba(76, 141, 255, 0.34);
-  --diff-del-word: rgba(224, 138, 46, 0.34);
+  --diff-add-word: rgba(76, 141, 255, 0.26);
+  --diff-del-word: rgba(224, 138, 46, 0.26);
 }
 
 /* A file: a sticky, collapsible header over its hunks. */
@@ -2116,6 +2129,19 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
 
 .diff-marker { display: inline-block; width: 1ch; text-align: center; }
 .diff-code { flex: 1 1 auto; padding-right: 10px; color: var(--diff-ink); }
+
+/* Syntax highlighting: one class per token kind. The token colour is the text
+ * colour; the row tint and the word-diff tint stay behind it. */
+.tok-keyword { color: var(--tok-keyword); }
+.tok-string { color: var(--tok-string); }
+.tok-comment { color: var(--tok-comment); font-style: italic; }
+.tok-number { color: var(--tok-number); }
+.tok-fn { color: var(--tok-fn); }
+.tok-op { color: var(--tok-op); }
+.tok-punct { color: var(--tok-punct); }
+.tok-tag { color: var(--tok-tag); }
+.tok-attr { color: var(--tok-attr); }
+.tok-heading { color: var(--tok-heading); font-weight: 600; }
 
 /* Unified: the diff hue is the gutter rule and a faint row fill. */
 .diff-row--add { background: var(--diff-add-fill); }

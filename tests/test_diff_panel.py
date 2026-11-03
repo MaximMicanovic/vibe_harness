@@ -12,6 +12,7 @@ Keys panel lists N, Esc, D + click and C + click from the one KEYBINDINGS list.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -223,3 +224,109 @@ def test_how_it_works_documents_the_diff_renderer(env):
     for needle in ("line numbers", "side-by-side", "word-level", "unchanged lines",
                    "colourblind", "localstorage"):
         assert needle in doc.lower(), needle
+
+
+#: The token classes the hand-written tokenizer emits (see app.js).
+TOKEN_CLASSES = ("tok-keyword", "tok-string", "tok-comment", "tok-number",
+                 "tok-fn", "tok-op", "tok-punct", "tok-tag", "tok-attr",
+                 "tok-heading")
+
+
+def _css_vars(block: str) -> dict[str, str]:
+    """The custom properties declared in one CSS rule block."""
+    return {m.group(1): m.group(2).strip()
+            for m in re.finditer(r"(--[\w-]+):\s*([^;]+);", block)}
+
+
+def _rgb(value: str) -> tuple[float, float, float, float]:
+    """`#rrggbb` or `rgba(r, g, b, a)` -> (r, g, b, alpha)."""
+    value = value.strip()
+    if value.startswith("#"):
+        h = value[1:]
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 1.0)
+    m = re.match(r"rgba?\(([^)]+)\)", value)
+    assert m, value
+    parts = [p.strip() for p in m.group(1).split(",")]
+    r, g, b = (float(p) for p in parts[:3])
+    a = float(parts[3]) if len(parts) > 3 else 1.0
+    return (r, g, b, a)
+
+
+def _over(fg: tuple[float, float, float, float],
+          bg: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """Composite a possibly translucent colour over an opaque one."""
+    r, g, b, a = fg
+    return (r * a + bg[0] * (1 - a), g * a + bg[1] * (1 - a),
+            b * a + bg[2] * (1 - a), 1.0)
+
+
+def _luminance(rgb: tuple[float, float, float, float]) -> float:
+    def channel(c: float) -> float:
+        c = c / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (channel(c) for c in rgb[:3])
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a: tuple[float, float, float, float],
+              b: tuple[float, float, float, float]) -> float:
+    la, lb = _luminance(a), _luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_every_token_class_has_a_colour(env):
+    """Each token class the tokenizer emits is coloured from one variable."""
+    css = env.client.get("/style.css").text
+    for cls in TOKEN_CLASSES:
+        rule = _css_rule(css, "." + cls)
+        assert "color: var(--tok-" in rule, cls
+
+
+def test_python_token_colours_are_distinct(env):
+    """Keywords, strings, comments (and the rest of the code tokens) differ.
+
+    These are the classes a Python line can mix, so sharing a colour would
+    make the highlighting pointless.
+    """
+    css = env.client.get("/style.css").text
+    body = _css_vars(_css_rule(css, ".diff-body"))
+    core = ("--tok-keyword", "--tok-string", "--tok-comment", "--tok-number",
+            "--tok-fn", "--tok-op", "--tok-punct")
+    colours = [body[name] for name in core]
+    assert len(set(colours)) == len(core), colours
+
+
+def test_token_colours_stay_legible_on_every_row_tint(env):
+    """Token colours sit on the add/del row tint and the word-diff tint.
+
+    Both palettes are checked: the colourblind one swaps the row hues, so a
+    token colour that only works on green/red would fail there. WCAG AA for
+    normal text is 4.5:1.
+    """
+    css = env.client.get("/style.css").text
+    body_rule = _css_rule(css, ".diff-body")
+    body = _css_vars(body_rule)
+    base = _rgb(re.search(r"background:\s*(#[0-9a-fA-F]{6})", body_rule).group(1))
+    palettes = {
+        "default": body,
+        "colorblind": {**body, **_css_vars(_css_rule(css, '.diff-body[data-palette="colorblind"]'))},
+    }
+    for name, palette in palettes.items():
+        add = _over(_rgb(palette["--diff-add-fill"]), base)
+        dele = _over(_rgb(palette["--diff-del-fill"]), base)
+        backgrounds = {
+            "base": base,
+            "add": add,
+            "del": dele,
+            "add word": _over(_rgb(palette["--diff-add-word"]), add),
+            "del word": _over(_rgb(palette["--diff-del-word"]), dele),
+        }
+        for cls in TOKEN_CLASSES:
+            colour = _rgb(palette["--" + cls])
+            for where, bg in backgrounds.items():
+                ratio = _contrast(colour, bg)
+                assert ratio >= 4.5, (
+                    f"{name} palette: {cls} on {where} is {ratio:.2f}:1, needs 4.5:1")

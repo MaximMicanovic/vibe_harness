@@ -403,14 +403,24 @@ line numbers, and its text. That is what makes the rest possible:
   following `+` run and a small LCS over tokens (refined to characters inside
   each changed block) marks the changed span with a stronger tint than the
   rest of the line. A one-character change shows the character.
+- **Syntax highlighting**: each line is tokenized by the language of its file
+  — from the path in the `diff --git` header: Python, JavaScript, CSS, HTML,
+  Markdown, JSON, and plain for anything else — into keywords, strings,
+  comments, numbers, functions, operators, punctuation, tags, attributes and
+  headings. The tokenizer is hand-written (no dependency) and carries
+  multi-line state, so a Python docstring or a JS block comment is coloured on
+  every line it spans. The token colour is the text colour; the row tint and
+  the word-diff tint stay behind it, so both signals survive. A 4000-line diff
+  still renders in well under a second.
 - **Collapsed context**: a run of more than 6 unchanged lines becomes a
   "⋯ N unchanged lines" row; clicking it expands the rows in place.
 - **File headers**: path and `+N -M`, collapsible, sticky while that file
   scrolls.
 - **Restrained palette**: the diff hue is on the gutter rule and a faint row
-  fill; the code stays in normal ink. The palette toggle switches to a
-  colourblind-safe blue/orange palette and is persisted in `localStorage`
-  (`vibe.diff.palette`).
+  fill; the code is token-coloured on top of it. The palette toggle switches
+  to a colourblind-safe blue/orange palette and is persisted in `localStorage`
+  (`vibe.diff.palette`). Every token colour keeps 4.5:1 contrast against the
+  base, the add/del fill and the word-diff tint in both palettes.
 
 Every piece of model-written text is still inserted as a **text node** — the
 diff never goes through `innerHTML`. The `truncated` flag still shows its

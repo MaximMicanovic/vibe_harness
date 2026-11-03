@@ -170,7 +170,7 @@ function bootApp(store) {
   vm.runInContext(src + '\n;globalThis.__x = { state, classifyDiffLine, parseDiff, '
     + 'diffWords, alignHunkRows, collapseContext, collapsePairs, effectiveDiffMode, '
     + 'loadDiffPalette, saveDiffPalette, DIFF_MODES, DIFF_COLLAPSE_AFTER, '
-    + 'DIFF_SPLIT_MIN_WIDTH, renderDiff, '
+    + 'DIFF_SPLIT_MIN_WIDTH, renderDiff, highlightLine, highlightLang, '
     + 'renderDiffVerdict, renderKeysPanel, KEYBINDINGS, DIFF_RANGES, '
     + 'openDiff, closeDiff, openActivity, closeActivity, buildCard, closeEditor, '
     + 'DIFF_WIDTH, DIFF_HEIGHT };', sandbox,
@@ -206,6 +206,27 @@ function textOf(node) {
   if (!node) return '';
   if (node.tagName === '#text') return node.textContent;
   return (node.textContent || '') + node.children.map(textOf).join(' ');
+}
+/* The text of one code cell, with no separator between the spans: a token
+ * split must not change what the line says. */
+function codeText(node) {
+  if (!node) return '';
+  if (node.tagName === '#text') return node.textContent;
+  return (node.textContent || '') + node.children.map(codeText).join('');
+}
+/* Every leaf under a code cell must be a TEXT NODE: the diff is model-written,
+ * so the renderer may wrap it in a word-diff span or a token span, never in
+ * markup it parsed. */
+function textOnlyLeaves(node, where) {
+  for (const child of node.children) {
+    if (child.tagName === '#TEXT') continue;
+    const cls = child.className || '';
+    const allowed = cls.split(/\s+/).some((c) => c === 'diff-word'
+      || c.startsWith('diff-word--') || c.startsWith('tok-'));
+    check(allowed, where + ': unexpected element ' + child.tagName
+      + ' class=' + JSON.stringify(cls));
+    textOnlyLeaves(child, where);
+  }
 }
 function fireDoc(type, event) {
   for (const fn of (docListeners[type] || [])) fn(event);
@@ -358,20 +379,15 @@ check(rows.length === 8, 'one row per diff line, got ' + rows.length);
 const kinds = rows.map((r) => (r.className.match(/diff-row--(\w+)/) || [])[1]);
 check(JSON.stringify(kinds) === JSON.stringify(['meta', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'add', 'del']),
   'rows are classified in order, got ' + JSON.stringify(kinds));
-// Every row's content is a text node (or a word span around one), never markup.
+// Every row's content is a text node (or a word/token span around one), never
+// markup.
 for (const row of rows) {
   const code = row.querySelector('.diff-code');
-  const target = code || row;
-  for (const child of target.children) {
-    if (child.tagName === '#TEXT') continue;
-    check(child.classList.contains('diff-word')
-          && child.children.length === 1 && child.children[0].tagName === '#TEXT',
-      'each diff line is TEXT NODEs (or a word span around one), got ' + child.tagName);
-  }
+  textOnlyLeaves(code || row, 'row ' + row.className);
 }
-check(textOf(rows[6].querySelector('.diff-code')) === 'print("world")',
+check(codeText(rows[6].querySelector('.diff-code')) === 'print("world")',
   'the addition row carries the line without its marker, got '
-  + JSON.stringify(textOf(rows[6].querySelector('.diff-code'))));
+  + JSON.stringify(codeText(rows[6].querySelector('.diff-code'))));
 // The file block is anchored, so the file list can scroll to it.
 const fileBlock = body.querySelector('.diff-file-block');
 check(fileBlock.dataset.path === 'hello.py',
@@ -762,6 +778,264 @@ check(getEl('editor-overlay').hidden === true,
   'the editor closes when its Diff button opens the popup');
 check(X.state.diffCardId === 'card-1', 'the Diff button opens the popup for the edited card');
 X.closeDiff();
+
+/* 16. Syntax highlighting: the code is coloured by language, not just by kind.
+ *     The tokenizer is hand-written (no dependency) and carries multi-line
+ *     state, so a Python docstring is a string on every line it spans. */
+const HL = X.highlightLine;
+check(typeof HL === 'function', 'highlightLine is exported');
+const tokOf = (tokens, text) => tokens.find((t) => t.text === text);
+const tokText = (tokens, cls) => tokens.filter((t) => t.cls === cls).map((t) => t.text).join('');
+const allCls = (tokens, cls) => tokens.length > 0 && tokens.every((t) => t.cls === cls);
+
+/* 16a. The language comes from the file path, defaulting to plain. */
+check(X.highlightLang('app/diffs.py') === 'python', 'a .py path is python');
+check(X.highlightLang('app/static/app.js') === 'javascript', 'a .js path is javascript');
+check(X.highlightLang('app/static/style.css') === 'css', 'a .css path is css');
+check(X.highlightLang('app/static/index.html') === 'html', 'a .html path is html');
+check(X.highlightLang('docs/how-it-works.md') === 'markdown', 'a .md path is markdown');
+check(X.highlightLang('package.json') === 'json', 'a .json path is json');
+check(X.highlightLang('notes.unknown') === 'plain', 'an unknown extension is plain');
+check(X.highlightLang(null) === 'plain', 'a missing path is plain');
+
+/* 16b. Python: keywords, strings, comments, numbers, functions, operators and
+ *      punctuation each get their own class. */
+const pyTokens = HL('def greet(name):  # hi', 'python', {}).tokens;
+check(tokOf(pyTokens, 'def') && tokOf(pyTokens, 'def').cls === 'tok-keyword',
+  'def is a keyword, got ' + JSON.stringify(pyTokens));
+check(tokOf(pyTokens, 'greet') && tokOf(pyTokens, 'greet').cls === 'tok-fn',
+  'a called name is a function, got ' + JSON.stringify(pyTokens));
+check(tokOf(pyTokens, '# hi') && tokOf(pyTokens, '# hi').cls === 'tok-comment',
+  'a # comment is a comment, got ' + JSON.stringify(pyTokens));
+check(tokOf(pyTokens, '(') && tokOf(pyTokens, '(').cls === 'tok-punct',
+  'a paren is punctuation, got ' + JSON.stringify(pyTokens));
+const pyString = HL('x = "hi"', 'python', {}).tokens;
+check(tokOf(pyString, '"hi"') && tokOf(pyString, '"hi"').cls === 'tok-string',
+  'a quoted string is a string, got ' + JSON.stringify(pyString));
+const pyNumber = HL('x = 42', 'python', {}).tokens;
+check(tokOf(pyNumber, '42') && tokOf(pyNumber, '42').cls === 'tok-number',
+  'a number is a number, got ' + JSON.stringify(pyNumber));
+const pyOp = HL('a + b', 'python', {}).tokens;
+check(tokOf(pyOp, '+') && tokOf(pyOp, '+').cls === 'tok-op',
+  'an operator is an operator, got ' + JSON.stringify(pyOp));
+
+/* 16c. A multi-line Python docstring is a string on every line it spans. */
+const doc1 = HL('"""Doc line one', 'python', {});
+check(doc1.state.inString === '"""',
+  'an open docstring is remembered, got ' + JSON.stringify(doc1.state));
+check(allCls(doc1.tokens, 'tok-string'),
+  'the opening docstring line is a string, got ' + JSON.stringify(doc1.tokens));
+const doc2 = HL('still the docstring', 'python', doc1.state);
+check(allCls(doc2.tokens, 'tok-string'),
+  'the middle docstring line is a string, got ' + JSON.stringify(doc2.tokens));
+const doc3 = HL('end of docstring"""', 'python', doc2.state);
+check(allCls(doc3.tokens, 'tok-string'),
+  'the closing docstring line is a string, got ' + JSON.stringify(doc3.tokens));
+check(doc3.state.inString === null,
+  'the closed docstring clears the state, got ' + JSON.stringify(doc3.state));
+
+/* 16d. A JavaScript block comment spans lines too, and code after it is code. */
+const js1 = HL('/* start', 'javascript', {});
+check(js1.state.inBlockComment === true,
+  'an open block comment is remembered, got ' + JSON.stringify(js1.state));
+const js2 = HL('middle', 'javascript', js1.state);
+check(allCls(js2.tokens, 'tok-comment'),
+  'the middle block-comment line is a comment, got ' + JSON.stringify(js2.tokens));
+const js3 = HL('end */ const x = 1;', 'javascript', js2.state);
+check(js3.state.inBlockComment === false,
+  'the closed block comment clears the state, got ' + JSON.stringify(js3.state));
+check(tokOf(js3.tokens, 'const') && tokOf(js3.tokens, 'const').cls === 'tok-keyword',
+  'code after the comment closes is code, got ' + JSON.stringify(js3.tokens));
+
+/* 16e. The plain fallback is one token with no class. */
+const plainTokens = HL('anything at all', 'plain', {}).tokens;
+check(plainTokens.length === 1 && plainTokens[0].cls === ''
+      && plainTokens[0].text === 'anything at all',
+  'plain is one unclassed token, got ' + JSON.stringify(plainTokens));
+const unknownTokens = HL('x = 1', 'cobol', {}).tokens;
+check(unknownTokens.length === 1 && unknownTokens[0].cls === '',
+  'an unknown language falls back to plain, got ' + JSON.stringify(unknownTokens));
+
+/* 16f. Rendering: a Python diff shows keywords, strings and comments in
+ *      distinct classes, and the docstring is a string on every line. */
+X.state.diffMode = 'unified';
+const pyDiff = [
+  'diff --git a/hello.py b/hello.py',
+  '--- a/hello.py',
+  '+++ b/hello.py',
+  '@@ -1,4 +1,4 @@',
+  ' def greet(name):',
+  '-    return "hi " + name  # note',
+  '+    return f"hi {name}"  # note',
+  ' """Doc line one',
+  ' still the docstring',
+  ' end of docstring"""',
+].join('\n');
+X.renderDiff({ range: 'card', diff: pyDiff, truncated: false,
+               files: [{ path: 'hello.py', additions: 1, deletions: 1 }], review: null });
+const pyRows = getEl('diff-body').querySelectorAll('.diff-row');
+const rowWithCode = (text) => pyRows.find((r) => codeText(r.querySelector('.diff-code')) === text);
+const defRow = rowWithCode('def greet(name):');
+check(!!defRow, 'the def line renders');
+const defCode = defRow.querySelector('.diff-code');
+check(textOf(defCode.querySelector('.tok-keyword')) === 'def',
+  'the def keyword is a token span, got ' + JSON.stringify(textOf(defCode)));
+check(textOf(defCode.querySelector('.tok-fn')) === 'greet',
+  'the function name is a token span, got ' + JSON.stringify(textOf(defCode)));
+const addCode = rowWithCode('    return f"hi {name}"  # note').querySelector('.diff-code');
+check(textOf(addCode.querySelector('.tok-keyword')) === 'return',
+  'return is a keyword, got ' + JSON.stringify(textOf(addCode)));
+check(!!addCode.querySelector('.tok-string'), 'the f-string is a string');
+check(textOf(addCode.querySelector('.tok-comment')) === '# note',
+  'the trailing comment is a comment, got ' + JSON.stringify(textOf(addCode)));
+for (const line of ['"""Doc line one', 'still the docstring', 'end of docstring"""']) {
+  const row = rowWithCode(line);
+  check(!!row, 'the docstring line renders: ' + line);
+  const spans = row.querySelector('.diff-code').children.filter((c) => c.tagName !== '#TEXT');
+  check(spans.length > 0 && spans.every((s) => s.classList.contains('tok-string')),
+    'every span on a docstring line is a string: ' + line);
+}
+
+/* 16g0. HTML, Markdown, JSON and CSS use their own rules too. */
+const htmlTokens = HL('<div class="x">hi</div>', 'html', {}).tokens;
+check(tokOf(htmlTokens, '<div') && tokOf(htmlTokens, '<div').cls === 'tok-tag',
+  'an HTML tag is a tag, got ' + JSON.stringify(htmlTokens));
+check(tokOf(htmlTokens, 'class') && tokOf(htmlTokens, 'class').cls === 'tok-attr',
+  'an HTML attribute is an attribute, got ' + JSON.stringify(htmlTokens));
+check(tokOf(htmlTokens, '"x"') && tokOf(htmlTokens, '"x"').cls === 'tok-string',
+  'an HTML attribute value is a string, got ' + JSON.stringify(htmlTokens));
+const mdTokens = HL('## Title', 'markdown', {}).tokens;
+check(mdTokens.length === 1 && mdTokens[0].cls === 'tok-heading',
+  'a Markdown heading is a heading, got ' + JSON.stringify(mdTokens));
+const jsonTokens = HL('{"a": 1}', 'json', {}).tokens;
+check(tokOf(jsonTokens, '"a"') && tokOf(jsonTokens, '"a"').cls === 'tok-attr',
+  'a JSON key is an attribute, got ' + JSON.stringify(jsonTokens));
+check(tokOf(jsonTokens, '1') && tokOf(jsonTokens, '1').cls === 'tok-number',
+  'a JSON number is a number, got ' + JSON.stringify(jsonTokens));
+const cssTokens = HL('@media (min-width: 600px) {', 'css', {}).tokens;
+check(tokOf(cssTokens, '@media') && tokOf(cssTokens, '@media').cls === 'tok-keyword',
+  'a CSS at-rule is a keyword, got ' + JSON.stringify(cssTokens));
+check(tokOf(cssTokens, 'min-width') && tokOf(cssTokens, 'min-width').cls === 'tok-attr',
+  'a hyphenated CSS property is an attribute, got ' + JSON.stringify(cssTokens));
+
+/* 16g. A JavaScript and a CSS file in the same diff each use their own rules. */
+const mixedDiff = [
+  'diff --git a/app.js b/app.js',
+  '--- a/app.js',
+  '+++ b/app.js',
+  '@@ -1 +1 @@',
+  '-const x = 1; // note',
+  '+const x = 2; // note',
+  'diff --git a/site.css b/site.css',
+  '--- a/site.css',
+  '+++ b/site.css',
+  '@@ -1 +1 @@',
+  '-.a { color: red; }',
+  '+.a { color: blue; }',
+].join('\n');
+X.renderDiff({ range: 'card', diff: mixedDiff, truncated: false,
+               files: [{ path: 'app.js', additions: 1, deletions: 1 },
+                       { path: 'site.css', additions: 1, deletions: 1 }], review: null });
+const mixedRows = getEl('diff-body').querySelectorAll('.diff-row');
+const mixedRow = (text) => mixedRows.find((r) => codeText(r.querySelector('.diff-code')) === text);
+const jsRow = mixedRow('const x = 2; // note');
+check(!!jsRow, 'the JS line renders');
+check(textOf(jsRow.querySelector('.tok-keyword')) === 'const',
+  'const is a JS keyword, got ' + JSON.stringify(textOf(jsRow)));
+check(textOf(jsRow.querySelector('.tok-comment')) === '// note',
+  'the JS comment is a comment, got ' + JSON.stringify(textOf(jsRow)));
+const cssRow = mixedRow('.a { color: blue; }');
+check(!!cssRow, 'the CSS line renders');
+check(textOf(cssRow.querySelector('.tok-attr')) === 'color',
+  'the CSS property is an attribute, got ' + JSON.stringify(textOf(cssRow)));
+check(!cssRow.querySelector('.tok-keyword'),
+  'the CSS line has no JS keyword, got ' + JSON.stringify(textOf(cssRow)));
+
+/* 16h. An unknown extension renders plain, with no errors. */
+X.renderDiff({ range: 'card', diff: [
+  'diff --git a/notes.unknown b/notes.unknown',
+  '--- a/notes.unknown',
+  '+++ b/notes.unknown',
+  '@@ -1 +1 @@',
+  '-plain text here',
+  '+plain text there',
+].join('\n'), truncated: false, files: [], review: null });
+const unknownRow = getEl('diff-body').querySelectorAll('.diff-row')
+  .find((r) => codeText(r.querySelector('.diff-code')) === 'plain text there');
+check(!!unknownRow, 'the unknown-extension line renders');
+check(unknownRow.querySelector('.diff-code').children.every((c) => c.tagName === '#TEXT'
+    || !(c.className || '').split(/\s+/).some((k) => k.startsWith('tok-'))),
+  'an unknown extension renders no token spans, got '
+  + JSON.stringify(unknownRow.querySelector('.diff-code').children.map((c) => c.className)));
+
+/* 16i. Token colours and the word-diff tint coexist: the changed span keeps
+ *      its token colour, the word tint stays on the span. */
+X.renderDiff({ range: 'card', diff: [
+  'diff --git a/w.py b/w.py',
+  '--- a/w.py',
+  '+++ b/w.py',
+  '@@ -1 +1 @@',
+  '-return "cat"',
+  '+return "cut"',
+].join('\n'), truncated: false, files: [], review: null });
+const wRows = getEl('diff-body').querySelectorAll('.diff-row');
+const wAdd = wRows.find((r) => r.classList.contains('diff-row--add'));
+const wWord = wAdd.querySelector('.diff-word--add');
+check(!!wWord, 'the changed span is still marked');
+check(textOf(wWord) === 'u', 'the changed character is still the changed span, got '
+  + JSON.stringify(textOf(wWord)));
+check(!!wWord.querySelector('.tok-string'),
+  'the changed span keeps its token colour, got '
+  + JSON.stringify(wWord.children.map((c) => c.className)));
+
+/* 16k. Side-by-side keeps a state per column: the old side's docstring and the
+ *      new side's docstring are each coloured on every line. */
+X.state.diffMode = 'split';
+X.renderDiff({ range: 'card', diff: [
+  'diff --git a/doc.py b/doc.py',
+  '--- a/doc.py',
+  '+++ b/doc.py',
+  '@@ -1,3 +1,3 @@',
+  ' """old doc',
+  '-middle old',
+  '+middle new',
+  ' end"""',
+].join('\n'), truncated: false, files: [], review: null });
+const splitDocRows = getEl('diff-body').querySelectorAll('.diff-row--split');
+const splitCells = splitDocRows.flatMap((r) => r.querySelectorAll('.diff-cell'));
+const cellWithCode = (text) => splitCells.find((c) => codeText(c.querySelector('.diff-code')) === text);
+/* Every token class used under a node (a word-diff span may wrap one). */
+const tokClasses = (node) => {
+  const out = [];
+  const walk = (n) => {
+    for (const c of n.children) {
+      out.push(...(c.className || '').split(/\s+/).filter((k) => k.startsWith('tok-')));
+      walk(c);
+    }
+  };
+  walk(node);
+  return out;
+};
+for (const line of ['"""old doc', 'middle old', 'middle new', 'end"""']) {
+  const cell = cellWithCode(line);
+  check(!!cell, 'the split cell renders: ' + line);
+  const classes = tokClasses(cell);
+  check(classes.length > 0 && classes.every((c) => c === 'tok-string'),
+    'the split cell is a string on every line: ' + line + ', got ' + JSON.stringify(classes));
+}
+X.state.diffMode = 'unified';
+
+/* 16j. A 4000-line diff renders without a visible stall. */
+const bigDiff = ['diff --git a/big.py b/big.py', '--- a/big.py', '+++ b/big.py',
+                 '@@ -1,4000 +1,4000 @@'];
+for (let i = 0; i < 4000; i++) bigDiff.push(' def f' + i + '(x):  # comment ' + i);
+const bigStart = Date.now();
+X.renderDiff({ range: 'card', diff: bigDiff.join('\n'), truncated: false,
+               files: [{ path: 'big.py', additions: 0, deletions: 0 }], review: null });
+const bigMs = Date.now() - bigStart;
+check(bigMs < 1000, 'a 4000-line diff renders in well under a second, took ' + bigMs + 'ms');
+check(getEl('diff-body').querySelectorAll('.tok-keyword').length > 0,
+  'the big diff is highlighted');
 
 return { ok: failures.length === 0, failures };
 }

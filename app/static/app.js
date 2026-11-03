@@ -4524,6 +4524,446 @@ function applyDiffPalette() {
   diffPaletteBtn.classList.toggle('diff-tool--on', on);
 }
 
+/* ---------------- Syntax highlighting ---------------- */
+
+/* The diff is model-written text, so the tokenizer is hand-written and
+ * dependency-free: it scans one line into {text, cls} runs and carries the
+ * multi-line state (an open block comment, an open string) to the next line,
+ * so a Python docstring or a JS block comment is coloured on every line it
+ * spans. `cls` is '' for plain text. */
+
+const HIGHLIGHT_EXT = {
+  py: 'python', pyi: 'python',
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+  ts: 'javascript', tsx: 'javascript',
+  css: 'css', scss: 'css',
+  html: 'html', htm: 'html', svg: 'html', xml: 'html',
+  md: 'markdown', markdown: 'markdown',
+  json: 'json',
+};
+
+/* The language of a diffed file, from its path; anything unknown is plain. */
+function highlightLang(path) {
+  const m = /\.([A-Za-z0-9]+)$/.exec(path || '');
+  return (m && HIGHLIGHT_EXT[m[1].toLowerCase()]) || 'plain';
+}
+
+function highlightState() {
+  return { inBlockComment: false, inString: null };
+}
+
+/* Adjacent runs of the same class are merged: fewer spans, same colours. */
+function pushToken(tokens, text, cls) {
+  if (!text) return;
+  const last = tokens[tokens.length - 1];
+  if (last && last.cls === cls) last.text += text;
+  else tokens.push({ text, cls });
+}
+
+const PY_KEYWORDS = new Set(('False None True and as assert async await break class continue '
+  + 'def del elif else except finally for from global if import in is lambda nonlocal not '
+  + 'or pass raise return try while with yield').split(' '));
+
+const JS_KEYWORDS = new Set(('await break case catch class const continue debugger default '
+  + 'delete do else export extends finally for function if import in instanceof let new of '
+  + 'return static super switch this throw try typeof var void while with yield async '
+  + 'true false null undefined').split(' '));
+
+/* The per-language rules the shared code scanner reads. `multiline` lists the
+ * quotes that may stay open at the end of a line (a Python docstring, a JS
+ * template literal). */
+const CODE_RULES = {
+  python: {
+    keywords: PY_KEYWORDS,
+    lineComment: '#',
+    blockComment: null,
+    quotes: ['"""', "'''", '"', "'"],
+    multiline: new Set(['"""', "'''"]),
+    fnCall: true,
+    css: false,
+    json: false,
+  },
+  javascript: {
+    keywords: JS_KEYWORDS,
+    lineComment: '//',
+    blockComment: ['/*', '*/'],
+    quotes: ['"', "'", '`'],
+    multiline: new Set(['`']),
+    fnCall: true,
+    css: false,
+    json: false,
+  },
+  css: {
+    keywords: new Set(),
+    lineComment: null,
+    blockComment: ['/*', '*/'],
+    quotes: ['"', "'"],
+    multiline: new Set(),
+    fnCall: false,
+    css: true,
+    json: false,
+  },
+  json: {
+    keywords: new Set(['true', 'false', 'null']),
+    lineComment: null,
+    blockComment: null,
+    quotes: ['"'],
+    multiline: new Set(),
+    fnCall: false,
+    css: false,
+    json: true,
+  },
+};
+
+/* Where the string opened at `from` closes, or -1 when it runs past the line.
+ * A backslash escapes the next character, so `'it\'s'` stays one string. */
+function stringEnd(text, from, quote) {
+  let i = from;
+  while (i < text.length) {
+    if (text[i] === '\\') { i += 2; continue; }
+    if (text.startsWith(quote, i)) return i + quote.length;
+    i++;
+  }
+  return -1;
+}
+
+/* The end of the whitespace run that starts at `i`. */
+function spaceEnd(text, i) {
+  let j = i + 1;
+  while (j < text.length && /\s/.test(text[j])) j++;
+  return j;
+}
+
+const NUMBER_RE = /^(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?)/;
+const WORD_RE = /^[A-Za-z_$][\w$]*/;
+// CSS property names are hyphenated (`min-width`), so the dash stays inside.
+const CSS_WORD_RE = /^[A-Za-z_][\w-]*/;
+const OP_CHARS = '+-*/%=<>!&|^~@?';
+
+/* Python, JavaScript, CSS and JSON: one scanner, four rule sets. */
+function scanCode(text, state, rules) {
+  const tokens = [];
+  const n = text.length;
+  let i = 0;
+  // A state carried over from another language cannot open a block comment
+  // this one has no syntax for.
+  if (state.inBlockComment && !rules.blockComment) state.inBlockComment = false;
+  if (state.inBlockComment) {
+    const close = text.indexOf(rules.blockComment[1]);
+    if (close < 0) {
+      pushToken(tokens, text, 'tok-comment');
+      return tokens;
+    }
+    const end = close + rules.blockComment[1].length;
+    pushToken(tokens, text.slice(0, end), 'tok-comment');
+    state.inBlockComment = false;
+    i = end;
+  }
+  if (state.inString) {
+    const end = stringEnd(text, i, state.inString);
+    if (end < 0) {
+      pushToken(tokens, text.slice(i), 'tok-string');
+      return tokens;
+    }
+    pushToken(tokens, text.slice(i, end), 'tok-string');
+    state.inString = null;
+    i = end;
+  }
+  // CSS: after a declaration's colon the identifiers are values, not selectors.
+  let inValue = false;
+  while (i < n) {
+    const ch = text[i];
+    if (/\s/.test(ch)) {
+      const j = spaceEnd(text, i);
+      pushToken(tokens, text.slice(i, j), '');
+      i = j;
+      continue;
+    }
+    if (rules.lineComment && text.startsWith(rules.lineComment, i)) {
+      pushToken(tokens, text.slice(i), 'tok-comment');
+      break;
+    }
+    if (rules.blockComment && text.startsWith(rules.blockComment[0], i)) {
+      const close = text.indexOf(rules.blockComment[1], i + rules.blockComment[0].length);
+      if (close < 0) {
+        pushToken(tokens, text.slice(i), 'tok-comment');
+        state.inBlockComment = true;
+        break;
+      }
+      const end = close + rules.blockComment[1].length;
+      pushToken(tokens, text.slice(i, end), 'tok-comment');
+      i = end;
+      continue;
+    }
+    const quote = rules.quotes.find((q) => text.startsWith(q, i));
+    if (quote) {
+      const end = stringEnd(text, i + quote.length, quote);
+      if (end < 0) {
+        pushToken(tokens, text.slice(i), 'tok-string');
+        if (rules.multiline.has(quote)) state.inString = quote;
+        break;
+      }
+      // A JSON key is the string before the colon.
+      const isKey = rules.json && /^\s*:/.test(text.slice(end));
+      pushToken(tokens, text.slice(i, end), isKey ? 'tok-attr' : 'tok-string');
+      i = end;
+      continue;
+    }
+    if (rules.css && ch === '#' && /^#[0-9a-fA-F]{3,8}\b/.test(text.slice(i))) {
+      const m = /^#[0-9a-fA-F]{3,8}/.exec(text.slice(i));
+      pushToken(tokens, m[0], 'tok-number');
+      i += m[0].length;
+      continue;
+    }
+    if (rules.css && ch === '@') {
+      const m = /^@[\w-]+/.exec(text.slice(i));
+      if (m) {
+        pushToken(tokens, m[0], 'tok-keyword');
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (rules.css && ch === '!' && /^!important\b/.test(text.slice(i))) {
+      pushToken(tokens, '!important', 'tok-keyword');
+      i += '!important'.length;
+      continue;
+    }
+    if (/[0-9]/.test(ch) || (ch === '.' && /[0-9]/.test(text[i + 1] || ''))) {
+      const m = NUMBER_RE.exec(text.slice(i));
+      pushToken(tokens, m[0], 'tok-number');
+      i += m[0].length;
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(ch)) {
+      const word = (rules.css ? CSS_WORD_RE : WORD_RE).exec(text.slice(i))[0];
+      const after = text[i + word.length];
+      let cls = '';
+      if (rules.keywords.has(word)) cls = 'tok-keyword';
+      else if (rules.fnCall && after === '(') cls = 'tok-fn';
+      else if (rules.css && !inValue && after === ':') cls = 'tok-attr';
+      else if (rules.css && !inValue) cls = 'tok-tag';
+      pushToken(tokens, word, cls);
+      i += word.length;
+      continue;
+    }
+    if (OP_CHARS.includes(ch)) {
+      let j = i + 1;
+      while (j < n && OP_CHARS.includes(text[j])) j++;
+      pushToken(tokens, text.slice(i, j), 'tok-op');
+      i = j;
+      continue;
+    }
+    if ('()[]{},:.;'.includes(ch)) {
+      pushToken(tokens, ch, 'tok-punct');
+      if (rules.css) {
+        if (ch === ':') inValue = true;
+        else if (ch === ';' || ch === '{' || ch === '}') inValue = false;
+      }
+      i++;
+      continue;
+    }
+    pushToken(tokens, ch, '');
+    i++;
+  }
+  return tokens;
+}
+
+/* HTML: tags, attributes and quoted values; text between tags stays plain. */
+function scanHtml(text, state) {
+  const tokens = [];
+  const n = text.length;
+  let i = 0;
+  if (state.inBlockComment) {
+    const close = text.indexOf('-->');
+    if (close < 0) {
+      pushToken(tokens, text, 'tok-comment');
+      return tokens;
+    }
+    pushToken(tokens, text.slice(0, close + 3), 'tok-comment');
+    state.inBlockComment = false;
+    i = close + 3;
+  }
+  while (i < n) {
+    if (text.startsWith('<!--', i)) {
+      const close = text.indexOf('-->', i + 4);
+      if (close < 0) {
+        pushToken(tokens, text.slice(i), 'tok-comment');
+        state.inBlockComment = true;
+        break;
+      }
+      pushToken(tokens, text.slice(i, close + 3), 'tok-comment');
+      i = close + 3;
+      continue;
+    }
+    if (text[i] === '<') {
+      const tag = /^<\/?[A-Za-z][\w:-]*/.exec(text.slice(i));
+      if (tag) {
+        pushToken(tokens, text.slice(i, i + tag[0].length), 'tok-tag');
+        i += tag[0].length;
+        while (i < n && text[i] !== '>') {
+          const ch = text[i];
+          if (/\s/.test(ch)) {
+            const j = spaceEnd(text, i);
+            pushToken(tokens, text.slice(i, j), '');
+            i = j;
+          } else if (ch === '"' || ch === "'") {
+            const end = stringEnd(text, i + 1, ch);
+            const stop = end < 0 ? n : end;
+            pushToken(tokens, text.slice(i, stop), 'tok-string');
+            i = stop;
+          } else if (ch === '=') {
+            pushToken(tokens, ch, 'tok-op');
+            i++;
+          } else if (/[A-Za-z_:@-]/.test(ch)) {
+            const m = /^[A-Za-z_:@-][\w:.-]*/.exec(text.slice(i));
+            pushToken(tokens, m[0], 'tok-attr');
+            i += m[0].length;
+          } else {
+            pushToken(tokens, ch, 'tok-punct');
+            i++;
+          }
+        }
+        if (i < n) {
+          pushToken(tokens, '>', 'tok-tag');
+          i++;
+        }
+        continue;
+      }
+      const doctype = /^<![^>]*>/.exec(text.slice(i));
+      if (doctype) {
+        pushToken(tokens, doctype[0], 'tok-tag');
+        i += doctype[0].length;
+        continue;
+      }
+      pushToken(tokens, '<', 'tok-punct');
+      i++;
+      continue;
+    }
+    const next = text.indexOf('<', i);
+    const end = next < 0 ? n : next;
+    pushToken(tokens, text.slice(i, end), '');
+    i = end;
+  }
+  return tokens;
+}
+
+/* Markdown: headings, inline code, emphasis, links and list markers. */
+function scanMarkdown(text) {
+  const tokens = [];
+  if (/^#{1,6}\s/.test(text)) {
+    pushToken(tokens, text, 'tok-heading');
+    return tokens;
+  }
+  if (/^\s*(```|~~~)/.test(text)) {
+    pushToken(tokens, text, 'tok-comment');
+    return tokens;
+  }
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === '`') {
+      const close = text.indexOf('`', i + 1);
+      if (close > i) {
+        pushToken(tokens, text.slice(i, close + 1), 'tok-string');
+        i = close + 1;
+        continue;
+      }
+    }
+    if (ch === '[') {
+      const close = text.indexOf(']', i + 1);
+      if (close > i) {
+        pushToken(tokens, '[', 'tok-punct');
+        pushToken(tokens, text.slice(i + 1, close), 'tok-attr');
+        pushToken(tokens, ']', 'tok-punct');
+        i = close + 1;
+        if (text[i] === '(') {
+          const end = text.indexOf(')', i + 1);
+          if (end > i) {
+            pushToken(tokens, '(', 'tok-punct');
+            pushToken(tokens, text.slice(i + 1, end), 'tok-string');
+            pushToken(tokens, ')', 'tok-punct');
+            i = end + 1;
+          }
+        }
+        continue;
+      }
+    }
+    if ((ch === '-' || ch === '+' || ch === '*') && /^\s*$/.test(text.slice(0, i))) {
+      pushToken(tokens, ch, 'tok-punct');
+      i++;
+      continue;
+    }
+    if (ch === '>' && /^\s*$/.test(text.slice(0, i))) {
+      pushToken(tokens, ch, 'tok-punct');
+      i++;
+      continue;
+    }
+    if (ch === '*' || ch === '_') {
+      let j = i;
+      while (j < n && text[j] === ch) j++;
+      pushToken(tokens, text.slice(i, j), 'tok-keyword');
+      i = j;
+      continue;
+    }
+    let j = i + 1;
+    while (j < n && !'`[*_>'.includes(text[j])) j++;
+    pushToken(tokens, text.slice(i, j), '');
+    i = j;
+  }
+  return tokens;
+}
+
+/* One line -> {tokens, state}. `state` is mutated and returned, so a caller
+ * can thread one object through a file's rows. */
+function highlightLine(text, lang, state) {
+  const st = state || highlightState();
+  if (st.inBlockComment === undefined) st.inBlockComment = false;
+  if (st.inString === undefined) st.inString = null;
+  const line = text === null || text === undefined ? '' : String(text);
+  let tokens;
+  if (lang === 'html') tokens = scanHtml(line, st);
+  else if (lang === 'markdown') tokens = scanMarkdown(line);
+  else if (CODE_RULES[lang]) tokens = scanCode(line, st, CODE_RULES[lang]);
+  else tokens = [{ text: line, cls: '' }];
+  return { tokens, state: st };
+}
+
+/* Highlight one row and advance the file's multi-line state. Meta and hunk
+ * rows are diff metadata, not code, so they stay plain. */
+function highlightRow(row, hl) {
+  if (!hl || row.kind === 'meta' || row.kind === 'hunk') return null;
+  const res = highlightLine(row.text, hl.lang, hl.state);
+  hl.state = res.state;
+  return res.tokens;
+}
+
+/* Split the highlighted tokens by the word-diff segments. Both cover the same
+ * line, so walking them together keeps every character in exactly one run. */
+function tokenRuns(tokens, segments) {
+  if (!segments || !segments.length) {
+    return tokens.map((t) => ({ text: t.text, cls: t.cls, changed: false }));
+  }
+  const out = [];
+  let ti = 0;
+  let si = 0;
+  let toff = 0;
+  let soff = 0;
+  while (ti < tokens.length && si < segments.length) {
+    const tok = tokens[ti];
+    const seg = segments[si];
+    const take = Math.min(tok.text.length - toff, seg.text.length - soff);
+    if (take > 0) {
+      out.push({ text: tok.text.slice(toff, toff + take), cls: tok.cls, changed: seg.changed });
+      toff += take;
+      soff += take;
+    }
+    if (toff >= tok.text.length) { ti++; toff = 0; }
+    if (soff >= seg.text.length) { si++; soff = 0; }
+  }
+  return out;
+}
+
 function lineNumber(n) {
   return n === null || n === undefined ? '' : String(n);
 }
@@ -4534,22 +4974,29 @@ function diffMarker(kind) {
   return ' ';
 }
 
-/* The code cell: unchanged text is a bare TEXT NODE, a changed run is a span
- * around one. Either way the model-written text never goes through innerHTML. */
-function appendDiffCode(container, row) {
-  if (row.segments && row.segments.length) {
-    for (const segment of row.segments) {
-      if (segment.changed) {
-        const span = el('span', 'diff-word diff-word--' + row.kind);
-        span.appendChild(document.createTextNode(segment.text));
-        container.appendChild(span);
-      } else {
-        container.appendChild(document.createTextNode(segment.text));
-      }
-    }
+/* The code cell: the line is highlighted into token runs, then split by the
+ * word-diff segments. The token colour wins for the text and the word tint
+ * stays as the span's background, so both signals survive. Every run is a
+ * TEXT NODE — the model-written text never goes through innerHTML. */
+function appendDiffCode(container, row, tokens) {
+  if (row.text === '') {
+    container.appendChild(document.createTextNode(' '));
     return;
   }
-  container.appendChild(document.createTextNode(row.text === '' ? ' ' : row.text));
+  const runs = tokenRuns(tokens || [{ text: row.text, cls: '' }], row.segments);
+  for (const run of runs) {
+    if (!run.text) continue;
+    if (run.changed) {
+      const span = el('span', 'diff-word diff-word--' + row.kind);
+      if (run.cls) span.appendChild(el('span', run.cls, run.text));
+      else span.appendChild(document.createTextNode(run.text));
+      container.appendChild(span);
+    } else if (run.cls) {
+      container.appendChild(el('span', run.cls, run.text));
+    } else {
+      container.appendChild(document.createTextNode(run.text));
+    }
+  }
 }
 
 /* A meta or hunk line spans the full width: no line numbers, no marker. */
@@ -4575,7 +5022,7 @@ function collapsedRow(count, group) {
   return btn;
 }
 
-function renderUnifiedRow(row) {
+function renderUnifiedRow(row, tokens) {
   const div = el('div', 'diff-row diff-row--' + row.kind);
   const gutter = el('span', 'diff-gutter');
   gutter.appendChild(el('span', 'diff-ln diff-ln--old', lineNumber(row.oldLine)));
@@ -4583,7 +5030,7 @@ function renderUnifiedRow(row) {
   gutter.appendChild(el('span', 'diff-marker', diffMarker(row.kind)));
   div.appendChild(gutter);
   const code = el('span', 'diff-code');
-  appendDiffCode(code, row);
+  appendDiffCode(code, row, tokens);
   div.appendChild(code);
   return div;
 }
@@ -4597,19 +5044,23 @@ function appendCollapsed(container, count, items, renderItem) {
   container.appendChild(group);
 }
 
-function renderUnifiedRows(container, rows) {
+/* `hl` is the file's highlighter: its language plus the multi-line state the
+ * rows advance in order (hidden collapsed rows included, so the state stays
+ * right when they are expanded). */
+function renderUnifiedRows(container, rows, hl) {
+  const renderRow = (row) => renderUnifiedRow(row, highlightRow(row, hl));
   for (const item of collapseContext(rows)) {
     if (item.type === 'collapsed') {
-      appendCollapsed(container, item.rows.length, item.rows, renderUnifiedRow);
+      appendCollapsed(container, item.rows.length, item.rows, renderRow);
     } else if (item.row.kind === 'meta' || item.row.kind === 'hunk') {
       container.appendChild(renderFullRow(item.row));
     } else {
-      container.appendChild(renderUnifiedRow(item.row));
+      container.appendChild(renderRow(item.row));
     }
   }
 }
 
-function renderSplitCell(row, side) {
+function renderSplitCell(row, side, tokens) {
   const kind = row ? row.kind : 'empty';
   const cell = el('span', 'diff-cell diff-cell--' + kind + ' diff-cell--' + side);
   const gutter = el('span', 'diff-gutter');
@@ -4618,25 +5069,32 @@ function renderSplitCell(row, side) {
   gutter.appendChild(el('span', 'diff-marker', row ? diffMarker(row.kind) : ' '));
   cell.appendChild(gutter);
   const code = el('span', 'diff-code');
-  if (row) appendDiffCode(code, row);
+  if (row) appendDiffCode(code, row, tokens);
   cell.appendChild(code);
   return cell;
 }
 
-function renderSplitRow(pair) {
+/* Side-by-side is two files at once — the old side and the new side — so each
+ * column carries its own multi-line state. */
+function renderSplitRow(pair, oldHl, newHl) {
   if (pair.full) return renderFullRow(pair.left);
   const div = el('div', 'diff-row diff-row--split');
-  div.appendChild(renderSplitCell(pair.left, 'old'));
-  div.appendChild(renderSplitCell(pair.right, 'new'));
+  div.appendChild(renderSplitCell(pair.left, 'old',
+    pair.left ? highlightRow(pair.left, oldHl) : null));
+  div.appendChild(renderSplitCell(pair.right, 'new',
+    pair.right ? highlightRow(pair.right, newHl) : null));
   return div;
 }
 
-function renderSplitRows(container, rows) {
+function renderSplitRows(container, rows, hl) {
+  const oldHl = { lang: hl.lang, state: highlightState() };
+  const newHl = { lang: hl.lang, state: highlightState() };
+  const renderPair = (pair) => renderSplitRow(pair, oldHl, newHl);
   for (const item of collapsePairs(alignHunkRows(rows))) {
     if (item.type === 'collapsed') {
-      appendCollapsed(container, item.pairs.length, item.pairs, renderSplitRow);
+      appendCollapsed(container, item.pairs.length, item.pairs, renderPair);
     } else {
-      container.appendChild(renderSplitRow(item.pair));
+      container.appendChild(renderPair(item.pair));
     }
   }
 }
@@ -4662,14 +5120,17 @@ function renderDiffFile(file) {
   });
   section.appendChild(head);
   section.appendChild(rowsEl);
+  // The language comes from the file path in the diff header; an unknown
+  // extension is plain, so it renders exactly as before.
+  const hl = { lang: highlightLang(file.path), state: highlightState() };
   for (const block of file.blocks) {
     if (block.type === 'meta') {
       rowsEl.appendChild(renderFullRow(block.row));
       continue;
     }
     if (block.header) rowsEl.appendChild(renderFullRow(block.header));
-    if (effectiveDiffMode() === 'split') renderSplitRows(rowsEl, block.rows);
-    else renderUnifiedRows(rowsEl, block.rows);
+    if (effectiveDiffMode() === 'split') renderSplitRows(rowsEl, block.rows, hl);
+    else renderUnifiedRows(rowsEl, block.rows, hl);
   }
   return section;
 }
