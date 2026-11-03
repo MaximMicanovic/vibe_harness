@@ -68,9 +68,9 @@ lives in one stack at a time.
 | `list_stacks` | The board's stacks: id, col, title, `ids` (bottom → top). | — | array of stacks |
 | `create_stack` | New stack from at least two cards, all in one column. Cards already stacked elsewhere are moved here. | `title`, `card_ids` (≥ 2), `col` (default: the first card's column) | the stack |
 | `update_stack` | Rename a stack and/or replace its members (keeps id and header). | `stack_id`, `title`, `card_ids` (≥ 2) | the stack |
-| `delete_stack` | Dissolve a stack; its cards stay on the board. | `stack_id` | the deleted stack |
+| `delete_stack` | Dissolve a stack; its cards stay on the board. | `stack_id` | `{deleted: <stack_id>, cards: [card ids]}` |
 | `stack_cards` | The way to move cards: add them to `stack_id`, or create a stack when it is omitted (then pass `title`). Cards must be in the stack's column. | `card_ids`, `stack_id` (optional), `title` (for a new stack) | the stack |
-| `unstack_card` | Pull one card out of its stack; a stack left with a single card is dissolved. | `card_id` | the card |
+| `unstack_card` | Pull one card out of its stack; a stack left with a single card is dissolved. | `card_id` | `{stack, dissolved, card_id}` — `stack` is null when the pile dissolved |
 
 ### Archives
 
@@ -83,9 +83,9 @@ slug) so different kinds can live side by side.
 | `create_archive` | Create an archive folder with a manifest. | `name` (unique; becomes the folder slug), `type` (default `cards`), `description` | the archive |
 | `list_archives` | Archives newest first: id, name, type, item count, archived stacks. | `type` (optional filter) | array of archives |
 | `get_archive` | One archive: manifest plus its archived cards (`items`). | `archive_id` | the archive |
-| `archive_card` | Move a card into an archive; it leaves the board. Only **accepted** cards can leave the board (409 otherwise); an archived card can move between archives. | `card_id`, `archive_id` | the archive item |
-| `archive_cards` | Same, batched — a whole stack of accepted cards in one call. Every board card must be accepted. | `card_ids`, `archive_id` | the archive |
-| `archive_stack` | Retire a whole stack in one call: its cards move into the archive, the stack is recorded in the manifest (`archived_stacks`: title + card order) and dissolved. Without `archive_id` an archive named after the stack (type `deck`) is created or reused — one archive per retired stack. | `stack_id`, `archive_id` (optional) | the archive |
+| `archive_card` | Move a card into an archive; it leaves the board. Only **accepted** cards can leave the board (409 otherwise); an archived card can move between archives. | `card_id`, `archive_id` | `{archive, cards: [moved cards]}` |
+| `archive_cards` | Same, batched — a whole stack of accepted cards in one call. Every board card must be accepted. | `card_ids`, `archive_id` | `{archive, cards: [moved cards]}` |
+| `archive_stack` | Retire a whole stack in one call: its cards move into the archive, the stack is recorded in the manifest (`archived_stacks`: title + card order) and dissolved. Without `archive_id` an archive named after the stack (type `deck`) is created or reused — one archive per retired stack. | `stack_id`, `archive_id` (optional) | `{stack, archive, cards: [moved cards]}` |
 | `restore_card` | Bring an archived card back to the board (Accepted column, history intact). | `card_id` | the card |
 
 ### Transcripts
@@ -99,10 +99,10 @@ slug) so different kinds can live side by side.
 
 | Tool | What it does | Arguments | Returns |
 |---|---|---|---|
-| `list_models` | The model aliases a card can be put on, plus which model each role currently uses. A card's own model wins for its own sessions; a card without one inherits the worker role's model. | — | `{models: [{alias, label, backend, thinking}], roles: [{role, model, backend, inherited}], default_model, card}` |
+| `list_models` | The model aliases the board offers (the same list the role pickers use), plus which model each role currently uses. Sessions resolve their model from the **role** — worker, reviewer or resolver — so this is the list that decides what actually runs. | — | `{models: [{alias, label, backend, thinking}], roles: [{role, model, backend, inherited}], default_model, card}` |
 | `list_projects` | Registered projects (name + path). Read-only by design. | — | array of `{name, path}` |
 | `list_templates` | Card templates usable with `create_card`. | — | array of templates |
-| `stats` | Counts by status, total tokens, total/avg runtime. | `project` (optional) | the stats object |
+| `stats` | Counts by status, total tokens, total/avg runtime. | `project` (optional) | `{counts, total_tokens, live_tokens, token_breakdown, total_runtime_seconds, avg_runtime_seconds, project}` |
 
 ### Talking to the user
 
@@ -240,4 +240,8 @@ was allowed, read `config.enabled_tools` in its `export.json`
 - **`model` is not in the published schema.** `create_card`/`update_card` read
   a `model` argument in the implementation and `list_models` advertises it, but
   neither schema declares it (`additionalProperties: false`), so a strict
-  client rejects it. Pin a card's model on the dashboard instead.
+  client rejects it.
+- **A card's `model` field is stored, not applied.** The board's per-card
+  picker writes `card.model`, but `SessionRunner._session_model` resolves every
+  session from its role's model (`models.json`), so pinning a card does not
+  change what runs today. Set the model on the role instead.

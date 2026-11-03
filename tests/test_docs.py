@@ -38,6 +38,14 @@ def _rows(section: str) -> set[str]:
     return {m.group(1) for line in section.splitlines() if (m := ROW.match(line))}
 
 
+def _row(text: str, tool: str) -> str:
+    """The table row documenting one tool (its first cell is the tool name)."""
+    for line in text.splitlines():
+        if (m := ROW.match(line)) and m.group(1) == tool:
+            return line
+    raise AssertionError(f"no table row for {tool!r}")
+
+
 def _env_vars_in_config() -> set[str]:
     return set(re.findall(r"VIBE_HARNESS_[A-Z0-9_]+", (ROOT / "app" / "config.py").read_text()))
 
@@ -149,3 +157,22 @@ def test_projects_doc_documents_the_setup_and_the_transcript_store():
 
 def test_route_md_documents_syntax_highlighting():
     assert "syntax highlighting" in ROUTE.read_text().lower()
+
+
+def test_mcptools_list_models_does_not_claim_a_per_card_override():
+    """The runner resolves the ROLE's model, never the card's.
+
+    `SessionRunner._session_model` reads `_role_model(kind)` only: a card's
+    `model` field is stored (the board's picker writes it) but no session ever
+    reads it, so the reference doc must not promise a per-card override — the
+    reviewer rejected the previous round for exactly that claim.
+
+    If the runner ever honours the card's model, this test fails and the row
+    has to be updated with it.
+    """
+    text = MCPTOOLS.read_text()
+    row = _row(text, "list_models")
+    assert "wins for its own sessions" not in row
+    assert "role" in row.lower()
+    # ...and the gotcha must not send the model to a per-card pin either.
+    assert "Pin a card's model" not in text
