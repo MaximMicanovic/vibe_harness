@@ -102,14 +102,17 @@ def _git_conflict(git: dict, resolver: dict) -> dict | None:
     return None
 
 
-def _model_rejected(session: dict, review: dict) -> dict | None:
+def _model_rejected(session: dict, review: dict, resolver: dict) -> dict | None:
     """The backend refused the role's model: the session never ran.
 
-    Recorded by the runner as `session.model_error` (worker/resolver) or
-    `review.model_error` (reviewer). It outranks everything downstream — a
-    review that "said no" because its model was rejected is not a rejection.
+    Recorded by the runner as `session.model_error` (worker),
+    `review.model_error` (reviewer) or `resolver.model_error` (merge resolver).
+    It outranks everything downstream — a review that "said no" because its
+    model was rejected is not a rejection, and a resolver that "failed" because
+    its model was refused is not a merge conflict.
     """
-    detail = session.get("model_error") or review.get("model_error")
+    detail = (session.get("model_error") or review.get("model_error")
+              or resolver.get("model_error"))
     if not detail:
         return None
     return _failure("model_rejected", str(detail))
@@ -182,7 +185,7 @@ def classify(card: dict) -> dict | None:
 
     # 3. the backend refused the role's model: nothing ran, so nothing else
     #    that follows can explain the failure better.
-    rejected = _model_rejected(session, review)
+    rejected = _model_rejected(session, review, resolver)
     if rejected is not None:
         return rejected
 

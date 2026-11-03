@@ -210,6 +210,18 @@ def test_model_rejected_from_a_review_round():
     assert "claude-nope" in out["detail"]
 
 
+def test_model_rejected_from_a_resolver():
+    """A resolver whose model was refused names the model, instead of reporting
+    a bare exit code that hides the dropped choice."""
+    out = classify(card(status="done", session={
+        "git": {"merge_conflict": True, "branch": "harness/abc"},
+        "resolver": {"exit_code": 1,
+                     "model_error": "the backend rejected the model 'claude-nope'"},
+    }))
+    assert out["kind"] == "model_rejected"
+    assert "claude-nope" in out["detail"]
+
+
 # ----------------------------------------------------------------- priority
 
 def test_stopped_by_user_beats_timeout():
@@ -462,16 +474,20 @@ def test_runner_records_a_rejected_model(tmp_path):
 
 
 def test_runner_records_a_rejected_review_model(tmp_path):
-    """The reviewer's model is refused too: the review round says so instead of
-    looking like a reviewer that simply said no."""
+    """The reviewer's model is refused: the round fails at once, naming the
+    model. Retrying the same model would fail identically, so it must not spend
+    a fixer + review round per loop step."""
     e = _claude_env(tmp_path, {"worker": "claude-sonnet-4-6",
                                "review": "claude-nope"},
-                    script=FAKE_CLAUDE_BAD_REVIEW_MODEL, max_review_rounds=1)
+                    script=FAKE_CLAUDE_BAD_REVIEW_MODEL)
     with e.client:
         c = create_card(e.client, title="Bad review model")
         e.client.post(f"/api/cards/{c['id']}/run")
-        final = wait_for_status(e.client, c["id"], {"done"})
-        review = final["session"]["review"]
-        assert "claude-nope" in review["model_error"]
-        assert final["session"]["failure"]["kind"] == "model_rejected"
-        assert "claude-nope" in final["session"]["failure"]["detail"]
+        final = wait_for_status(e.client, c["id"], {"failed"})
+        session = final["session"]
+        assert "claude-nope" in session["review"]["model_error"]
+        assert session["failure"]["kind"] == "model_rejected"
+        assert "claude-nope" in session["failure"]["detail"]
+        # One review round, and no fixer round after it.
+        assert session["review_rounds"] == 1
+        assert not (e.sessions_dir / c["id"] / "run-2").exists()

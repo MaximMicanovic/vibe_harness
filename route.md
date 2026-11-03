@@ -333,8 +333,12 @@ The choice is passed for **every** spawn — worker (`run-N`), reviewer
 backend's default. A model the backend refuses (Claude answers `not_found_error`
 and exits non-zero) fails the round with `stop_reason: model_error` and a
 `model_rejected` failure naming the model; it never falls back to the default
-and looks successful. `GET/PUT /api/models` is the API; `app/models.py` owns the
-store. The orchestrator role is offered but disabled: nothing would use it.
+and looks successful. A refused **review** model fails the card at once instead
+of looping a fixer + review round per step (the same model would fail
+identically), and a refused **resolver** model is named in the failure detail
+rather than reported as a bare exit code. `GET/PUT /api/models` is the API;
+`app/models.py` owns the store. The orchestrator role is offered but disabled:
+nothing would use it.
 
 ## 4. Write cards so the first run succeeds
 

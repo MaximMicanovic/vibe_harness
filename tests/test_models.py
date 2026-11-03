@@ -339,6 +339,33 @@ def test_spawned_resolver_gets_the_resolver_model(tmp_path, monkeypatch):
     assert cmd[cmd.index("--model") + 1] == "zai-glm-5-3-flash"
 
 
+def test_resolver_records_a_rejected_model(tmp_path):
+    """A refused resolver model is recorded on the resolver's own record, so
+    the failure detail can name it instead of a bare exit code."""
+    models = ModelSettings(tmp_path / "models.json")
+    models.update({"resolver": "claude-nope"})
+    runner = _claude_runner(tmp_path, models)
+    card = runner.store.create("A card", "spec")
+    runner.store.set_status(card["id"], "running")
+    runner.store.set_status(card["id"], "done", session_patch={
+        "resolver": {"pid": 1, "round": 1},
+        "git": {"branch": "harness/abc", "merge_conflict": True},
+    })
+    rdir = runner.sessions_dir / card["id"] / "resolve-1"
+    rdir.mkdir(parents=True)
+    (rdir / "session.log").write_text(
+        'API Error: 404 {"type":"error","error":{"type":"not_found_error",'
+        '"message":"model: claude-nope"}}\n', encoding="utf-8")
+
+    entry = {"proc": SimpleNamespace(wait=lambda: 1), "kind": "resolve",
+             "round": 1, "model": "claude-nope"}
+    runner._record_resolver_outcome(card["id"], entry)
+
+    session = runner.store.get(card["id"])["session"]
+    assert "claude-nope" in session["resolver"]["model_error"]
+    assert "claude-nope" in session["git"]["resolver_error"]
+
+
 # ----------------------------------------------------------------------
 # HTTP API
 # ----------------------------------------------------------------------

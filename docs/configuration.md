@@ -55,4 +55,7 @@ The choice is passed for every spawn — worker, reviewer and resolver — so no
 role silently runs on the backend's default. If the backend refuses the model
 (Claude answers `not_found_error` and exits non-zero), the round fails with
 `stop_reason: model_error` and a `model_rejected` failure whose detail names the
-model; it never falls back to the default and looks successful.
+model; it never falls back to the default and looks successful. A refused
+review model fails the card immediately rather than looping a fixer + review
+round per step, and a refused resolver model is named in the failure detail
+instead of a bare exit code.

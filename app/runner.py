@@ -2465,6 +2465,15 @@ class SessionRunner:
                 if entry.get("timed_out"):
                     stopped_patch["timed_out"] = True
                 self.store.set_status(card_id, "stopped", session_patch=stopped_patch)
+            elif model_error:
+                # The reviewer never ran: its model was refused. Retrying the
+                # same model would fail identically, so fail the round now
+                # instead of spending a fixer + review round per loop step.
+                self.store.set_status(card_id, "failed", session_patch={
+                    "review": review_record,
+                    "finished_at": now_iso(),
+                    **review_patch,
+                })
             elif approved:
                 # Loop step 2a: approved -> done, then auto-accept if asked.
                 done = self.store.set_status(card_id, "done", session_patch={
