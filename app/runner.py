@@ -158,29 +158,31 @@ def merge_token_breakdown(recorded: dict | None, live: dict | None,
     return out
 
 # Rule block telling spawned models about the harness MCP: judge first whether
-# the spec is too big for one session and, if so, split it into cards.
+# the spec is too big for one session and, if so, split it into cards. Every
+# tool name is built from `mcp_name` (VIBE_HARNESS_MCP_SERVER_NAME) so renaming
+# the server leaves no stale tool names in the prompt.
 def mcp_rules(mcp_name: str) -> str:
     return (
         f"- You are connected to this harness dashboard through the `{mcp_name}` MCP "
-        f"server (tool group `mcp_{mcp_name}`, tools like `harness_list_cards`, "
-        "`harness_create_card`, `harness_run_card`, ...). Use it to talk to the board.\n"
+        f"server (tool group `mcp_{mcp_name}`, tools like `{mcp_name}_list_cards`, "
+        f"`{mcp_name}_create_card`, `{mcp_name}_run_card`, ...). Use it to talk to the board.\n"
         "- FIRST judge whether this spec is too big for one session. If it is, split "
-        "it: create one card per subtask with `harness_create_card` (new cards start "
+        f"it: create one card per subtask with `{mcp_name}_create_card` (new cards start "
         "as drafts and inherit this card's project; set auto_run=true to run one "
-        "immediately, or leave it in draft and run it later with `harness_run_card`). "
+        f"immediately, or leave it in draft and run it later with `{mcp_name}_run_card`). "
         "The MCP has no way to create, delete, or switch projects.\n"
         "- To chain sub-cards so one runs after another completes (done/accepted), "
-        "link them with `harness_add_dependency(card_id=<dependent>, "
-        "depends_on=<this card>)` — the dependent starts automatically when this "
-        "card completes; see `harness_list_dependencies`.\n"
-        "- To archive finished work, use the archive tools: `harness_create_archive` "
-        "(a typed folder under archives/), `harness_archive_card` / "
-        "`harness_archive_cards` (move accepted cards — or a whole deck of them — "
-        "into an archive; they leave the board), `harness_list_archives` / "
-        "`harness_get_archive` (see what is archived), and `harness_restore_card` "
+        f"link them with `{mcp_name}_add_dependency(card_id=<dependent>, "
+        f"depends_on=<this card>)` — the dependent starts automatically when this "
+        f"card completes; see `{mcp_name}_list_dependencies`.\n"
+        f"- To archive finished work, use the archive tools: `{mcp_name}_create_archive` "
+        f"(a typed folder under archives/), `{mcp_name}_archive_card` / "
+        f"`{mcp_name}_archive_cards` (move accepted cards — or a whole deck of them — "
+        f"into an archive; they leave the board), `{mcp_name}_list_archives` / "
+        f"`{mcp_name}_get_archive` (see what is archived), and `{mcp_name}_restore_card` "
         "(bring a card back to the board).\n"
-        f"- When the spec is genuinely ambiguous and a wrong guess would be costly, "
-        f"ask the user with `harness_ask_user(question=..., options=[...])`: the "
+        "- When the spec is genuinely ambiguous and a wrong guess would be costly, "
+        f"ask the user with `{mcp_name}_ask_user(question=..., options=[...])`: the "
         "question appears ON THIS CARD'S CARD on the dashboard and the tool call "
         "BLOCKS until the user answers on the card (or cancels, or the timeout hits). "
         "The result carries the answer (status \"answered\"), or status "
@@ -365,13 +367,19 @@ def review_prompt_template(body: str, diff: str | None = None,
                            diff_range: str | None = None,
                            test_output: str | None = None,
                            duplication: list[dict] | None = None,
-                           duplication_root: Path | None = None) -> str:
+                           duplication_root: Path | None = None,
+                           *, mailbox: bool = True) -> str:
     """Fresh-reviewer prompt, scoped small on purpose: the
     spec + the diff since the last reviewed commit + the harness-run test
-    output + the mechanical duplication report. The reviewer may ask the
-    persistent worker questions through the harness-mailbox MCP tools and must
-    submit a structured verdict via `submit_verdict` (VERDICT: text is only a
-    fallback).
+    output + the mechanical duplication report. When `mailbox` is set, the
+    reviewer may also question the persistent worker through the
+    harness-mailbox MCP tools and must submit a structured verdict via
+    `submit_verdict` (VERDICT: text is only a fallback).
+
+    `mailbox` must be set only for sessions that actually have the mailbox
+    (backend vibe — the server is attached via the worktree's .vibe/config.toml,
+    which only Vibe reads); on other backends the VERDICT: log line is the only
+    verdict channel.
 
     `duplication` is the precomputed clone report (tests pass it directly);
     when it is None the report is computed here — for the files the diff
@@ -414,24 +422,37 @@ def review_prompt_template(body: str, diff: str | None = None,
         "against the spec. You may also run the project's test suite in the "
         "workspace yourself; a failing test suite means rejection. Do NOT modify "
         "any source files; this is a read-only review.\n\n"
-        "## Mailbox (MCP)\n\n"
-        "The `harness-mailbox` MCP server is attached to this session with tools:\n"
-        "- `post_message(to, text)` — message the other party (`to` is `worker` "
-        "or `reviewer`).\n"
-        "- `wait_for_message()` — block until a message addressed to you arrives.\n"
-        "- `submit_verdict(approved, reason)` — submit your final verdict.\n\n"
-        "The worker session persists across fix rounds and remembers the earlier "
-        "context: if anything in the diff is unclear, ask it with "
-        "`post_message(to=\"worker\", ...)` and then `wait_for_message()` instead "
-        "of guessing.\n\n"
-        "When you are done, you MUST call "
-        "`submit_verdict(approved=<true|false>, reason=<one sentence>)` — the "
-        "harness reads that structured call as your verdict. As a fallback, also "
-        "end your final answer with exactly one line, either:\n"
-        "VERDICT: APPROVED\n"
-        "or:\n"
-        "VERDICT: REJECTED: <one-sentence reason>\n"
     )
+    if mailbox:
+        parts.append(
+            "## Mailbox (MCP)\n\n"
+            "The `harness-mailbox` MCP server is attached to this session with tools:\n"
+            "- `post_message(to, text)` — message the other party (`to` is `worker` "
+            "or `reviewer`).\n"
+            "- `wait_for_message()` — block until a message addressed to you arrives.\n"
+            "- `submit_verdict(approved, reason)` — submit your final verdict.\n\n"
+            "The worker session persists across fix rounds and remembers the earlier "
+            "context: if anything in the diff is unclear, ask it with "
+            "`post_message(to=\"worker\", ...)` and then `wait_for_message()` instead "
+            "of guessing.\n\n"
+            "When you are done, you MUST call "
+            "`submit_verdict(approved=<true|false>, reason=<one sentence>)` — the "
+            "harness reads that structured call as your verdict. As a fallback, also "
+            "end your final answer with exactly one line, either:\n"
+            "VERDICT: APPROVED\n"
+            "or:\n"
+            "VERDICT: REJECTED: <one-sentence reason>\n"
+        )
+    else:
+        # No mailbox on this session (only Vibe reads the worktree's
+        # .vibe/config.toml): the VERDICT: line in the log is the verdict.
+        parts.append(
+            "When you are done, end your final answer with exactly one line, "
+            "either:\n"
+            "VERDICT: APPROVED\n"
+            "or:\n"
+            "VERDICT: REJECTED: <one-sentence reason>\n"
+        )
     return "".join(parts)
 
 
@@ -671,7 +692,7 @@ class SessionRunner:
             self._spawn(card_id, kind="run",
                         prompt=prompt_template(card["body"], self._mcp_name(),
                                                tdd=self.config.tdd,
-                                               mailbox=self.config.mailbox),
+                                               mailbox=self._prompt_mailbox("run", card)),
                         extra_patch=extra_patch or None,
                         workdir=workdir)
         return self.store.get(card_id)
@@ -679,6 +700,19 @@ class SessionRunner:
     def _mcp_name(self) -> str | None:
         """MCP server alias for prompts/env, or None when the MCP is disabled."""
         return self.config.mcp_server_name if self.config.mcp_enabled else None
+
+    def _prompt_mailbox(self, kind: str, card: dict | None = None,
+                        resume: str | None = None) -> bool:
+        """Whether this spawn's prompt may mention the mailbox MCP tools.
+
+        The mailbox server is attached via the worktree's `.vibe/config.toml`,
+        which only Vibe reads — a session on another backend has no mailbox
+        tools, so its prompts must not instruct it to call them. Gated on the
+        backend actually used for that spawn (the same resolution `_spawn`
+        performs), plus the mailbox kill-switch.
+        """
+        return (self.config.mailbox
+                and self._session_backend(kind, card, resume).key == "vibe")
 
     def _role_choice(self, kind: str) -> dict:
         """The model + backend one session kind resolves to.
@@ -2308,7 +2342,8 @@ class SessionRunner:
                                                    self._mcp_name(),
                                                    resumed=bool(resume),
                                                    tdd=self.config.tdd,
-                                                   mailbox=self.config.mailbox),
+                                                   mailbox=self._prompt_mailbox(
+                                                       "run", card, resume)),
                         extra_patch=extra, resume=resume)
 
     # -------------------------------------------------------------- finalize
@@ -2486,7 +2521,9 @@ class SessionRunner:
                                 prompt=review_prompt_template(card["body"],
                                                               diff_text, diff_range,
                                                               test_tail,
-                                                              duplication_root=ws),
+                                                              duplication_root=ws,
+                                                              mailbox=self._prompt_mailbox(
+                                                                  "review", card)),
                                 extra_patch=handover)
         else:  # review
             # Verdict channel 1 (preferred): the structured `submit_verdict`

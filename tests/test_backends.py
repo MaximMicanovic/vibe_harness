@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from app.backends import (
     BACKENDS,
     DEFAULT_BACKEND,
+    BackendError,
     ClaudeBackend,
     VibeBackend,
     describe_backends,
@@ -132,6 +133,180 @@ def test_claude_mcp_config_flag(config, tmp_path):
                                     ws=tmp_path, rdir=tmp_path, kind="run",
                                     resume=None, mcp_config=mcp)
     assert "--mcp-config" in cmd and str(mcp) in cmd
+
+
+# ----------------------------------------------------------------------
+# an allowlist must not hide the board MCP tools (on either backend)
+# ----------------------------------------------------------------------
+
+def _enabled_tools_flags(cmd: list[str]) -> list[str]:
+    return [cmd[i + 1] for i, c in enumerate(cmd) if c == "--enabled-tools"]
+
+
+def test_vibe_allowlist_keeps_the_board_mcp_tools(config, tmp_path):
+    config.enabled_tools = ["Read", "Bash"]
+    cmd = VibeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                  ws=tmp_path, rdir=tmp_path, kind="run",
+                                  resume=None, mcp_config=None)
+    flags = _enabled_tools_flags(cmd)
+    assert "Read" in flags and "Bash" in flags
+    assert f"{config.mcp_server_name}_*" in flags
+
+
+def test_claude_allowlist_keeps_the_board_mcp_tools(config, tmp_path):
+    """Claude names MCP tools `mcp__<server>__<tool>`, so the allowlist entry
+    that keeps the board tools alive is the `mcp__<name>__*` equivalent of
+    Vibe's `<name>_*`."""
+    config.enabled_tools = ["Read", "Bash"]
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="run",
+                                    resume=None, mcp_config=None)
+    tools = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert tools[:2] == ["Read", "Bash"]
+    assert f"mcp__{config.mcp_server_name}__*" in tools
+
+
+def test_claude_allowlist_uses_the_configured_server_name(config, tmp_path):
+    config.enabled_tools = ["Read"]
+    config.mcp_server_name = "board"
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="run",
+                                    resume=None, mcp_config=None)
+    tools = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert "mcp__board__*" in tools
+    assert "mcp__harness__*" not in tools
+
+
+def test_claude_allowlist_without_the_mcp_adds_no_pattern(config, tmp_path):
+    config.enabled_tools = ["Read"]
+    config.mcp_enabled = False
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="run",
+                                    resume=None, mcp_config=None)
+    tools = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert tools == ["Read"]
+
+
+def test_claude_review_never_gets_allowed_tools(config, tmp_path):
+    """The review pass is read-only via --tools, not via an allowlist."""
+    config.enabled_tools = ["Read"]
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="review",
+                                    resume=None, mcp_config=None)
+    assert "--allowedTools" not in cmd
+
+
+# ----------------------------------------------------------------------
+# APPROVE: a typo must fail loudly, not silently downgrade the approval mode
+# ----------------------------------------------------------------------
+
+def test_vibe_rejects_an_unrecognised_approve_value(config, tmp_path):
+    config.approve = "atuo"  # typo: must not silently become --smart-approve
+    with pytest.raises(BackendError, match="APPROVE"):
+        VibeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                ws=tmp_path, rdir=tmp_path, kind="run",
+                                resume=None, mcp_config=None)
+
+
+def test_vibe_smart_approve_is_an_explicit_value(config, tmp_path):
+    config.approve = "smart"
+    cmd = VibeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                  ws=tmp_path, rdir=tmp_path, kind="run",
+                                  resume=None, mcp_config=None)
+    assert "--smart-approve" in cmd
+    assert "--auto-approve" not in cmd
+
+
+def test_claude_run_rejects_an_unrecognised_approve_value(config, tmp_path):
+    config.approve = "yes-please"
+    with pytest.raises(BackendError, match="APPROVE"):
+        ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                  ws=tmp_path, rdir=tmp_path, kind="run",
+                                  resume=None, mcp_config=None)
+
+
+def test_claude_review_keeps_default_permission_mode_for_any_approve(config, tmp_path):
+    """Review sessions are always --permission-mode default regardless of
+    APPROVE — that behaviour is kept, so a stray value must not error there."""
+    config.approve = "yes-please"
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="review",
+                                    resume=None, mcp_config=None)
+    assert cmd[cmd.index("--permission-mode") + 1] == "default"
+
+
+# ----------------------------------------------------------------------
+# REVIEW_AGENT is a Vibe-only flag (--agent): on Claude it must not be
+# silently ignored
+# ----------------------------------------------------------------------
+
+def test_claude_review_rejects_a_configured_review_agent(config, tmp_path):
+    config.review_agent = "my-reviewer"
+    with pytest.raises(BackendError, match="REVIEW_AGENT"):
+        ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                  ws=tmp_path, rdir=tmp_path, kind="review",
+                                  resume=None, mcp_config=None)
+
+
+def test_claude_review_runs_with_the_default_review_agent(config, tmp_path):
+    cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                    ws=tmp_path, rdir=tmp_path, kind="review",
+                                    resume=None, mcp_config=None)
+    assert cmd[cmd.index("--permission-mode") + 1] == "default"
+    assert "--tools" in cmd
+
+
+def test_vibe_review_uses_the_configured_review_agent(config, tmp_path):
+    config.review_agent = "my-reviewer"
+    cmd = VibeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
+                                  ws=tmp_path, rdir=tmp_path, kind="review",
+                                  resume=None, mcp_config=None)
+    assert cmd[cmd.index("--agent") + 1] == "my-reviewer"
+
+
+# ----------------------------------------------------------------------
+# the time limit: native on Vibe, watched by the harness on Claude — never both
+# ----------------------------------------------------------------------
+
+def test_time_limit_is_watched_only_without_a_native_limit(tmp_path, monkeypatch):
+    """One enforcement per spawn: Vibe gets --time-limit and no watcher;
+    Claude gets no flag and exactly one harness watcher (not double-applied)."""
+    for key, expect_watch in (("vibe", False), ("claude", True)):
+        store = CardStore(tmp_path / f"cards-{key}")
+        settings = SettingsStore(tmp_path / f"settings-{key}.json")
+        settings.set_backend(key)
+        config = Config(vibe_bin=str(tmp_path / "vibe"),
+                        claude_bin=str(tmp_path / "claude"),
+                        time_limit_seconds=30, mailbox=False)
+        runner = SessionRunner(store, config,
+                               sessions_dir=tmp_path / f"sessions-{key}",
+                               settings=settings)
+        watched: list[str] = []
+        monkeypatch.setattr(runner, "_watch_time_limit",
+                            lambda card_id, proc: watched.append(card_id))
+        captured: dict = {}
+
+        class FakeProc:
+            pid = 4242
+            def poll(self):
+                return 0
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return FakeProc()
+
+        monkeypatch.setattr("app.runner.subprocess.Popen", fake_popen)
+        monkeypatch.setattr(runner, "_finalize", lambda *a, **k: None)
+        card = store.create("C", "spec")
+        runner._spawn(card["id"], kind="run", prompt="P")
+        if expect_watch:
+            assert watched == [card["id"]]
+            assert "--time-limit" not in captured["cmd"]
+        else:
+            assert watched == []
+            assert "--time-limit" in captured["cmd"]
 
 
 # ----------------------------------------------------------------------

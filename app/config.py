@@ -28,6 +28,13 @@ def resolve_path(raw: str) -> Path:
     return p.resolve()
 
 
+#: Default VIBE_HARNESS_REVIEW_AGENT. Vibe's read-only builtin `ask` agent; the
+#: setting is Vibe-only (--agent) — Claude review sessions are read-only via
+#: --tools/--permission-mode and reject a non-default value instead of
+#: silently ignoring it (see app/backends.py).
+DEFAULT_REVIEW_AGENT = "ask"
+
+
 @dataclass
 class Config:
     host: str = "127.0.0.1"
@@ -43,7 +50,7 @@ class Config:
     # (docs/configuration.md). No app code reads it — __post_init__ folds it
     # into test_cmd — so it stays only for configs written before the rename.
     accept_cmd: str | None = None
-    review_agent: str = "ask"               # read-only builtin agent for the review pass
+    review_agent: str = DEFAULT_REVIEW_AGENT  # read-only agent for the review pass (vibe only)
     max_review_rounds: int = 5              # cap on review/fix loop rounds per card
     git_branch_prefix: str = "harness"      # per-card git branch prefix (<prefix>/<card_id>)
     accept_mode: str = "local"              # "local" -> merge on accept | "pr" -> push + open a PR
@@ -122,7 +129,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         test_cmd=env.get("VIBE_HARNESS_TEST_CMD") or None,
         test_timeout_seconds=int(env.get("VIBE_HARNESS_TEST_TIMEOUT", "600")),
         accept_cmd=env.get("VIBE_HARNESS_ACCEPT_CMD") or None,
-        review_agent=env.get("VIBE_HARNESS_REVIEW_AGENT", "ask"),
+        review_agent=env.get("VIBE_HARNESS_REVIEW_AGENT", DEFAULT_REVIEW_AGENT),
         max_review_rounds=int(env.get("VIBE_HARNESS_MAX_REVIEW_ROUNDS", "5")),
         git_branch_prefix=env.get("VIBE_HARNESS_GIT_BRANCH_PREFIX", "harness"),
         accept_mode=_accept_mode(env.get("VIBE_HARNESS_ACCEPT_MODE")),

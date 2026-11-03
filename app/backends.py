@@ -21,11 +21,24 @@ import json
 import shutil
 from pathlib import Path
 
-from app.config import Config
+from app.config import DEFAULT_REVIEW_AGENT, Config
 
 
 class BackendError(Exception):
     """The backend cannot run (missing CLI, unusable config)."""
+
+
+#: The recognised VIBE_HARNESS_APPROVE values. Anything else used to silently
+#: downgrade to the weaker approval mode; a typo must fail the spawn instead.
+APPROVE_MODES = ("auto", "smart")
+
+
+def check_approve(approve: str) -> None:
+    """Raise BackendError for an unrecognised VIBE_HARNESS_APPROVE value."""
+    if approve not in APPROVE_MODES:
+        raise BackendError(
+            f"VIBE_HARNESS_APPROVE={approve!r} is not recognised "
+            f"(expected one of: {', '.join(APPROVE_MODES)})")
 
 
 class Backend:
@@ -115,6 +128,9 @@ class VibeBackend(Backend):
             cmd += ["--agent", config.review_agent]
         elif config.agent:
             cmd += ["--agent", config.agent]
+        # "auto" approves everything, "smart" asks; anything else is a typo
+        # and must fail the spawn rather than silently downgrade.
+        check_approve(config.approve)
         cmd += (["--auto-approve"] if config.approve == "auto"
                 else ["--smart-approve"])
         enabled = list(config.enabled_tools)
@@ -174,16 +190,30 @@ class ClaudeBackend(Backend):
             # Claude's own dollar cap (print mode only).
             cmd += ["--max-budget-usd", str(config.max_price_usd)]
         if kind == "review":
-            # Read-only: no tool that can write.
+            # Read-only: no tool that can write. REVIEW_AGENT is a Vibe-only
+            # flag (--agent); a configured value must fail loudly here rather
+            # than be silently ignored.
+            if config.review_agent != DEFAULT_REVIEW_AGENT:
+                raise BackendError(
+                    f"VIBE_HARNESS_REVIEW_AGENT={config.review_agent!r} applies "
+                    "to the vibe backend only (--agent); the claude review pass "
+                    "is read-only via --tools/--permission-mode")
             cmd += ["--tools", ",".join(self.REVIEW_TOOLS)]
             cmd += ["--permission-mode", "default"]
         else:
             # Runs are unattended, so they need the same "approve everything"
             # the harness gives Vibe.
+            check_approve(config.approve)
             cmd += ["--permission-mode",
                     "bypassPermissions" if config.approve == "auto" else "auto"]
-            if config.enabled_tools:
-                cmd += ["--allowedTools", ",".join(config.enabled_tools)]
+            allowed = list(config.enabled_tools)
+            if allowed and config.mcp_enabled:
+                # The Vibe equivalent is `<mcp_server_name>_*`; Claude names
+                # MCP tools `mcp__<server>__<tool>`, so this pattern keeps the
+                # board tools available even under a tool allowlist.
+                allowed.append(f"mcp__{config.mcp_server_name}__*")
+            if allowed:
+                cmd += ["--allowedTools", ",".join(allowed)]
         if mcp_config is not None:
             cmd += ["--mcp-config", str(mcp_config)]
         return cmd
