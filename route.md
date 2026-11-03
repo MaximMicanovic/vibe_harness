@@ -414,12 +414,20 @@ The cheapest token is the one never spent:
   cards/agents to find your expensive routes.
 - **Session transcripts cost nothing to keep, and nothing to route:** each
   round's `export/session/` (journal + chunks, ~4.7 MB per round) is tarred,
-  gzipped and moved into `transcripts.db` when the round finalizes
-  (`app/transcripts.py`), so `sessions/` no longer grows by ~1 GB of loose
-  files. `export.json` stays in place — the token numbers above are read from
-  it exactly as before. `POST /api/transcripts/backfill` imports the rounds
-  written before the store existed; `GET /api/transcripts/stats` reports the
-  rows and the compression ratio. Reading a transcript back
+  gzipped and moved into the store of the card's PROJECT when the round
+  finalizes (`app/transcripts.py`), so `sessions/` no longer grows by ~1 GB of
+  loose files. The store is `<project>/.vibe-harness/transcripts.db`, so a
+  project's transcripts live with it and leave with it; a card with no project
+  (a sandbox run) uses `<harness root>/.vibe-harness/transcripts.db`, and
+  `VIBE_HARNESS_TRANSCRIPTS_DB` still forces one explicit store for everything.
+  `.vibe-harness/` is added to the project's `.git/info/exclude` (local-only —
+  the tracked `.gitignore` is never touched), so storing a transcript never
+  dirties the repo or costs a commit. `export.json` stays in place — the token
+  numbers above are read from it exactly as before.
+  `POST /api/transcripts/backfill` imports the rounds written before the store
+  existed into each card's project store; `GET /api/transcripts/stats` reports
+  one row per store (project + harness) plus the totals and the compression
+  ratio. Reading a transcript back
   (`GET /api/cards/<id>/transcripts/<round>/events`, or the MCP
   `harness_get_transcript`) is a local SQLite read — no model spend.
 - **Per-round verdicts:** `session.reviews` keeps every round's record
