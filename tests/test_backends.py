@@ -118,13 +118,13 @@ def test_claude_review_cannot_write(config, tmp_path):
     assert "Edit" not in tools and "Write" not in tools
 
 
-def test_claude_resume_and_budget(config, tmp_path):
-    config.max_price_usd = 2.5
+def test_claude_resume(config, tmp_path):
     cmd = ClaudeBackend().build_cmd(config=config, prompt_path=tmp_path / "p.md",
                                     ws=tmp_path, rdir=tmp_path, kind="run",
                                     resume="abc-123", mcp_config=None)
     assert "--resume" in cmd and "abc-123" in cmd
-    assert "--max-budget-usd" in cmd and "2.5" in cmd
+    # No price flags: the harness never caps spend (subscription), only time.
+    assert not any(a.startswith("--max-") for a in cmd)
 
 
 def test_claude_mcp_config_flag(config, tmp_path):
@@ -371,7 +371,7 @@ def test_vibe_export_passes_through(tmp_path):
 def test_claude_result_is_normalized(tmp_path):
     raw = {
         "type": "result", "subtype": "success", "is_error": False,
-        "session_id": "abc", "num_turns": 7, "total_cost_usd": 0.25,
+        "session_id": "abc", "num_turns": 7,
         "usage": {"input_tokens": 100, "output_tokens": 40,
                   "cache_read_input_tokens": 900, "cache_creation_input_tokens": 60},
         "modelUsage": {"claude-sonnet-4-6": {}},
@@ -386,7 +386,6 @@ def test_claude_result_is_normalized(tmp_path):
     assert out["usage"]["total_tokens"] == 1060 + 40
     assert out["session_id"] == "abc"
     assert out["steps"] == 7
-    assert out["cost_usd"] == 0.25
     assert out["config"]["active_model"] == "claude-sonnet-4-6"
     assert out["outcome"] == "finished"
 

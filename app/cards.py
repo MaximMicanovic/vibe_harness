@@ -50,7 +50,7 @@ COMPLETED_STATUSES = ("accepted",)
 # set to None before a session_patch is merged in.
 SESSION_KEYS = (
     "pid", "started_at", "finished_at", "exit_code", "verified",
-    "model", "tokens", "cost_usd", "stop_reason", "workdir", "log", "export_dir",
+    "model", "tokens", "stop_reason", "workdir", "log", "export_dir",
     "review", "reviews", "review_rounds", "git", "resolver", "test_output",
     "mailbox", "worker_session_id", "last_reviewed_commit",
     # The growth signal: lines added / removed by the card branch against its
@@ -103,9 +103,6 @@ def card_from_post(post: frontmatter.Post) -> dict:
         # worker that splits its spec into sub-cards makes them children of the
         # card it is working on, so the board can show the tree.
         "parent_id": (str(md["parent_id"]) if md.get("parent_id") else None),
-        # Per-card model override: this card's own sessions run on it instead
-        # of the role's model. None = inherit the role (or the user's own).
-        "model": (str(md["model"]) if md.get("model") else None),
         "session": md.get("session"),
         # archive bookkeeping (set when the card lives in an archive folder)
         "archived": bool(md.get("archived", False)),
@@ -199,8 +196,7 @@ class CardStore:
                auto_run: bool = False, auto_accept: bool = False,
                project: str | None = None,
                workdir: str | None = None,
-               parent_id: str | None = None,
-               model: str | None = None) -> dict:
+               parent_id: str | None = None) -> dict:
         card_id = secrets.token_hex(3)
         now = _now()
         if parent_id:
@@ -219,7 +215,6 @@ class CardStore:
             "workdir": workdir,
             "depends_on": [],
             "parent_id": parent_id,
-            "model": (model or None),
             "session": None,
         }
         path = self.cards_dir / f"{_slugify(title)}-{card_id}.md"
@@ -231,7 +226,6 @@ class CardStore:
                auto_accept: bool | None = None,
                project: str | None = None, workdir: str | None = None,
                parent_id: str | None = None,
-               model: str | None = None,
                expected_updated_at: str | None = None) -> dict:
         post = self._get_post(card_id)
         card = self._card_from_post(post)
@@ -270,12 +264,6 @@ class CardStore:
                 md["parent_id"] = parent_id
             else:
                 md.pop("parent_id", None)
-        if model is not None:
-            # "" clears the override: the card goes back to its role's model.
-            if model:
-                md["model"] = model
-            else:
-                md.pop("model", None)
         if changed and card["status"] in FINISHED_STATUSES:
             # Editing a finished card resets it: a re-run starts fresh.
             md["status"] = "draft"
@@ -446,7 +434,7 @@ class CardStore:
                             session_patch: dict | None = None) -> dict:
         """accepted -> draft after a revert: the card is back on the board as a
         draft and `accepted` is cleared, but the SESSION IS KEPT (tokens, logs,
-        reviews, git) so the cost record of the accepted run survives. The
+        reviews, git) so the token record of the accepted run survives. The
         revert bookkeeping (`reverted_at`, `revert_commit`) is merged in."""
         return self.set_status(card_id, "draft", session_patch=session_patch)
 

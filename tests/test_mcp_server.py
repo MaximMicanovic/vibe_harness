@@ -54,7 +54,7 @@ mkdir -p "$workdir"
 echo 'print("hello")' > "$workdir/hello.py"
 mkdir -p "$outdir"
 cat > "$outdir/export.json" <<'EOF'
-{"cost_usd": 0.01, "usage": {"total_tokens": 42}, "config": {"active_model": "fake-model"}, "stop_reason": "end_turn", "outcome": "success"}
+{"usage": {"total_tokens": 42}, "config": {"active_model": "fake-model"}, "stop_reason": "end_turn", "outcome": "success"}
 EOF
 if [ "$agent" = "ask" ]; then
   echo "VERDICT: APPROVED"

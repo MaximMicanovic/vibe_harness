@@ -40,7 +40,6 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 8734
     time_limit_seconds: int = 1800
-    max_price_usd: float | None = None      # None = no price cap
     agent: str | None = None                # Vibe agent: builtin or ~/.vibe/agents/NAME.toml
     approve: str = "auto"                   # "auto" -> --auto-approve | "smart" -> --smart-approve
     enabled_tools: list[str] = field(default_factory=list)  # allowlist -> repeated --enabled-tools
@@ -123,14 +122,10 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     allowed_workdirs = [str(Path(a).expanduser().resolve())
                        for a in raw_allowed.split(",") if a.strip()]
 
-    raw_price = env.get("VIBE_HARNESS_MAX_PRICE", "")
-    max_price = float(raw_price) if raw_price else None
-
     return Config(
         host=env.get("VIBE_HARNESS_HOST", "127.0.0.1"),
         port=int(env.get("VIBE_HARNESS_PORT", "8734")),
         time_limit_seconds=int(env.get("VIBE_HARNESS_TIME_LIMIT", "1800")),
-        max_price_usd=max_price,
         agent=env.get("VIBE_HARNESS_AGENT") or None,
         approve=env.get("VIBE_HARNESS_APPROVE", "auto"),
         enabled_tools=enabled_tools,

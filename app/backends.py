@@ -121,8 +121,6 @@ class VibeBackend(Backend):
                 "--workdir", str(ws),
                 "--output-dir", str(rdir / "export"),
                 "--time-limit", str(config.time_limit_seconds)]
-        if config.max_price_usd is not None:
-            cmd += ["--max-price", str(config.max_price_usd)]
         if kind == "review":
             # The reviewer is a read-only pass; never the configured agent.
             cmd += ["--agent", config.review_agent]
@@ -186,9 +184,6 @@ class ClaudeBackend(Backend):
             cmd += ["--model", model]
         if resume:
             cmd += ["--resume", resume]
-        if config.max_price_usd is not None:
-            # Claude's own dollar cap (print mode only).
-            cmd += ["--max-budget-usd", str(config.max_price_usd)]
         if kind == "review":
             # Read-only: no tool that can write. REVIEW_AGENT is a Vibe-only
             # flag (--agent); a configured value must fail loudly here rather
@@ -267,7 +262,6 @@ class ClaudeBackend(Backend):
                 "total_tokens": total_in + output,
             },
             "session_id": raw.get("session_id"),
-            "cost_usd": raw.get("total_cost_usd"),
             "steps": raw.get("num_turns"),
             "config": {"active_model": models[0] if models else None},
             "stop_reason": raw.get("terminal_reason"),

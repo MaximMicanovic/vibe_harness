@@ -17,7 +17,6 @@
   --chip-bg: rgba(0, 0, 0, 0.08);
   --chip-ink: #333;
   --chip-tokens-bg: #e8e8f5;
-  --chip-cost-bg: #e4f0e4;
   --chip-model-bg: rgba(0, 0, 0, 0.14);
   --chip-workdir-bg: #e8f0e4;
   --card-ink: #2b2b2b;
@@ -71,7 +70,6 @@ html.dark {
   --chip-bg: rgba(255, 255, 255, 0.12);
   --chip-ink: #d8dbe0;
   --chip-tokens-bg: #3a4060;
-  --chip-cost-bg: #2f4a38;
   --chip-model-bg: rgba(255, 255, 255, 0.16);
   --chip-workdir-bg: #37422f;
   --card-ink: #ece9df;
@@ -1108,9 +1106,6 @@ body {
 
 .chip-tokens { background: var(--chip-tokens-bg); }
 
-/* Cost chip: same pill, a money-green tint so it reads apart from tokens. */
-.chip-cost { background: var(--chip-cost-bg); }
-
 /* Live token chip on a card with a running session: same look, gently pulsing
  * border so it reads as "updating", not static.
  *
@@ -1548,37 +1543,6 @@ html.dark .chip-diff-stat { background: #312e5a; color: #c7d2fe; }
 .tag-project {
   background: #2f3542;
   color: #fff;
-}
-
-/* The model picker on a card: a chip-sized select, so a card's model is
- * visible and changeable without opening the editor. */
-.card-model {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-}
-
-.card-model-select {
-  font: inherit;
-  font-size: 10.5px;
-  line-height: 1.4;
-  padding: 1px 4px;
-  max-width: 150px;
-  border: 1px dashed var(--border-soft);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--heading-muted);
-  cursor: pointer;
-}
-
-.card-model-select:hover {
-  background: var(--pill-bg);
-  color: var(--ink);
-}
-
-/* A pinned model is a real choice, not the default: make it stand out. */
-.card-model-select:not([value=""]) {
-  border-style: solid;
 }
 
 /* Split tree: a card's parent and its sub-cards. Buttons, because clicking

@@ -35,7 +35,6 @@ from .prompts import (
     now_iso,
     review_prompt_template,
 )
-from app.tokens import export_cost_usd
 
 
 # Grace period between SIGTERM and SIGKILL when stopping a session.
@@ -581,9 +580,6 @@ class SuperviseMixin:
         # Per-type breakdown (cached/output/input) for the token-counter hover
         # tooltip; None when the export carries only a total.
         token_breakdown = export_token_breakdown(usage) if isinstance(usage, dict) else None
-        # The round's USD cost from the same export (None when the backend
-        # reported none); persisted per round, summed per card by card_cost_usd.
-        cost_usd = export_cost_usd(export)
         export_config = export.get("config") or export.get("effective_config") or {}
         model = export_config.get("active_model") or export_config.get("model")
         stop_reason = export.get("stop_reason")
@@ -615,8 +611,6 @@ class SuperviseMixin:
             }
             if token_breakdown is not None:
                 outcome["token_breakdown"] = token_breakdown
-            if cost_usd is not None:
-                outcome["cost_usd"] = cost_usd
             if model_error:
                 outcome["model_error"] = model_error
             if worker_session_id:
@@ -732,8 +726,6 @@ class SuperviseMixin:
                 review_record["model_error"] = model_error
             if token_breakdown is not None:
                 review_record["token_breakdown"] = token_breakdown
-            if cost_usd is not None:
-                review_record["cost_usd"] = cost_usd
             # Supervision bookkeeping: which commit this review covered (the
             # next review diffs from it) and how many mailbox messages were
             # exchanged so far.

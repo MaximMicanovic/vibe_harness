@@ -16,7 +16,6 @@ from app.cards import CardNotFound, InvalidTransition
 from app.gitops import GitBusyError, GitError, GitMergeConflict
 from .prompts import export_token_breakdown, now_iso, resolve_prompt_template
 from .supervise import TestFailedError
-from app.tokens import export_cost_usd
 
 
 class AcceptMixin:
@@ -576,10 +575,6 @@ class AcceptMixin:
                            if isinstance(usage, dict) else None)
         if token_breakdown is not None:
             resolver_patch["token_breakdown"] = token_breakdown
-        # The resolver's own USD cost, same as its tokens.
-        resolver_cost = export_cost_usd(export)
-        if resolver_cost is not None:
-            resolver_patch["cost_usd"] = resolver_cost
         # A refused model is why the merge is still conflicted: name it rather
         # than reporting a bare exit code.
         model_error = self._model_error(rdir, entry.get("model"), exit_code,

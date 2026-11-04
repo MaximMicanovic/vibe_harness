@@ -7,6 +7,8 @@ setting overrides it)..
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 from app.config import resolve_path
@@ -32,8 +34,14 @@ class ProjectStore:
         return data if isinstance(data, dict) else {}
 
     def _save(self, data: dict[str, dict]) -> None:
-        self.path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
-                             encoding="utf-8")
+        # Atomic write (temp file + os.replace), same as the other JSON
+        # stores: a crash mid-write must never corrupt projects.json. The
+        # temp name does not match the *.json readers glob.
+        tmp = self.path.with_name(
+            f"{self.path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, self.path)
 
     def list(self) -> list[dict]:
         data = self._load()

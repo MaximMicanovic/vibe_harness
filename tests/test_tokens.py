@@ -10,11 +10,9 @@ the live combination used while a session runs.
 from __future__ import annotations
 
 from app.tokens import (
-    card_cost_usd,
     card_token_breakdown,
     card_tokens,
     combine_live,
-    export_cost_usd,
 )
 
 
@@ -139,69 +137,6 @@ def test_breakdown_ignores_a_malformed_breakdown():
                "reviews": [{"token_breakdown": {"input": 5}}]}
     assert card_token_breakdown(session) == {
         "cached": None, "output": None, "input": 5}
-
-
-# ------------------------------------------------------------ card_cost_usd
-
-def test_cost_worker_only():
-    assert card_cost_usd({"cost_usd": 0.25}) == 0.25
-
-
-def test_cost_is_none_when_no_round_reports_one():
-    # Unknown, not zero: a card whose rounds never exported a cost has no
-    # cost number at all (the board shows no cost chip).
-    assert card_cost_usd(None) is None
-    assert card_cost_usd({}) is None
-    assert card_cost_usd({"tokens": 1000}) is None
-    assert card_cost_usd({"cost_usd": None}) is None
-
-
-def test_cost_sums_worker_review_and_resolver_rounds():
-    session = {"cost_usd": 0.10,
-               "reviews": [{"round": 1, "cost_usd": 0.02},
-                           {"round": 2, "cost_usd": 0.01}],
-               "resolver": {"round": 1, "cost_usd": 0.03}}
-    assert card_cost_usd(session) == 0.16
-
-
-def test_cost_legacy_card_without_a_reviews_list_uses_the_single_review_record():
-    session = {"cost_usd": 0.10, "review": {"round": 1, "cost_usd": 0.02}}
-    assert card_cost_usd(session) == 0.12
-
-
-def test_cost_the_reviews_list_wins_over_the_single_record():
-    # Counting both would double-count the last round.
-    session = {"cost_usd": 0.10,
-               "review": {"round": 2, "cost_usd": 0.01},
-               "reviews": [{"round": 1, "cost_usd": 0.02},
-                           {"round": 2, "cost_usd": 0.01}]}
-    assert card_cost_usd(session) == 0.13
-
-
-def test_cost_ignores_missing_and_non_numeric_round_costs():
-    session = {"cost_usd": 0.10,
-               "reviews": [{"round": 1}, {"round": 2, "cost_usd": None},
-                           {"round": 3, "cost_usd": "nope"}, {"round": 4, "cost_usd": 0.05}],
-               "resolver": {"round": 1, "cost_usd": True}}
-    assert card_cost_usd(session) == 0.15
-
-
-def test_cost_rounds_away_float_noise():
-    # 0.1 + 0.2 is 0.30000000000000004 in binary floats; the aggregate is a
-    # clean money number.
-    assert card_cost_usd({"cost_usd": 0.1, "reviews": [{"cost_usd": 0.2}]}) == 0.3
-
-
-# ----------------------------------------------------------- export_cost_usd
-
-def test_export_cost_usd_reads_the_normalized_export_key():
-    assert export_cost_usd({"cost_usd": 0.25}) == 0.25
-    assert export_cost_usd({"cost_usd": 0}) == 0.0
-    assert export_cost_usd({"usage": {"total_tokens": 42}}) is None
-    assert export_cost_usd({"cost_usd": None}) is None
-    assert export_cost_usd({"cost_usd": "0.25"}) is None
-    assert export_cost_usd({"cost_usd": True}) is None
-    assert export_cost_usd({}) is None
 
 
 # ---------------------------------------------------------------- combine_live

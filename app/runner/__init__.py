@@ -77,7 +77,7 @@ from app.models import ModelSettings
 from app.projects import ProjectStore
 from app.questions import QuestionStore
 from app.sleepguard import SleepGuard
-from app.tokens import TOKEN_BREAKDOWN_KEYS, card_cost_usd, card_token_breakdown, card_tokens, combine_live
+from app.tokens import TOKEN_BREAKDOWN_KEYS, card_token_breakdown, card_tokens, combine_live
 from app.transcripts import DB_FILENAME, HARNESS_DIR, TranscriptStore, project_store
 from app.settings import SettingsStore
 
@@ -601,8 +601,7 @@ class SessionRunner(QueueMixin, ReviewMixin, AcceptMixin, SuperviseMixin):
         `session.card_tokens` is what the card actually cost in tokens: the
         worker's export total plus every review and resolver round
         (`app/tokens.py`). The chip, /api/stats and /api/split-report all read
-        this one number, so they cannot disagree. `session.card_cost_usd` is
-        the same aggregate in USD (None when no round exported a cost).
+        this one number, so they cannot disagree.
 
         While a session is live, `session.live_tokens` is the per-card total
         shown on the card and summed into /api/stats: the live counter itself
@@ -632,11 +631,6 @@ class SessionRunner(QueueMixin, ReviewMixin, AcceptMixin, SuperviseMixin):
             card_breakdown = card_token_breakdown(session)
             if card_breakdown is not None:
                 new_session["card_token_breakdown"] = card_breakdown
-            card_cost = card_cost_usd(session)
-            # A card whose rounds never exported a cost keeps showing no cost
-            # chip, as before (None = unknown, not $0).
-            if card_cost is not None:
-                new_session["card_cost_usd"] = card_cost
             out["session"] = new_session
         live = self.live_usage(card["id"])
         if live is not None:
