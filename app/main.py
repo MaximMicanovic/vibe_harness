@@ -955,13 +955,14 @@ def create_app(config: Config | None = None,
 
     @app.get("/api/duplication")
     def duplication():
-        """The mechanical duplication report for this project's source.
+        """The mechanical duplication report for the harness's own source.
 
         The same detector the reviewer is handed (`app/dupes.py`), so "the
-        project is growing" is a number instead of an impression: every entry
+        codebase is growing" is a number instead of an impression: every entry
         is a block of at least six normalized lines that appears in two or more
-        places, with the file and line of each occurrence. Paths are relative
-        to the project root (`app/runner.py`), the same form a diff uses.
+        places, with the file and line of each occurrence. It always scans the
+        harness root (BASE_DIR), never the selected project. Paths are relative
+        to that root (`app/runner/`), the same form a diff uses.
         """
         clones = dupes.find_clones(BASE_DIR)
         return {"count": len(clones), "clones": clones}

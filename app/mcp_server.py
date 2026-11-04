@@ -208,8 +208,9 @@ TOOLS: list[dict] = [
     {
         "name": "update_card",
         "description": (
-            "Update a card's title/body/auto_run/auto_accept. Editing a "
-            "finished card resets it to draft. project/workdir are "
+            "Update a card's title/body/auto_run/auto_accept. Only a "
+            "title/body change on a finished card resets it to draft; "
+            "settings-only edits (auto_run/auto_accept) do not. project/workdir are "
             "intentionally not accepted (no project swapping through the "
             "MCP). " + _COMMON),
         "inputSchema": {
@@ -958,6 +959,10 @@ def _ask_default_timeout() -> float:
 def tool_ask_user(args: dict) -> object:
     """Post a question on the current card and block until the user
     answers (or cancels / the timeout hits); returns the answer to the model.
+
+    On the answered/cancelled path the tool result IS the raw question
+    record — its key is `id` (not `question_id`). On timeout it returns a
+    `{question_id, status: "timeout"}` summary instead.
 
     Implemented as create + long-poll against the dashboard API: the POST
     registers the pending question (rendered on the card), then repeated

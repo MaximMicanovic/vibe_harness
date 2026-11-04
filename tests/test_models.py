@@ -1,8 +1,8 @@
 """Tests for per-role model selection: app.models.ModelSettings + /api/models.
 
-The harness runs three kinds of session — the worker (run-N), the reviewer
-(review-N) and the merge-conflict resolver (resolve-N) — and each can run on a
-different model. Choosing a model IS choosing the platform: the model list
+The harness has four roles — the worker (run-N), the reviewer (review-N), the
+merge-conflict resolver (resolve-N) and the orchestrator (no session of its own
+yet) — and each can run on a different model. Choosing a model IS choosing the platform: the model list
 carries both backends, and picking one sets the backend for that role. Vibe has
 no --model flag, but its config layers put VIBE_* env vars above the user's
 config.toml, so the runner pins the choice per spawn with VIBE_ACTIVE_MODEL;
