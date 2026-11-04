@@ -26,11 +26,17 @@ in the same repository can run concurrently:
    card is deleted or archived (``remove_card_worktree``). A conflict raises
    ``GitMergeConflict`` and the conflicted merge is LEFT IN PLACE in the main
    worktree (no abort) so the runner can spawn a resolver session there; the
-   card branch AND the linked worktree are kept.
+   card branch AND the linked worktree are kept. A dirty main worktree at
+   merge time (uncommitted changes, tracked or untracked) does not block the
+   merge either: they are stashed with ``git stash push -u`` — kept for
+   manual recovery, never popped automatically — and flagged ``stashed`` in
+   the session git record; only a merge already in progress is a hard error.
 5. ``revert_merge_commit`` — undo an accepted card: ``git revert`` its merge
    commit in the MAIN worktree. All-or-nothing: a conflict ABORTS the revert
    (nothing is left in place, no resolver is spawned) and raises
-   ``RevertConflict`` with the conflicting paths.
+   ``RevertConflict`` with the conflicting paths. A dirty main worktree does
+   not block the revert either: the changes are stashed the same way (kept
+   for manual recovery, flagged ``stashed`` in the session git record).
 
 Sandbox runs (``sessions/<id>/workspace``) do not use git: there is no project
 repository to branch from or merge into.
@@ -163,6 +169,19 @@ def is_dirty(cwd: Path) -> bool:
     return bool(run_git(["status", "--porcelain"], cwd).stdout.strip())
 
 
+def stash_dirty_worktree(cwd: Path, message: str) -> bool:
+    """If `cwd` has uncommitted changes — tracked OR untracked, anything
+    ``git status --porcelain`` counts — stash them with
+    ``git stash push -u -q -m <message>`` and return True; return False when
+    the tree is already clean. The stash is KEPT for manual recovery
+    (``git stash pop``) — it is never popped or dropped automatically, so a
+    stash that would conflict on pop never blocks whatever comes next."""
+    if not is_dirty(cwd):
+        return False
+    run_git(["stash", "push", "-u", "-q", "-m", message], cwd)
+    return True
+
+
 def branch_exists(cwd: Path, branch: str) -> bool:
     return run_git(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
                    cwd, check=False).returncode == 0
@@ -264,21 +283,19 @@ def prepare_card_branch(ws: Path, branch: str, worktree_path: Path) -> dict:
     stashed = False
     auto_stashed = False
     rerun = branch_exists(root, branch)
-    if is_dirty(root):
-        message = ("vibe-harness: leftover changes before re-run" if rerun else
-                   "vibe-harness: leftover changes stashed on first run "
-                   "(interrupted previous run?)")
-        run_git(["stash", "push", "-u", "-q", "-m", message], root)
+    message = ("vibe-harness: leftover changes before re-run" if rerun else
+               "vibe-harness: leftover changes stashed on first run "
+               "(interrupted previous run?)")
+    if stash_dirty_worktree(root, message):
         stashed = True
         auto_stashed = not rerun
     worktree_path = Path(worktree_path).resolve()
     # A stale worktree from an interrupted earlier run may hold uncommitted
     # work; stash it too (the stash lives in the repo) before dropping the
     # worktree, so nothing is lost on a re-run.
-    if worktree_path in registered_worktrees(root) and is_dirty(worktree_path):
-        run_git(["stash", "push", "-u", "-q", "-m",
-                 "vibe-harness: leftover changes in the card's worktree before re-run"],
-                worktree_path)
+    if worktree_path in registered_worktrees(root) and stash_dirty_worktree(
+            worktree_path,
+            "vibe-harness: leftover changes in the card's worktree before re-run"):
         stashed = True
     _drop_worktree_at(root, worktree_path)
     run_git(["worktree", "add", str(worktree_path), "-B", branch, base], root)
@@ -330,7 +347,7 @@ def _conflicted_paths(root: Path) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def revert_merge_commit(root: Path, sha: str) -> dict:
+def revert_merge_commit(root: Path, sha: str, git_info: dict | None = None) -> dict:
     """Undo an accepted card: ``git revert`` its merge commit in the MAIN
     worktree (the repo root, where the base branch is checked out) and return
     ``{revert_commit, reverted_commit, reverted_at}``.
@@ -338,6 +355,12 @@ def revert_merge_commit(root: Path, sha: str) -> dict:
     A merge commit is reverted with ``-m 1`` (the base branch side is the
     mainline); any other commit is reverted plainly — ``-m`` on a non-merge
     commit is an error.
+
+    A dirty main worktree does not block the revert: leftover uncommitted
+    changes (tracked or untracked) are stashed with ``git stash push -u`` —
+    kept for manual recovery, never popped automatically — and, when
+    `git_info` (the card's session git record) is passed, the stash is
+    recorded on it (``stashed=True``).
 
     All-or-nothing: a conflict ABORTS the revert and raises ``RevertConflict``
     carrying the conflicting paths, so the repository is left exactly as it
@@ -351,8 +374,9 @@ def revert_merge_commit(root: Path, sha: str) -> dict:
     if revert_in_progress(root):
         raise GitError(
             f"a revert is already in progress in {root} — finish or abort it first")
-    if is_dirty(root):
-        raise GitError(f"{root} has uncommitted changes — commit or stash them first")
+    if stash_dirty_worktree(root, f"vibe-harness: stashed before reverting {sha}"):
+        if git_info is not None:
+            git_info["stashed"] = True
     args = ["revert", "--no-edit"]
     if is_merge_commit(root, sha):
         args += ["-m", "1"]
@@ -430,12 +454,24 @@ def merge_card_branch(git_info: dict) -> dict:
     PLACE in the main worktree (no abort) so a resolver session can fix it
     there; the card branch AND the linked worktree are kept. Leaves the main
     worktree on the base branch.
+
+    A dirty main worktree does not block the merge: leftover uncommitted
+    changes (tracked or untracked — e.g. an untracked report.md, or a local
+    edit that appeared between run start and accept) are stashed with
+    ``git stash push -u`` — kept for manual recovery, never popped
+    automatically, so a stash that would conflict on pop cannot block the
+    merge — and the stash is recorded on the card's session git record
+    (``git_info["stashed"] = True``). Only a merge already in progress is a
+    hard error (it belongs to a resolver).
     """
     root = Path(git_info["repo"])
     branch = git_info["branch"]
     base = git_info["base_branch"]
-    if is_dirty(root):
-        raise GitError(f"{root} has uncommitted changes — commit or stash them first")
+    if merge_in_progress(root):
+        raise GitError(f"a merge is in progress in {root} — resolve it before "
+                       f"merging {branch}")
+    if stash_dirty_worktree(root, f"vibe-harness: stashed before merging {branch}"):
+        git_info["stashed"] = True
     run_git(["checkout", "-q", base], root)
     before = run_git(["rev-parse", "HEAD"], root).stdout.strip()
     proc = run_git(["merge", "--no-ff", "--no-edit", "--quiet", branch], root,

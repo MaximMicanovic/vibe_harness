@@ -192,6 +192,11 @@ class AcceptMixin:
         for cards that record it there). A card accepted before merge commits
         were recorded has nothing to revert -> GitError (409).
 
+        A dirty main worktree does not block the revert: uncommitted changes
+        (tracked or untracked) are stashed with ``git stash push -u`` — kept
+        for manual recovery, never popped automatically — and flagged
+        ``stashed`` in ``session.git``.
+
         The revert is all-or-nothing: a conflict aborts it and raises
         ``RevertConflict`` (409, with the conflicting paths) — no conflicted
         revert is left in place and no resolver session is spawned. On
@@ -217,7 +222,10 @@ class AcceptMixin:
             raise GitError(
                 f"card {card_id!r} has no repository on record — its merge "
                 "commit cannot be reverted")
-        result = gitops.revert_merge_commit(Path(root), merge_commit)
+        # git_info rides along so a dirty main worktree stashed at revert time
+        # is flagged `stashed` on the card's session git record (the patch
+        # below spreads git_info into it).
+        result = gitops.revert_merge_commit(Path(root), merge_commit, git_info=git_info)
         reopened = self.store.reopen_after_revert(card_id, {
             "reverted_at": result["reverted_at"],
             "revert_commit": result["revert_commit"],
