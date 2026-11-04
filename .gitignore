@@ -26,3 +26,6 @@ projects.json
 # prompts this board was driven with. Local only — never published.
 NOTES.md
 settings.json
+
+# Local one-command snapshots (app/backup.py): never published.
+backups/
