@@ -173,7 +173,7 @@ def test_project_store_save_is_atomic(tmp_path, monkeypatch):
 
 
 def test_card_store_write_is_atomic(tmp_path, monkeypatch):
-    import frontmatter
+    from app import mdstore
 
     from app.cards import CardStore
 
@@ -191,8 +191,8 @@ def test_card_store_write_is_atomic(tmp_path, monkeypatch):
     monkeypatch.undo()
     # The card file survived the crash untouched and still parses.
     assert path.read_text(encoding="utf-8") == original
-    post = frontmatter.load(path)
-    assert post.metadata["status"] == "draft"
+    md, _ = mdstore.load(path)
+    assert md["status"] == "draft"
     assert store.get(card["id"])["status"] == "draft"
     # A clean write leaves no temp files behind.
     store.set_status(card["id"], "running")
