@@ -7,6 +7,7 @@ into `SessionRunner` there.
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -49,6 +50,47 @@ MCP_SERVER_PATH = Path(__file__).resolve().parent.parent / "mcp_server.py"
 #: "not given" for the model arguments below: resolve the role's own choice.
 _UNSET = object()
 
+#: Windows process-creation flag (no setsid there): the session gets its own
+#: process group, and stop() kills the tree with `taskkill /T`.
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def _detach_kwargs() -> dict:
+    """How to spawn a session detached from the server's process group.
+
+    POSIX: ``start_new_session=True`` (setsid — the pid becomes the pgid, so
+    stop() can signal the whole group with killpg). Windows has no setsid:
+    ``CREATE_NEW_PROCESS_GROUP`` instead, and the tree is stopped with
+    ``taskkill /T /F`` (see _terminate_session).
+    """
+    if sys.platform == "win32":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
+                                         _CREATE_NEW_PROCESS_GROUP)}
+    return {"start_new_session": True}
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Windows pid liveness via OpenProcess/GetExitCodeProcess.
+
+    os.kill(pid, 0) cannot be used here: on Windows os.kill with any other
+    signal calls TerminateProcess — sig 0 would KILL the process instead of
+    probing it. Off Windows there is no ctypes.windll, so this reports False.
+    """
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFO
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259                     # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, ValueError):
+        return False
+
 
 class TestFailedError(Exception):
     """The configured test command failed at a gate point (maps to HTTP 409)."""
@@ -73,11 +115,7 @@ class _AdoptedProc:
         self._exit: int | None = None
 
     def _alive(self) -> bool:
-        try:
-            os.kill(self.pid, 0)
-            return True
-        except OSError:
-            return False
+        return SuperviseMixin._pid_alive(self.pid)
 
     def _read_exit_code(self) -> int | None:
         try:
@@ -256,14 +294,14 @@ class SuperviseMixin:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
+        """Liveness probe that is safe on every OS (see _windows_pid_alive)."""
+        if sys.platform == "win32":
+            return _windows_pid_alive(pid)
         try:
             os.kill(pid, 0)
         except OSError:
             return False
         return True
-
-        # else: no repo / MERGE_HEAD still set — leave the conflict open for
-        # a resolver (a retry accept spawns a fresh one).
 
     def backend(self) -> Backend:
         """The fallback agent CLI (vibe / claude) when no model is chosen.
@@ -340,13 +378,7 @@ class SuperviseMixin:
                 if entry is not None and entry.get("proc") is proc:
                     entry["stop_requested"] = True
                     entry["timed_out"] = True
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (OSError, ProcessLookupError):
-                try:
-                    proc.terminate()
-                except OSError:
-                    pass
+            self._terminate_session(proc, force=False)
 
         threading.Thread(target=watch, daemon=True).start()
 
@@ -441,7 +473,7 @@ class SuperviseMixin:
             try:
                 proc = subprocess.Popen(
                     cmd, stdin=stdin_file, stdout=log_file,
-                    stderr=subprocess.STDOUT, cwd=ws, start_new_session=True, env=env)
+                    stderr=subprocess.STDOUT, cwd=ws, env=env, **_detach_kwargs())
             finally:
                 if stdin_file is not None:
                     stdin_file.close()
@@ -788,9 +820,10 @@ class SuperviseMixin:
 
     @staticmethod
     def _signal_session(pid: int, sig: int) -> None:
-        """Signal a session process: its process group when it was started
-        detached (start_new_session => pid == pgid), else the pid itself — a
-        re-adopted process after a server restart may not be a group leader."""
+        """POSIX only: signal a session process — its process group when it was
+        started detached (start_new_session => pid == pgid), else the pid
+        itself (a re-adopted process after a server restart may not be a group
+        leader). Never call this on Windows; use _terminate_session."""
         try:
             os.killpg(pid, sig)
             return
@@ -800,6 +833,31 @@ class SuperviseMixin:
             os.kill(pid, sig)
         except OSError:
             pass
+
+    @staticmethod
+    def _terminate_session(proc, *, force: bool) -> None:
+        """Stop a session process on any platform.
+
+        POSIX: SIGTERM (graceful — the session writes its export on the way
+        out), escalating to SIGKILL. Windows has no signals: proc.terminate()/
+        proc.kill() map to TerminateProcess for the spawned child, and
+        `taskkill /PID <pid> /T /F` kills the whole detached tree — the only
+        option for an adopted pid, which has no Popen handle.
+        """
+        if sys.platform == "win32":
+            if hasattr(proc, "terminate"):
+                try:
+                    (proc.kill if force else proc.terminate)()
+                except OSError:
+                    pass
+            try:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            return
+        SuperviseMixin._signal_session(
+            proc.pid, signal.SIGKILL if force else signal.SIGTERM)
 
     def stop(self, card_id: str) -> None:
         with self._lock:
@@ -811,12 +869,12 @@ class SuperviseMixin:
         # start_new_session=True makes proc.pid the process-group id for
         # sessions we spawned ourselves; an adopted session (registered by
         # pid after a restart) is signalled by pid when it leads no group.
-        self._signal_session(proc.pid, signal.SIGTERM)
+        self._terminate_session(proc, force=False)
 
         def _escalate() -> None:
             time.sleep(STOP_GRACE_SECONDS)
             if proc.poll() is None:
-                self._signal_session(proc.pid, signal.SIGKILL)
+                self._terminate_session(proc, force=True)
 
         threading.Thread(target=_escalate, daemon=True).start()
         # _finalize records status "stopped" once the process exits and drains

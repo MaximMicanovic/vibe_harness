@@ -75,8 +75,93 @@ def test_inhibitor_command_on_linux(monkeypatch):
 
 
 def test_inhibitor_command_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(sleepguard.sys, "platform", "freebsd13")
+    assert sleepguard.inhibitor_command() is None
+
+
+def test_inhibitor_command_is_none_on_windows(monkeypatch):
+    """Windows holds the inhibitor in-process (SetThreadExecutionState), so
+    there is no subprocess command there."""
     monkeypatch.setattr(sleepguard.sys, "platform", "win32")
     assert sleepguard.inhibitor_command() is None
+
+
+# ------------------------------------------------------------- windows hold
+
+@pytest.fixture()
+def fake_exec_state(monkeypatch):
+    """Record SetThreadExecutionState calls instead of touching the OS."""
+    calls: list[int] = []
+
+    def _fake(flags):
+        calls.append(flags)
+        return True
+
+    monkeypatch.setattr(sleepguard, "_set_execution_state", _fake)
+    return calls
+
+
+def test_windows_is_supported_via_the_in_process_holder(fake_popen, fake_exec_state,
+                                                        monkeypatch):
+    monkeypatch.setattr(sleepguard.sys, "platform", "win32")
+    guard = SleepGuard()
+    assert guard.supported() is True
+    assert guard.acquire() is True
+    assert fake_exec_state == [sleepguard.ES_CONTINUOUS | sleepguard.ES_SYSTEM_REQUIRED]
+    assert fake_popen == []              # no child process on Windows
+    assert guard.held() is True
+
+
+def test_windows_acquire_is_idempotent(fake_popen, fake_exec_state, monkeypatch):
+    monkeypatch.setattr(sleepguard.sys, "platform", "win32")
+    guard = SleepGuard()
+    guard.acquire()
+    guard.acquire()
+    assert len(fake_exec_state) == 1
+
+
+def test_windows_release_clears_with_es_continuous(fake_popen, fake_exec_state,
+                                                   monkeypatch):
+    monkeypatch.setattr(sleepguard.sys, "platform", "win32")
+    guard = SleepGuard()
+    guard.acquire()
+    guard.release()
+    assert fake_exec_state[-1] == sleepguard.ES_CONTINUOUS
+    assert guard.held() is False
+    assert fake_popen == []
+
+
+def test_windows_sync_toggles(fake_popen, fake_exec_state, monkeypatch):
+    monkeypatch.setattr(sleepguard.sys, "platform", "win32")
+    guard = SleepGuard()
+    guard.sync(True)
+    assert guard.held() is True
+    guard.sync(False)
+    assert guard.held() is False
+    assert fake_exec_state == [sleepguard.ES_CONTINUOUS | sleepguard.ES_SYSTEM_REQUIRED,
+                               sleepguard.ES_CONTINUOUS]
+
+
+def test_windows_failed_exec_state_is_not_held(fake_popen, monkeypatch):
+    monkeypatch.setattr(sleepguard.sys, "platform", "win32")
+    monkeypatch.setattr(sleepguard, "_set_execution_state", lambda flags: False)
+    guard = SleepGuard()
+    assert guard.acquire() is False
+    assert guard.held() is False
+
+
+def test_windows_watchdog_thread_holds_while_busy(fake_exec_state, monkeypatch):
+    monkeypatch.setattr(sleepguard.sys, "platform", "win32")
+    guard = SleepGuard(poll_seconds=0.02)
+    guard.start(lambda: True)
+    for _ in range(100):
+        if guard.held():
+            break
+        import time
+        time.sleep(0.01)
+    assert guard.held() is True
+    guard.stop()
+    assert guard.held() is False
 
 
 # --------------------------------------------------------------------- guard
@@ -138,7 +223,7 @@ def test_disabled_guard_never_spawns(fake_popen, monkeypatch):
 
 
 def test_unsupported_platform_never_spawns(fake_popen, monkeypatch):
-    monkeypatch.setattr(sleepguard.sys, "platform", "win32")
+    monkeypatch.setattr(sleepguard.sys, "platform", "freebsd13")
     guard = SleepGuard()
     assert guard.supported() is False
     assert guard.acquire() is False
