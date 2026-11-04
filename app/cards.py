@@ -9,7 +9,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-import frontmatter
+from app import mdstore
 
 STATUSES = ("draft", "running", "reviewing", "done", "failed", "stopped", "accepted")
 
@@ -82,10 +82,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def card_from_post(post: frontmatter.Post) -> dict:
-    """Serialize a card file (frontmatter + body) to its dict representation.
+def card_from_md(md: dict, body: str) -> dict:
+    """Serialize a card file's frontmatter + body to its dict representation.
     Shared by CardStore (board cards) and ArchiveStore (archived cards)."""
-    md = post.metadata
     return {
         "id": md["id"],
         "title": md["title"],
@@ -108,7 +107,7 @@ def card_from_post(post: frontmatter.Post) -> dict:
         "archived": bool(md.get("archived", False)),
         "archive": md.get("archive"),
         "archived_at": md.get("archived_at"),
-        "body": post.content,
+        "body": body,
     }
 
 
@@ -143,35 +142,32 @@ class CardStore:
     # serialization helpers
     # ------------------------------------------------------------------
 
-    def _card_from_post(self, post: frontmatter.Post) -> dict:
-        return card_from_post(post)
-
     def _write(self, path: Path, body: str, metadata: dict) -> None:
         # Atomic write (temp file + os.replace): the runner's finalize threads
         # write from multiple threads while readers poll — a torn read would
         # make the card look missing (CardNotFound). The temp name does not
         # match the *.md glob used by _find_path/list.
         tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
-        tmp.write_text(frontmatter.dumps(frontmatter.Post(body, **metadata)),
-                       encoding="utf-8")
+        tmp.write_text(mdstore.dumps(metadata, body), encoding="utf-8")
         os.replace(tmp, path)
 
     def _find_path(self, card_id: str) -> Path | None:
         """Locate a card's file by the id in its frontmatter (not the filename)."""
         for path in sorted(self.cards_dir.glob("*.md")):
             try:
-                post = frontmatter.load(path)
+                md, _ = mdstore.load(path)
             except Exception:
                 continue
-            if str(post.metadata.get("id")) == card_id:
+            if str(md.get("id")) == card_id:
                 return path
         return None
 
-    def _get_post(self, card_id: str) -> frontmatter.Post:
+    def _load(self, card_id: str) -> tuple[dict, str]:
+        """(metadata, body) of a card; raises CardNotFound if absent."""
         path = self._find_path(card_id)
         if path is None:
             raise CardNotFound(f"no card with id {card_id!r}")
-        return frontmatter.load(path)
+        return mdstore.load(path)
 
     # ------------------------------------------------------------------
     # public interface
@@ -182,7 +178,8 @@ class CardStore:
         cards = []
         for path in self.cards_dir.glob("*.md"):
             try:
-                cards.append(self._card_from_post(frontmatter.load(path)))
+                md, body = mdstore.load(path)
+                cards.append(card_from_md(md, body))
             except Exception:
                 continue
         cards.sort(key=lambda n: n["updated_at"], reverse=True)
@@ -190,7 +187,8 @@ class CardStore:
 
     def get(self, card_id: str) -> dict:
         """Return one card; raises CardNotFound if absent."""
-        return self._card_from_post(self._get_post(card_id))
+        md, body = self._load(card_id)
+        return card_from_md(md, body)
 
     def create(self, title: str, body: str, template: str | None = None,
                auto_run: bool = False, auto_accept: bool = False,
@@ -227,8 +225,8 @@ class CardStore:
                project: str | None = None, workdir: str | None = None,
                parent_id: str | None = None,
                expected_updated_at: str | None = None) -> dict:
-        post = self._get_post(card_id)
-        card = self._card_from_post(post)
+        md, old_body = self._load(card_id)
+        card = card_from_md(md, old_body)
         if card["status"] in LIVE_STATUSES:
             raise CardRunning(f"card {card_id!r} is running and cannot be edited")
         # Optimistic concurrency: a caller that names the version it loaded
@@ -242,7 +240,7 @@ class CardStore:
                 f"(card {card_id!r} was updated at {card['updated_at']}, "
                 f"you opened {expected_updated_at})")
 
-        md = dict(post.metadata)
+        md = dict(md)
         # Only content edits (title/body) reset a finished card; changing
         # settings (auto_run/auto_accept/project/workdir) does not.
         changed = (title is not None and title != card["title"]) or \
@@ -271,7 +269,7 @@ class CardStore:
             md["accepted"] = False
         md["updated_at"] = _now()
 
-        new_body = card["body"] if body is None else body
+        new_body = old_body if body is None else body
         self._write(self._find_path(card_id), new_body, md)
         return self.get(card_id)
 
@@ -308,16 +306,16 @@ class CardStore:
         and by archiving."""
         for other in self.list():
             if card_id in (other.get("depends_on") or []):
-                opost = self._get_post(other["id"])
-                omd = dict(opost.metadata)
+                omd, obody = self._load(other["id"])
+                omd = dict(omd)
                 omd["depends_on"] = [d for d in (omd.get("depends_on") or [])
                                      if d != card_id]
                 omd["updated_at"] = _now()
-                self._write(self._find_path(other["id"]), other["body"], omd)
+                self._write(self._find_path(other["id"]), obody, omd)
 
     def delete(self, card_id: str) -> None:
-        post = self._get_post(card_id)
-        card = self._card_from_post(post)
+        md, body = self._load(card_id)
+        card = card_from_md(md, body)
         if card["status"] in LIVE_STATUSES:
             raise CardRunning(f"card {card_id!r} is running and cannot be deleted")
         self._find_path(card_id).unlink()
@@ -327,13 +325,13 @@ class CardStore:
                    session_patch: dict | None = None) -> dict:
         if status not in STATUSES:
             raise InvalidTransition(f"unknown status {status!r}")
-        post = self._get_post(card_id)
-        card = self._card_from_post(post)
+        md, body = self._load(card_id)
+        card = card_from_md(md, body)
         if status not in TRANSITIONS.get(card["status"], set()):
             raise InvalidTransition(
                 f"cannot transition {card['status']!r} -> {status!r}")
 
-        md = dict(post.metadata)
+        md = dict(md)
         md["status"] = status
         # The flag follows the status: only an accepted card is `accepted`.
         md["accepted"] = status == "accepted"
@@ -343,7 +341,7 @@ class CardStore:
         md["session"] = session
         md["updated_at"] = _now()
 
-        self._write(self._find_path(card_id), card["body"], md)
+        self._write(self._find_path(card_id), body, md)
         return self.get(card_id)
 
     def check_accept(self, card_id: str, *, force: bool = False) -> dict:
@@ -358,7 +356,8 @@ class CardStore:
         accepted by accident. `force` is refused in every other case (it is
         an override for the exhausted-review path only).
         """
-        card = self._card_from_post(self._get_post(card_id))
+        md, body = self._load(card_id)
+        card = card_from_md(md, body)
         if card["status"] != "done":
             raise InvalidTransition(
                 f"cannot accept card in status {card['status']!r}; must be 'done'")
@@ -392,42 +391,42 @@ class CardStore:
         exhausted its rounds (review.exhausted), acceptance is the user's
         explicit manual call (`force=True`) — never automatic.
         """
-        card = self.check_accept(card_id, force=force)
-        post = self._get_post(card_id)
-        md = dict(post.metadata)
+        self.check_accept(card_id, force=force)
+        md, body = self._load(card_id)
+        md = dict(md)
         md["status"] = "accepted"
         md["accepted"] = True
         md["updated_at"] = _now()
 
-        self._write(self._find_path(card_id), card["body"], md)
+        self._write(self._find_path(card_id), body, md)
         return self.get(card_id)
 
     def patch_session(self, card_id: str, patch: dict) -> dict:
         """Merge keys into the card's session dict without a status change."""
-        post = self._get_post(card_id)
-        card = self._card_from_post(post)
+        md, body = self._load(card_id)
+        card = card_from_md(md, body)
         if card["status"] in LIVE_STATUSES:
             raise CardRunning(f"card {card_id!r} is running and cannot be patched")
-        md = dict(post.metadata)
+        md = dict(md)
         session = dict(card["session"]) if card["session"] else dict.fromkeys(SESSION_KEYS)
         session.update(patch)
         md["session"] = session
         md["updated_at"] = _now()
-        self._write(self._find_path(card_id), card["body"], md)
+        self._write(self._find_path(card_id), body, md)
         return self.get(card_id)
 
     def reset_to_draft(self, card_id: str) -> dict:
         """Reset a finished card to draft for a fresh run (clears session/accepted)."""
-        post = self._get_post(card_id)
-        card = self._card_from_post(post)
+        md, body = self._load(card_id)
+        card = card_from_md(md, body)
         if card["status"] in LIVE_STATUSES:
             raise CardRunning(f"card {card_id!r} is running and cannot be reset")
-        md = dict(post.metadata)
+        md = dict(md)
         md["status"] = "draft"
         md["session"] = None
         md["accepted"] = False
         md["updated_at"] = _now()
-        self._write(self._find_path(card_id), card["body"], md)
+        self._write(self._find_path(card_id), body, md)
         return self.get(card_id)
 
     def reopen_after_revert(self, card_id: str,
@@ -469,36 +468,36 @@ class CardStore:
         cycles, unknown cards, and edits while the card is live."""
         if card_id == dep_id:
             raise DependencyError("a card cannot depend on itself")
-        post = self._get_post(card_id)          # CardNotFound -> 404
-        card = self._card_from_post(post)
+        md, body = self._load(card_id)          # CardNotFound -> 404
+        card = card_from_md(md, body)
         if card["status"] in LIVE_STATUSES:
             raise CardRunning(
                 f"card {card_id!r} is running and its dependencies cannot be changed")
-        self._get_post(dep_id)                  # the dependency must exist
+        self._load(dep_id)                      # the dependency must exist
         deps = list(card.get("depends_on") or [])
         if dep_id in deps:
             return card                         # already linked — idempotent
         if self._would_cycle(card_id, dep_id):
             raise DependencyError(
                 f"dependency {card_id!r} -> {dep_id!r} would create a cycle")
-        md = dict(post.metadata)
+        md = dict(md)
         md["depends_on"] = deps + [dep_id]
         md["updated_at"] = _now()
-        self._write(self._find_path(card_id), card["body"], md)
+        self._write(self._find_path(card_id), body, md)
         return self.get(card_id)
 
     def remove_dependency(self, card_id: str, dep_id: str) -> dict:
         """Remove the card_id -> dep_id edge. Idempotent (removing an edge
         that does not exist is a no-op)."""
-        post = self._get_post(card_id)
-        card = self._card_from_post(post)
+        md, body = self._load(card_id)
+        card = card_from_md(md, body)
         if card["status"] in LIVE_STATUSES:
             raise CardRunning(
                 f"card {card_id!r} is running and its dependencies cannot be changed")
-        md = dict(post.metadata)
+        md = dict(md)
         md["depends_on"] = [d for d in (md.get("depends_on") or []) if d != dep_id]
         md["updated_at"] = _now()
-        self._write(self._find_path(card_id), card["body"], md)
+        self._write(self._find_path(card_id), body, md)
         return self.get(card_id)
 
     def dependencies(self, card_id: str) -> dict:

@@ -32,8 +32,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-import frontmatter
-
+from app import mdstore
 from app.cards import (
     InvalidTransition,
     LIVE_STATUSES,
@@ -41,7 +40,7 @@ from app.cards import (
     CardRunning,
     CardStore,
     _slugify,
-    card_from_post,
+    card_from_md,
 )
 from app.projects import ProjectNotFound, ProjectStore
 from app.stacks import StackStore
@@ -67,8 +66,7 @@ def _now() -> str:
 def _write(path: Path, body: str, metadata: dict) -> None:
     # Atomic write (temp + os.replace), same as CardStore._write.
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
-    tmp.write_text(frontmatter.dumps(frontmatter.Post(body, **metadata)),
-                   encoding="utf-8")
+    tmp.write_text(mdstore.dumps(metadata, body), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -93,10 +91,10 @@ class ArchiveStore:
             return None
         for path in sorted(self.archives_dir.glob("*/archive.md")):
             try:
-                post = frontmatter.load(path)
+                md, _ = mdstore.load(path)
             except Exception:
                 continue
-            if str(post.metadata.get("id")) == archive_id:
+            if str(md.get("id")) == archive_id:
                 return path.parent
         return None
 
@@ -106,8 +104,7 @@ class ArchiveStore:
                 if (archive_dir / name).is_dir()]
 
     def _manifest(self, archive_dir: Path) -> dict:
-        post = frontmatter.load(archive_dir / "archive.md")
-        md = post.metadata
+        md, _ = mdstore.load(archive_dir / "archive.md")
         return {
             "id": md["id"],
             "name": md["name"],
@@ -135,18 +132,18 @@ class ArchiveStore:
     def set_project(self, archive_id: str, project: str) -> dict:
         """Move an archive under a project header ("" = no project)."""
         archive_dir = self._get_archive_dir(archive_id)
-        post = frontmatter.load(archive_dir / "archive.md")
-        md = dict(post.metadata)
+        md, body = mdstore.load(archive_dir / "archive.md")
+        md = dict(md)
         md["project"] = (project or "").strip()
         md["updated_at"] = _now()
-        _write(archive_dir / "archive.md", post.content, md)
+        _write(archive_dir / "archive.md", body, md)
         return self.get(archive_id)
 
     def _touch(self, archive_dir: Path) -> None:
-        post = frontmatter.load(archive_dir / "archive.md")
-        md = dict(post.metadata)
+        md, body = mdstore.load(archive_dir / "archive.md")
+        md = dict(md)
         md["updated_at"] = _now()
-        _write(archive_dir / "archive.md", post.content, md)
+        _write(archive_dir / "archive.md", body, md)
 
     def _items(self, archive_dir: Path) -> list[dict]:
         items = []
@@ -154,7 +151,8 @@ class ArchiveStore:
         for items_dir in self._items_dirs(archive_dir):
             for path in sorted(items_dir.glob("*.md")):
                 try:
-                    card = card_from_post(frontmatter.load(path))
+                    md, body = mdstore.load(path)
+                    card = card_from_md(md, body)
                 except Exception:
                     continue
                 if card["id"] in seen:
@@ -173,7 +171,7 @@ class ArchiveStore:
         final group with `name: None` ("No project" in the UI). Groups are
         alphabetical, unfiled last, so the tree is stable between renders.
         """
-        md = frontmatter.load(archive_dir / "archive.md").metadata
+        md, _ = mdstore.load(archive_dir / "archive.md")
         groups: dict[str | None, dict] = {}
         for deck in md.get("archived_projects") or []:
             name = str(deck.get("name") or "").strip()
@@ -202,10 +200,10 @@ class ArchiveStore:
             for cards_dir in sorted(self.archives_dir.glob(f"*/{name}")):
                 for path in sorted(cards_dir.glob("*.md")):
                     try:
-                        post = frontmatter.load(path)
+                        md, _ = mdstore.load(path)
                     except Exception:
                         continue
-                    if str(post.metadata.get("id")) == card_id:
+                    if str(md.get("id")) == card_id:
                         return cards_dir.parent, path
         return None
 
@@ -296,8 +294,8 @@ class ArchiveStore:
             if board_path is None and archived is None:
                 raise CardNotFound(f"no card with id {card_id!r}")
             if board_path is not None:
-                post = frontmatter.load(board_path)
-                card = card_from_post(post)
+                md, body = mdstore.load(board_path)
+                card = card_from_md(md, body)
                 if card["status"] in LIVE_STATUSES:
                     raise CardRunning(
                         f"cannot archive card {card_id!r}: it is running")
@@ -307,22 +305,22 @@ class ArchiveStore:
                         "only accepted cards can be archived")
                 src_path, from_board = board_path, True
             else:
-                post = frontmatter.load(archived[1])
-                card = card_from_post(post)
+                md, body = mdstore.load(archived[1])
+                card = card_from_md(md, body)
                 src_path, from_board = archived[1], False
-            resolved.append((card_id, post, src_path, from_board))
+            resolved.append((card_id, md, body, src_path, from_board))
         # Pass 2: move the files.
         items_dir = archive_dir / ITEMS_DIR
         items_dir.mkdir(parents=True, exist_ok=True)
         moved = []
-        for card_id, post, src_path, from_board in resolved:
-            md = dict(post.metadata)
+        for card_id, md, body, src_path, from_board in resolved:
+            md = dict(md)
             md["archived"] = True
             md["archive"] = archive_id
             md["archived_at"] = _now()
             md["updated_at"] = _now()
             dest = items_dir / src_path.name
-            _write(dest, post.content, md)
+            _write(dest, body, md)
             if src_path != dest:
                 src_path.unlink()
             if from_board:
@@ -330,7 +328,7 @@ class ArchiveStore:
                 # dependents do not wait on a card that is no longer there
                 # (a missing dependency counts as satisfied anyway).
                 self.cards.drop_dependency_refs(card_id)
-            moved.append(card_from_post(frontmatter.load(dest)))
+            moved.append(card_from_md(*mdstore.load(dest)))
         self._touch(archive_dir)
         return {"archive": self.get(archive_id), "cards": moved}
 
@@ -359,14 +357,14 @@ class ArchiveStore:
             archive_id = self._archive_for_deck(name or stack["title"] or stack_id)
         moved = self.archive_cards(stack["ids"], archive_id)["cards"]
         archive_dir = self._get_archive_dir(archive_id)
-        post = frontmatter.load(archive_dir / "archive.md")
-        md = dict(post.metadata)
+        md, body = mdstore.load(archive_dir / "archive.md")
+        md = dict(md)
         shelved = list(md.get("archived_stacks") or [])
         shelved.append({"id": stack["id"], "title": stack["title"],
                         "cards": list(stack["ids"]), "archived_at": _now()})
         md["archived_stacks"] = shelved
         md["updated_at"] = _now()
-        _write(archive_dir / "archive.md", post.content, md)
+        _write(archive_dir / "archive.md", body, md)
         self.stacks.delete(stack["id"])
         return {"stack": stack, "archive": self.get(archive_id), "cards": moved}
 
@@ -390,17 +388,17 @@ class ArchiveStore:
             raise CardInOtherArchive(
                 f"card {card_id!r} is archived in archive "
                 f"{self._manifest(archive_dir)['id']!r}, not {archive_id!r}")
-        post = frontmatter.load(card_path)
-        md = dict(post.metadata)
+        md, body = mdstore.load(card_path)
+        md = dict(md)
         md["archived"] = False
         md["archive"] = None
         md["archived_at"] = None
         md["updated_at"] = _now()
         dest = self.cards.cards_dir / card_path.name
-        _write(dest, post.content, md)
+        _write(dest, body, md)
         card_path.unlink()
         self._touch(archive_dir)
-        return card_from_post(frontmatter.load(dest))
+        return card_from_md(*mdstore.load(dest))
 
     def archive_project(self, project_name: str, archive_id: str) -> dict:
         """Archive an entire deck (project): all of its non-live cards move
@@ -427,13 +425,13 @@ class ArchiveStore:
             moved = self.archive_cards([n["id"] for n in project_cards], archive_id,
                                        gate_accepted=False)["cards"]
         # record the deck in the manifest, then unregister the project
-        post = frontmatter.load(archive_dir / "archive.md")
-        md = dict(post.metadata)
+        md, body = mdstore.load(archive_dir / "archive.md")
+        md = dict(md)
         shelved = list(md.get("archived_projects") or [])
         if not any(d.get("name") == project_name for d in shelved):
             shelved.append({"name": project_name, "archived_at": _now()})
         md["archived_projects"] = shelved
         md["updated_at"] = _now()
-        _write(archive_dir / "archive.md", post.content, md)
+        _write(archive_dir / "archive.md", body, md)
         self.projects.delete(project_name)
         return {"project": project_name, "archive": self.get(archive_id), "cards": moved}

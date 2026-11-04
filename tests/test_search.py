@@ -18,7 +18,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import frontmatter
 import pytest
 from fastapi.testclient import TestClient
 

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import frontmatter
 import pytest
 
+from app import mdstore
 from app.cards import (
     SESSION_KEYS,
     STATUSES,
@@ -58,14 +58,14 @@ def test_frontmatter_round_trip(store: CardStore, tmp_path: Path):
     card = store.create("Web App", "body text", template="web-app", auto_run=True)
     path = tmp_path / "cards" / f"web-app-{card['id']}.md"
 
-    post = frontmatter.load(path)
-    assert post.metadata["id"] == card["id"]
-    assert post.metadata["title"] == "Web App"
-    assert post.metadata["status"] == "draft"
-    assert post.metadata["template"] == "web-app"
-    assert post.metadata["auto_run"] is True
-    assert post.metadata["accepted"] is False
-    assert post.content == "body text"
+    md, body = mdstore.load(path)
+    assert md["id"] == card["id"]
+    assert md["title"] == "Web App"
+    assert md["status"] == "draft"
+    assert md["template"] == "web-app"
+    assert md["auto_run"] is True
+    assert md["accepted"] is False
+    assert body == "body text"
 
 
 def test_slug_collapses_non_alphanumeric(store: CardStore, tmp_path: Path):

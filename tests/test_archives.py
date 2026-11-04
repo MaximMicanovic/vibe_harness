@@ -15,10 +15,10 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import frontmatter
 import pytest
 from fastapi.testclient import TestClient
 
+from app import mdstore
 from app.archives import (
     ArchiveError,
     ArchiveExists,
@@ -95,7 +95,7 @@ def test_create_archive_folder_structure(stores):
     root = stores.tmp_path / "archives" / f"sprint-12-{a['id']}"
     assert (root / "archive.md").exists()
     assert (root / "cards").is_dir()
-    md = frontmatter.load(root / "archive.md").metadata
+    md, _ = mdstore.load(root / "archive.md")
     assert md["id"] == a["id"] and md["type"] == "deck"
 
 
@@ -166,7 +166,7 @@ def test_archive_accepted_card_moves_file_and_marks_frontmatter(stores):
     assert card["id"] not in [n["id"] for n in stores.cards.list()]
     dest = stores.tmp_path / "archives" / f"done-pile-{a['id']}" / "cards" / f"ship-it-{card['id']}.md"
     assert dest.exists()
-    md = frontmatter.load(dest).metadata
+    md, _ = mdstore.load(dest)
     assert md["archived"] is True
     assert md["archive"] == a["id"]
     assert md["archived_at"]
