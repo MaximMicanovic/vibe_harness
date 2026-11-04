@@ -439,7 +439,7 @@ case "$args" in
     exit 1
     ;;
 esac
-echo '{"type":"result","is_error":false,"session_id":"s1","num_turns":1,"total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"claude-sonnet-4-6":{}},"terminal_reason":"completed"}'
+echo '{"type":"result","is_error":false,"session_id":"s1","num_turns":1,"usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"claude-sonnet-4-6":{}},"terminal_reason":"completed"}'
 exit 0
 """
 

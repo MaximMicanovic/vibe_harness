@@ -9,7 +9,6 @@ All optional, via environment variables:
 | `VIBE_HARNESS_HOST` | `127.0.0.1` | Bind host |
 | `VIBE_HARNESS_PORT` | `8734` | Bind port |
 | `VIBE_HARNESS_TIME_LIMIT` | `1800` | Per-session time limit (s), passed to `vibe --time-limit` |
-| `VIBE_HARNESS_MAX_PRICE` | unset | Per-session price cap (USD): `vibe --max-price`, or `claude --max-budget-usd` on the Claude backend |
 | `VIBE_HARNESS_AGENT` | unset | Vibe agent (builtin or `~/.vibe/agents/NAME.toml`) |
 | `VIBE_HARNESS_APPROVE` | `auto` | Vibe: `auto` → `--auto-approve`, `smart` → `--smart-approve`. Claude: `auto` → `--permission-mode bypassPermissions`, `smart` → `--permission-mode auto` |
 | `VIBE_HARNESS_ENABLED_TOOLS` | unset | Comma-separated tool allowlist → repeated `--enabled-tools` (Vibe) or `--allowedTools` (Claude run sessions). The harness appends `<mcp server name>_*` so the board tools survive the allowlist |

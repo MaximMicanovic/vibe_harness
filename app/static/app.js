@@ -268,14 +268,6 @@ function fmtTokens(n) {
   return String(n);
 }
 
-/* USD cost: two decimals for amounts of a cent or more, four for smaller
- * ones; '—' when the cost is unknown (null). */
-function fmtCost(usd) {
-  if (usd == null || isNaN(usd)) return '—';
-  if (usd >= 0.01) return '$' + usd.toFixed(2);
-  return '$' + usd.toFixed(4);
-}
-
 /* Hover suffix naming what types of tokens a counter was made of — cached,
  * output, input (in that order). Unknown types (null) are skipped; when no
  * type is known at all the suffix is empty and the tooltip stays generic. */
@@ -384,10 +376,6 @@ function renderStats() {
   if (!s) return;
   const live = backendHasLiveTokens();
   $('stat-tokens-wrap').hidden = !live;
-  // Cost is reported once per round at export time on every backend (there
-  // is no live cost counter), so it shows regardless of the backend.
-  $('stat-cost').textContent = fmtCost(s.total_cost_usd);
-  $('stat-cost-wrap').title = 'Total cost across all cards in USD (worker + review + resolver rounds)';
   if (!live) {
     $('stat-runtime').textContent = fmtDuration(s.total_runtime_seconds);
     $('stat-avg').textContent = fmtDuration(s.avg_runtime_seconds);
@@ -411,49 +399,6 @@ function renderStats() {
 
 function chip(className, text) {
   return el('span', 'chip chip-' + className, text);
-}
-
-/* The model picker that sits on every card. Changing it PATCHes the card, so a
- * card can be pinned to a model (or put back on "inherit") without opening the
- * editor — and a model that splits a spec can do the same through the MCP. */
-function buildCardModelPicker(card) {
-  const wrap = el('label', 'card-model');
-  wrap.title = card.model
-    ? 'This card runs on ' + card.model + ' — click to change'
-    : 'This card inherits the worker role\'s model — click to pin one';
-  const select = el('select', 'card-model-select');
-  const inherit = el('option', '', card.model ? 'model: inherit' : 'model: inherit');
-  inherit.value = '';
-  select.appendChild(inherit);
-  const models = (state.models && state.models.models) || [];
-  for (const m of models) {
-    const opt = el('option', '', m.label || m.alias);
-    opt.value = m.alias;
-    select.appendChild(opt);
-  }
-  // A card pinned to a model that is no longer configured still shows it.
-  if (card.model && !models.some((m) => m.alias === card.model)) {
-    const opt = el('option', '', card.model);
-    opt.value = card.model;
-    select.appendChild(opt);
-  }
-  select.value = card.model || '';
-  select.addEventListener('click', (e) => e.stopPropagation());
-  select.addEventListener('mousedown', (e) => e.stopPropagation());
-  select.addEventListener('change', (e) => {
-    e.stopPropagation();
-    setCardModel(card.id, select.value).catch(showError);
-  });
-  wrap.appendChild(select);
-  return wrap;
-}
-
-/* Pin a card to a model ('' = inherit). The board re-reads the cards after. */
-async function setCardModel(cardId, model) {
-  await api('/api/cards/' + encodeURIComponent(cardId), {
-    method: 'PUT', body: JSON.stringify({ model: model }),
-  });
-  await refresh();
 }
 
 /* A done card with an open merge conflict spins while a resolver session runs. */
@@ -739,10 +684,6 @@ function buildCard(cardData, queuePos) {
   card.appendChild(meta);
 
   const chips = el('div', 'card-chips');
-  // The card's own model, right on the card: a card pinned to a model runs its
-  // own sessions on it (worker + merge resolver); "inherit" follows the
-  // worker role from the sidebar's Models panel.
-  chips.appendChild(buildCardModelPicker(card));
   if (cardData.workdir) {
     const wc = chip('workdir', '📁 ' + cardData.workdir);
     wc.title = cardData.workdir + ' — Vibe works in this folder';
@@ -798,13 +739,6 @@ function buildCard(cardData, queuePos) {
       tc.title = 'Total tokens this card cost (worker + review + resolver rounds): '
         + fmtTokens(total) + ' tok' + tokenTypesSuffix(bd);
       chips.appendChild(tc);
-    }
-    if (typeof s.card_cost_usd === 'number') {
-      // The card's total USD cost — same rounds as the token chip above.
-      const cc = chip('cost', fmtCost(s.card_cost_usd));
-      cc.title = 'Total cost this card has spent in USD (worker + review + resolver rounds): '
-        + fmtCost(s.card_cost_usd);
-      chips.appendChild(cc);
     }
     if (s.verified === true) chips.appendChild(chip('verified', '✓ verified'));
     if (s.review) {
@@ -2662,12 +2596,13 @@ async function loadSettings() {
   return state.settings;
 }
 
-/* The pickable models, cached for the per-card pickers. */
+/* The model catalog, cached for the Models panel and the backend check
+ * (backendHasLiveTokens reads resolved_backend). */
 async function loadModels() {
   try {
     state.models = await api('/api/models');
   } catch (_) {
-    state.models = null;  // the card pickers fall back to "inherit" only
+    state.models = null;  // backendHasLiveTokens then assumes live tokens
   }
   return state.models;
 }

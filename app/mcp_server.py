@@ -327,10 +327,9 @@ TOOLS: list[dict] = [
     {
         "name": "list_models",
         "description": (
-            "List the models a card can be put on (create_card/update_card take "
-            "a `model` alias), plus which model each role currently uses. A "
-            "card's own model wins for its own sessions; a card without one "
-            "inherits the worker role's model. " + _COMMON),
+            "List the configured models (alias, label, backend), plus which "
+            "model each role currently uses. A card inherits the worker "
+            "role's model. " + _COMMON),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -370,7 +369,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "stats",
-        "description": "Board stats: counts by status, total tokens, total cost (USD), total/avg runtime; optionally scoped to one project. " + _COMMON,
+        "description": "Board stats: counts by status, total tokens, total/avg runtime; optionally scoped to one project. " + _COMMON,
         "inputSchema": {
             "type": "object",
             "properties": {"project": {"type": "string"}},
@@ -729,11 +728,6 @@ def tool_create_card(args: dict) -> object:
         "auto_run": bool(args.get("auto_run", False)),
         "auto_accept": bool(args.get("auto_accept", False)),
     }
-    # A card can be pinned to its own model (see list_models): a worker that
-    # splits a spec can put the mechanical subtasks on a cheap model and the
-    # hard one on a strong model.
-    if args.get("model"):
-        payload["model"] = args["model"]
     # Inherit the calling card's project/workdir so the new card runs in the
     # same place — the model cannot point it anywhere else. The new card also
     # becomes a CHILD of the calling card: a worker that splits its spec into
@@ -754,7 +748,7 @@ def tool_update_card(args: dict) -> object:
         raise HarnessError(err)
     card_id = args["card_id"]
     payload = {k: v for k, v in args.items()
-               if k in ("title", "body", "auto_run", "auto_accept", "model")
+               if k in ("title", "body", "auto_run", "auto_accept")
                and k != "card_id"}
     return _api().put(f"/api/cards/{card_id}", payload)
 
@@ -798,7 +792,7 @@ def tool_list_templates(args: dict) -> object:
 
 
 def tool_list_models(args: dict) -> object:
-    """The aliases a card can be put on, plus what each role currently uses."""
+    """The configured model aliases, plus what each role currently uses."""
     data = _api().get("/api/models")
     if not isinstance(data, dict):
         return data
@@ -810,9 +804,6 @@ def tool_list_models(args: dict) -> object:
                    "backend": r.get("effective_backend"),
                    "inherited": r.get("inherited")} for r in data.get("roles", [])],
         "default_model": data.get("default_model"),
-        "card": ("Pass `model` to create_card/update_card to pin a card to one "
-                 "of these aliases; omit it to inherit the worker role's model. "
-                 "The alias's `backend` is the platform that runs it."),
     }
 
 

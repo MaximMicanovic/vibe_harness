@@ -6,16 +6,11 @@ rounds write their own number to `session.reviews[]` (and `session.review` for
 cards written before the list existed); merge-conflict resolver rounds write
 theirs to `session.resolver`. A card's real cost is the sum of all three.
 
-The same shape holds for money: every round's export carries `cost_usd` (the
-Claude backend maps Anthropic's `total_cost_usd` onto it in
-`backends.normalize_export`), the worker's lands on `session.cost_usd` and
-each review/resolver round records its own. `card_cost_usd` derives the
-card's total from those per-round numbers, exactly like `card_tokens`.
-
 Deriving the total here — instead of changing what `session.tokens` means —
 keeps every card written before this helper existed readable, and gives the
 board, `/api/stats`, `/api/split-report` and the per-card chip one number to
-agree on.
+agree on. Money is not tracked: the user is on a subscription, so only tokens
+and time limits are accounted.
 """
 from __future__ import annotations
 
@@ -28,27 +23,6 @@ def _num(value) -> int | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return int(value)
     return None
-
-
-def _cost(value) -> float | None:
-    """A finite float for numeric values (bool excluded), else None."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    return None
-
-
-def export_cost_usd(export) -> float | None:
-    """One round export's USD cost (the normalized `cost_usd` key), or None."""
-    if not isinstance(export, dict):
-        return None
-    return _cost(export.get("cost_usd"))
-
-
-def _round_cost(record) -> float | None:
-    """One round record's USD cost (None when it has none)."""
-    if not isinstance(record, dict):
-        return None
-    return _cost(record.get("cost_usd"))
 
 
 def _round_tokens(record) -> int:
@@ -110,27 +84,6 @@ def card_token_breakdown(session: dict | None) -> dict | None:
         known = [v for v in values if v is not None]
         out[key] = sum(known) if known else None
     return out if any(v is not None for v in out.values()) else None
-
-
-def card_cost_usd(session: dict | None) -> float | None:
-    """The USD the card actually cost: worker + review + resolver rounds.
-
-    Mirrors `card_tokens`: `session.cost_usd` is the worker's export total
-    (cumulative across resumed fixer rounds, so added once), review rounds
-    write theirs to `session.reviews[]` / `session.review`, resolver rounds to
-    `session.resolvers[]` / `session.resolver`. None when no round ever
-    reported a cost (unknown, not zero); the sum is rounded to 6 decimals so
-    binary float noise never shows up as money.
-    """
-    if not isinstance(session, dict):
-        return None
-    values = [_cost(session.get("cost_usd"))]
-    values += [_round_cost(r) for r in _rounds(session, "reviews", "review")]
-    values += [_round_cost(r) for r in _rounds(session, "resolvers", "resolver")]
-    known = [v for v in values if v is not None]
-    if not known:
-        return None
-    return round(sum(known), 6)
 
 
 def combine_live(recorded: int, live: dict) -> int:

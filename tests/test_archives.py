@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$workdir" "$outdir"
 cat > "$outdir/export.json" <<'EOF'
-{"cost_usd": 0.01, "usage": {"total_tokens": 42}, "config": {"active_model": "fake-model"}, "stop_reason": "end_turn", "outcome": "success"}
+{"usage": {"total_tokens": 42}, "config": {"active_model": "fake-model"}, "stop_reason": "end_turn", "outcome": "success"}
 EOF
 echo "VERDICT: APPROVED"
 exit 0

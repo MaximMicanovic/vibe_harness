@@ -249,7 +249,6 @@ the whole workspace (input tokens went ~200k → 2–3M per session before this)
   and therefore the peak spend rate. It does not reduce the tokens a single card
   costs; it stops ten Run clicks from starting ten sessions at once.
 - **Hard guardrails on every session** (passed to `vibe`):
-  - `VIBE_HARNESS_MAX_PRICE` → `--max-price <usd>`: absolute per-session cost
     cap; the session is interrupted when exceeded.
   - `VIBE_HARNESS_TIME_LIMIT` → `--time-limit <s>` (default 1800): wall-clock
     cap; vibe writes the export and exits.
@@ -534,7 +533,6 @@ A card that did not fail has no `session.failure` at all.
 ## 6. Low-token preset (copy-paste)
 
 ```bash
-export VIBE_HARNESS_MAX_PRICE=1.00          # hard per-session cost cap
 export VIBE_HARNESS_TIME_LIMIT=600          # 10 min per session
 export VIBE_HARNESS_MAX_REVIEW_ROUNDS=3     # stop paying for fixer loops sooner
 export VIBE_HARNESS_TEST_CMD="pytest -q"    # fail fast, review only green code
