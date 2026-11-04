@@ -2082,11 +2082,13 @@ function closeProjects() {
 $('projects-close').addEventListener('click', closeProjects);
 projectsOverlay.addEventListener('click', (e) => { if (e.target === projectsOverlay) closeProjects(); });
 
-// The native folder picker is a macOS dialog run by the server; the browser and
-// server are the same machine for this local tool, so the browser's platform is
-// the server's platform. Off macOS, hide Browse… and keep typing the path.
-const pickerPlatform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
-if (!/mac/i.test(pickerPlatform)) projectBrowseBtn.hidden = true;
+// The native folder picker is run by the SERVER, one backend per OS (macOS
+// osascript, Linux zenity/kdialog, Windows PowerShell) — the browser's UA says
+// nothing reliable about it. Ask the server whether one exists here; when it
+// does not, the typed path input is the primary fallback and Browse… stays hidden.
+api('/api/fs/picker-available').then((d) => {
+  if (d && d.available === false) projectBrowseBtn.hidden = true;
+}).catch(() => {});
 
 projectBrowseBtn.addEventListener('click', () => action(async () => {
   projectBrowseBtn.disabled = true;

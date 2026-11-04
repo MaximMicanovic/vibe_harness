@@ -7,6 +7,7 @@ binds the socket via uvicorn. `uvicorn app.main:app` keeps working as-is.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -186,6 +187,90 @@ def static_version() -> str:
             stat = path.stat()
             digest.update(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
     return digest.hexdigest()[:12]
+
+
+# --- server restart relaunch, per OS -----------------------------------------
+#
+# The /api/server/restart handler spawns ONE detached command that kills the
+# old port listener and relaunches uvicorn. POSIX keeps the historical
+# `sh -c` script (lsof/ps/kill/nohup); Windows has no `sh`, so the command is
+# `sys.executable -c <script>` doing the same with netstat/taskkill and
+# spawning uvicorn directly.
+
+def _port_listener_pids(port: int) -> set[int]:
+    """Pids listening on tcp:`port`. POSIX: lsof. Windows: netstat -ano."""
+    if sys.platform == "win32":
+        proc = subprocess.run(["netstat", "-ano"], capture_output=True, text=True)
+        pids: set[int] = set()
+        for line in proc.stdout.splitlines():
+            parts = line.split()
+            if (len(parts) >= 5 and parts[0].upper() == "TCP"
+                    and parts[1].endswith(f":{port}")
+                    and parts[3].upper() == "LISTENING" and parts[-1].isdigit()):
+                pids.add(int(parts[-1]))
+        return pids
+    proc = subprocess.run(["lsof", "-ti", f"tcp:{port}"],
+                          capture_output=True, text=True)
+    return {int(p) for p in proc.stdout.split() if p.strip().isdigit()}
+
+
+def _posix_restart_script(config: Config, base_dir: Path) -> str:
+    """The historical sh script, unchanged: kill the listener (and its
+    --reload parent), then relaunch uvicorn detached."""
+    return (
+        "sleep 2; "
+        f"PID=$(lsof -ti tcp:{config.port} 2>/dev/null); "
+        "if [ -n \"$PID\" ]; then "
+        "PP=$(ps -o ppid= -p $PID 2>/dev/null | tr -d ' '); "
+        "kill $PID 2>/dev/null; "
+        "[ -n \"$PP\" ] && [ \"$PP\" != \"1\" ] && kill $PP 2>/dev/null; "
+        "fi; "
+        "sleep 1; "
+        f"cd '{base_dir}' && nohup '{sys.executable}' -m uvicorn app.main:app "
+        f"--host {config.host} --port {config.port} --reload "
+        "--reload-dir app "  # never watch sessions/ — card worktrees live there
+        ">> /tmp/vibe-harness-server.log 2>&1 &"
+    )
+
+
+def _windows_restart_script(config: Config, base_dir: Path, pids: set[int]) -> str:
+    """The Windows equivalent as a `python -c` body: taskkill the old
+    listeners, then relaunch uvicorn detached (no sh, no nohup)."""
+    kill_old = ";".join(
+        f"subprocess.run(['taskkill','/F','/T','/PID',{pid!r}],capture_output=True)"
+        for pid in sorted(pids | {os.getpid()}))
+    return (
+        "import os,subprocess,sys,time;"
+        "time.sleep(2);"
+        f"{kill_old};"
+        "time.sleep(1);"
+        f"os.chdir({str(base_dir)!r});"
+        "subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app',"
+        f"'--host',{config.host!r},'--port',{config.port!r},'--reload','--reload-dir','app'],"
+        "creationflags=subprocess.CREATE_NEW_PROCESS_GROUP"
+        "|subprocess.CREATE_NO_WINDOW|subprocess.DETACHED_PROCESS,"
+        "stdout=open(os.devnull,'wb'),stderr=subprocess.STDOUT)"
+    )
+
+
+def _relaunch_argv(config: Config, base_dir: Path, pids: set[int]) -> list[str]:
+    """The detached command the restart handler spawns, per OS."""
+    if sys.platform == "win32":
+        return [sys.executable, "-c",
+                _windows_restart_script(config, base_dir, pids)]
+    return ["sh", "-c", _posix_restart_script(config, base_dir)]
+
+
+def _detached_spawn_kwargs() -> dict:
+    """Popen kwargs that detach the relaunched server from this process.
+
+    POSIX: start_new_session. Windows: a new process group in its own window
+    (no setsid there).
+    """
+    if sys.platform == "win32":
+        return {"creationflags": 0x00000200 | 0x08000000 | 0x00000008}
+        # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS
+    return {"start_new_session": True}
 
 
 def create_app(config: Config | None = None,
@@ -868,6 +953,12 @@ def create_app(config: Config | None = None,
         return archives.archive_project(project_name, archive_id)
 
     # --- misc ------------------------------------------------------------------
+    @app.get("/api/fs/picker-available")
+    def picker_available():
+        # The UI hides Browse… when the server's OS has no native picker; the
+        # typed path input is then the primary way to enter a project folder.
+        return {"available": fsdialog.available()}
+
     @app.post("/api/fs/choose-folder")
     def choose_folder():
         # Sync endpoint: the native dialog blocks, FastAPI runs this in a
@@ -1030,33 +1121,18 @@ def create_app(config: Config | None = None,
         Only acts when THIS process is the one serving on the configured port
         (a live uvicorn run — never an in-process TestClient, and never a
         different server that happens to share the port): spawns a detached
-        shell that kills the port listener (and its --reload parent), then
-        relaunches uvicorn with --reload. Returns before the old process
-        dies, so the dashboard can poll until the API is back.
+        per-OS command (see _relaunch_argv) that kills the port listener (and
+        its --reload parent), then relaunches uvicorn with --reload. Returns
+        before the old process dies, so the dashboard can poll until the API
+        is back.
         """
-        import os
-        proc = subprocess.run(["lsof", "-ti", f"tcp:{config.port}"],
-                              capture_output=True, text=True)
-        pids = {int(p) for p in proc.stdout.split() if p.strip().isdigit()}
+        pids = _port_listener_pids(config.port)
         if os.getpid() not in pids:
             return JSONResponse(status_code=409, content={
                 "detail": f"this process is not the server on {config.host}:{config.port}"})
-        script = (
-            "sleep 2; "
-            f"PID=$(lsof -ti tcp:{config.port} 2>/dev/null); "
-            "if [ -n \"$PID\" ]; then "
-            "PP=$(ps -o ppid= -p $PID 2>/dev/null | tr -d ' '); "
-            "kill $PID 2>/dev/null; "
-            "[ -n \"$PP\" ] && [ \"$PP\" != \"1\" ] && kill $PP 2>/dev/null; "
-            "fi; "
-            "sleep 1; "
-            f"cd '{BASE_DIR}' && nohup '{sys.executable}' -m uvicorn app.main:app "
-            f"--host {config.host} --port {config.port} --reload "
-            "--reload-dir app "  # never watch sessions/ — card worktrees live there
-            ">> /tmp/vibe-harness-server.log 2>&1 &"
-        )
-        subprocess.Popen(["sh", "-c", script], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(_relaunch_argv(config, BASE_DIR, pids),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         **_detached_spawn_kwargs())
         return {"status": "restarting", "port": config.port}
 
     # Catch-all static mount LAST so /api/* routes take precedence.

@@ -11,14 +11,19 @@ resolver, hold an idle-sleep inhibitor:
 
 - macOS: ``caffeinate -i`` (prevent idle sleep; the display may still sleep).
 - Linux: ``systemd-inhibit --what=idle:sleep`` when it is available.
+- Windows: ``SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)`` via
+  ctypes — an in-process API call, no child process; cleared with
+  ``ES_CONTINUOUS`` on release.
 - Anything else: no-op — there is no portable way to ask for this.
 
-The inhibitor is a CHILD PROCESS of the server, so it dies with it: a crashed or
-killed dashboard can never leave the machine permanently awake. ``release()``
-also runs on shutdown.
+On macOS/Linux the inhibitor is a CHILD PROCESS of the server, so it dies with
+it: a crashed or killed dashboard can never leave the machine permanently
+awake. On Windows the call is per-thread state of this process, which dies with
+it the same way. ``release()`` also runs on shutdown.
 """
 from __future__ import annotations
 
+import ctypes
 import shutil
 import subprocess
 import sys
@@ -31,8 +36,30 @@ from typing import Callable
 POLL_SECONDS = 5.0
 
 
+# Windows SetThreadExecutionState flags: ES_CONTINUOUS keeps the setting until
+# changed, ES_SYSTEM_REQUIRED asks the OS not to sleep idle.
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def _set_execution_state(flags: int) -> bool:
+    """Windows only: SetThreadExecutionState via ctypes. False elsewhere."""
+    try:
+        return bool(ctypes.windll.kernel32.SetThreadExecutionState(flags))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def windows_inhibitor() -> bool:
+    """True when this platform's inhibitor is the in-process Windows API call
+    (no subprocess — see inhibitor_command)."""
+    return sys.platform == "win32"
+
+
 def inhibitor_command() -> list[str] | None:
-    """The command that holds an idle-sleep inhibitor on this platform."""
+    """The command that holds an idle-sleep inhibitor as a child process, or
+    None — on Windows the inhibitor is the in-process _set_execution_state
+    call instead, and on unsupported platforms there is neither."""
     if sys.platform == "darwin":
         # -i: no idle sleep (what actually kills a session).
         # -s: no system sleep while on AC power — the strongest assertion a
@@ -53,6 +80,7 @@ class SleepGuard:
         self.enabled = bool(enabled)
         self.poll_seconds = poll_seconds
         self._proc: subprocess.Popen | None = None
+        self._win_held = False
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -60,23 +88,33 @@ class SleepGuard:
     # ---------------------------------------------------------------- state
 
     def held(self) -> bool:
-        """True while an inhibitor process is actually running."""
+        """True while an inhibitor is actually held (process or Windows API)."""
         with self._lock:
+            if windows_inhibitor():
+                return self._win_held
             return self._proc is not None and self._proc.poll() is None
 
     def supported(self) -> bool:
-        return inhibitor_command() is not None
+        return inhibitor_command() is not None or windows_inhibitor()
 
     # ------------------------------------------------------------ lifecycle
 
     def acquire(self) -> bool:
-        """Start the inhibitor. Returns True when one is running."""
+        """Start the inhibitor. Returns True when one is held."""
         if not self.enabled:
             return False
-        cmd = inhibitor_command()
-        if cmd is None:
-            return False
         with self._lock:
+            if windows_inhibitor():
+                # In-process on Windows: no child, the call is per-thread state
+                # of this process (cleared with ES_CONTINUOUS on release).
+                if self._win_held:
+                    return True
+                self._win_held = _set_execution_state(
+                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+                return self._win_held
+            cmd = inhibitor_command()
+            if cmd is None:
+                return False
             if self._proc is not None and self._proc.poll() is None:
                 return True
             try:
@@ -91,6 +129,10 @@ class SleepGuard:
         """Stop the inhibitor (idempotent)."""
         with self._lock:
             proc, self._proc = self._proc, None
+            win_held, self._win_held = self._win_held, False
+        if win_held:
+            _set_execution_state(ES_CONTINUOUS)
+            return
         if proc is None:
             return
         try:
@@ -113,7 +155,7 @@ class SleepGuard:
         """Poll `is_busy()` in a daemon thread and keep the inhibitor in sync."""
         if not self.enabled or self._thread is not None:
             return
-        if inhibitor_command() is None:
+        if not self.supported():
             return
 
         def loop() -> None:

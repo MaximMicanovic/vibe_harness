@@ -15,7 +15,7 @@ from app.backends import get_backend
 from app.cards import CardNotFound, InvalidTransition
 from app.gitops import GitBusyError, GitError, GitMergeConflict
 from .prompts import export_token_breakdown, now_iso, resolve_prompt_template
-from .supervise import TestFailedError
+from .supervise import TestFailedError, _detach_kwargs
 
 
 class AcceptMixin:
@@ -501,7 +501,7 @@ class AcceptMixin:
             try:
                 proc = subprocess.Popen(
                     cmd, stdin=stdin_file, stdout=log_file,
-                    stderr=subprocess.STDOUT, cwd=ws, start_new_session=True, env=env)
+                    stderr=subprocess.STDOUT, cwd=ws, env=env, **_detach_kwargs())
             finally:
                 if stdin_file is not None:
                     stdin_file.close()

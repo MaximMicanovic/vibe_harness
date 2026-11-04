@@ -798,6 +798,44 @@ def test_restart_server_409_when_not_serving(env, monkeypatch):
     assert "not the server" in r.json()["detail"]
 
 
+def test_restart_server_posix_spawns_sh_script(env, monkeypatch):
+    """POSIX behavior is unchanged: a detached `sh -c` relaunch script."""
+    import os
+    import sys
+    from app import main
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(main, "_port_listener_pids", lambda port: {os.getpid()})
+    spawned = []
+    monkeypatch.setattr(main.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append((argv, kw)))
+    r = env.client.post("/api/server/restart")
+    assert r.status_code == 200 and r.json()["status"] == "restarting"
+    argv, kwargs = spawned[0]
+    assert argv[0] == "sh" and argv[1] == "-c" and "uvicorn" in argv[2]
+    assert kwargs.get("start_new_session") is True
+
+
+def test_restart_server_windows_spawns_python_without_sh(env, monkeypatch):
+    """Windows has no sh: the relaunch is sys.executable -c ..., detached via
+    creationflags, and it kills the old listener with taskkill."""
+    import os
+    import sys
+    from app import main
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(main, "_port_listener_pids", lambda port: {os.getpid(), 4321})
+    spawned = []
+    monkeypatch.setattr(main.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append((argv, kw)))
+    r = env.client.post("/api/server/restart")
+    assert r.status_code == 200 and r.json()["status"] == "restarting"
+    argv, kwargs = spawned[0]
+    assert argv[0] == sys.executable and argv[1] == "-c"
+    assert "sh" not in argv[:2]
+    assert "taskkill" in argv[2] and "4321" in argv[2] and "uvicorn" in argv[2]
+    assert "start_new_session" not in kwargs
+    assert kwargs.get("creationflags")
+
+
 def test_index_served(env):
     r = env.client.get("/")
     assert r.status_code == 200
@@ -1121,12 +1159,24 @@ def test_choose_folder_cancelled(env, monkeypatch):
 
 
 def test_choose_folder_unsupported(env, monkeypatch):
-    def unavailable():
-        raise fsdialog.FolderPickerUnavailable("folder picker needs macOS with osascript")
-    monkeypatch.setattr(fsdialog, "choose_folder", unavailable)
+    # A platform with no native picker: 501 and the message points at the
+    # typed-path fallback.
+    import sys
+    monkeypatch.setattr(sys, "platform", "freebsd13")
     r = env.client.post("/api/fs/choose-folder")
     assert r.status_code == 501, r.text
-    assert "macOS" in r.json()["detail"]
+    assert "type the path" in r.json()["detail"]
+
+
+def test_picker_available_endpoint_reports_the_server_os(env, monkeypatch):
+    """The UI asks this before showing Browse…: it must reflect the SERVER's
+    OS backend (osascript/zenity/kdialog/powershell), not the browser's UA."""
+    monkeypatch.setattr(fsdialog, "available", lambda: True)
+    r = env.client.get("/api/fs/picker-available")
+    assert r.status_code == 200 and r.json() == {"available": True}
+    monkeypatch.setattr(fsdialog, "available", lambda: False)
+    r = env.client.get("/api/fs/picker-available")
+    assert r.status_code == 200 and r.json() == {"available": False}
 
 
 # --------------------------------------------------------------------- git
