@@ -1,16 +1,20 @@
 """Per-role model selection for the harness's sessions.
 
-The harness runs three kinds of session, and each can run on a different model:
+The harness has four roles, and each can run on a different model:
 
 - **worker** (`run-N`) — implements the card and its fixer rounds;
 - **review** (`review-N`) — reviews the diff and the test output;
 - **resolver** (`resolve-N`) — resolves a conflicted merge when a card is
-  accepted.
+  accepted;
+- **orchestrator** — no session of its own yet; the worker splits a spec
+  into sub-cards itself through the MCP `create_card` tool.
 
 Choosing a model IS choosing the platform: the model list carries both backends
 (Vibe's aliases from the user's config, plus Claude's `sonnet` / `opus` /
-`haiku`), and picking one sets the backend for that role. There is no separate
-global backend control to contradict it.
+`haiku`), and picking one sets the backend for that role. settings.json does
+carry a `backend` key, but it is only the internal fallback for a role with no
+model picked (see `SessionRunner.backend`) — the per-role choice always wins,
+so there is no second global switch to contradict it.
 
 Vibe has no `--model` flag, but its config layers put `VIBE_*` environment
 variables *above* the user's `config.toml`, so `VIBE_ACTIVE_MODEL=<alias>`

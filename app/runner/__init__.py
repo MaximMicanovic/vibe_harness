@@ -1,18 +1,19 @@
 """SessionRunner: spawn, track, stop, and finalize headless vibe CLI sessions.
 
-One vibe subprocess per card at a time, working in an isolated workspace under
-``sessions/<card_id>/workspace`` (or the card's project folder). Every
+One vibe subprocess per card at a time. A git-backed card (project folder or
+workdir override — not the sandbox) runs in its per-card linked worktree
+``sessions/<card_id>/worktree`` on its own branch ``<prefix>/<card_id>`` (the
+project folder's main worktree stays on the base branch); a sandbox card (no
+project) runs in the isolated ``sessions/<card_id>/workspace``. Every
 implementation run is followed by a review pass — a second, read-only vibe
 session (the ``ask`` agent) that inspects the work. If the reviewer approves,
 the card becomes ``done`` (acceptable); if it rejects, the card goes back to
 ``running`` and a fixer session receives the rejection reason. The loop repeats
 until approved, capped at ``config.max_review_rounds``; when the cap is hit the
 card lands in ``done`` WITHOUT an approved review (``review.exhausted``) and
-must be accepted manually. Runs in a real work folder (project folder or
-workdir override — not the sandbox) are git-backed: the folder is ``git init``-ed
-if needed, the card runs on its own branch ``<prefix>/<card_id>``, each
-successful round is committed, and accepting the card merges the branch into
-the base branch. Run metadata
+must be accepted manually. Git-backed runs ``git init`` the work folder if
+needed, commit each successful round, and accepting the card merges the branch
+into the base branch. Run metadata
 (tokens/model from vibe's export.json) is persisted into the card's
 frontmatter via CardStore.
 

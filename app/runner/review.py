@@ -21,7 +21,10 @@ class ReviewMixin:
 
     @staticmethod
     def _read_verdict(rdir: Path, ws: Path) -> tuple[bool, str | None] | None:
-        """Reviewer verdict: last VERDICT: line in its session log, else REVIEW.md."""
+        """Fallback verdict channel: last VERDICT: line in the reviewer's
+        session log, else REVIEW.md. The primary channel is the structured
+        ``submit_verdict`` call (``verdicts/review-<n>.json``), read in
+        ``supervise.py``."""
         try:
             text = (rdir / "session.log").read_text(encoding="utf-8", errors="replace")
         except OSError:
