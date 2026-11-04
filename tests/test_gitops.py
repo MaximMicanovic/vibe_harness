@@ -301,11 +301,68 @@ def test_merge_card_branch_conflict_left_in_place(repo, tmp_path):
     assert wt.resolve() not in gitops.registered_worktrees(repo)
 
 
-def test_merge_card_branch_dirty_raises(repo, tmp_path):
-    info = gitops.prepare_card_branch(repo, "harness/abc123", _wt(tmp_path, "abc123"))
-    (repo / "wip.txt").write_text("x\n")
-    with pytest.raises(GitError):
+def test_merge_card_branch_dirty_main_worktree_auto_stashes(repo, tmp_path):
+    """A dirty MAIN worktree at accept time — a tracked modification AND an
+    untracked file (anything `git status --porcelain` counts, e.g. report.md)
+    — does NOT block the merge: the changes are stashed with
+    `git stash push -u` (kept for manual recovery, never popped
+    automatically), the stash is recorded on the session git record
+    (stashed=True), and the merge proceeds."""
+    wt = _wt(tmp_path, "abc123")
+    info = gitops.prepare_card_branch(repo, "harness/abc123", wt)
+    (wt / "hello.py").write_text("print('hi')\n")
+    gitops.commit_workspace(wt, "vibe-harness: test")
+    # The main worktree gets dirty between run start and accept: a tracked
+    # modification, an untracked file, and an untracked hello.py whose later
+    # stash pop would conflict with the merged one (that must not block the
+    # merge — the merge happens first and the stash is simply kept).
+    (repo / "README.md").write_text("local edit\n")
+    (repo / "report.md").write_text("untracked report\n")
+    (repo / "hello.py").write_text("local version\n")
+    assert gitops.is_dirty(repo)
+    result = gitops.merge_card_branch(info)
+    # The merge happened: exactly one merge commit, the card's change in main.
+    assert result["merge_was_ff"] is False
+    assert result["merge_commit"] == git(["rev-parse", "HEAD"], repo)
+    assert git(["rev-parse", "HEAD^2"], repo) == git(["rev-parse", "harness/abc123"], repo)
+    assert (repo / "hello.py").read_text() == "print('hi')\n"
+    assert git(["symbolic-ref", "--short", "HEAD"], repo) == "main"
+    # The stash was recorded on the card's session git record.
+    assert info["stashed"] is True
+    # The dirty changes were stashed, not merged: the main worktree is clean
+    # and holds the committed content, not the local edits.
+    assert not gitops.is_dirty(repo)
+    assert (repo / "README.md").read_text() == "hi\n"
+    assert not (repo / "report.md").exists()
+    # The stash is KEPT for manual recovery (never auto-popped or dropped).
+    stash_list = git(["stash", "list"], repo)
+    assert "vibe-harness: stashed before merging harness/abc123" in stash_list
+    stashed_files = git(["stash", "show", "--include-untracked", "--name-only"], repo)
+    assert "README.md" in stashed_files
+    assert "report.md" in stashed_files
+    assert "hello.py" in stashed_files
+
+
+def test_merge_card_branch_merge_in_progress_still_raises(repo, tmp_path):
+    """A merge already in progress in the main worktree is genuinely
+    unrecoverable for an accept: still a hard GitError (never stashed away),
+    and the in-progress merge is left untouched for its resolver."""
+    wt = _wt(tmp_path, "abc123")
+    info = gitops.prepare_card_branch(repo, "harness/abc123", wt)
+    (wt / "README.md").write_text("card change\n")
+    gitops.commit_workspace(wt, "vibe-harness: test")
+    (repo / "README.md").write_text("user change\n")
+    git(["commit", "-q", "-am", "user edit"], repo)
+    proc = subprocess.run(["git", "merge", "harness/abc123"], cwd=repo,
+                          capture_output=True, text=True)
+    assert proc.returncode != 0          # conflicted, left in place
+    assert gitops.merge_in_progress(repo)
+    with pytest.raises(GitError, match="merge is in progress"):
         gitops.merge_card_branch(info)
+    # The conflicted merge is left alone; nothing was stashed away.
+    assert gitops.merge_in_progress(repo)
+    assert git(["stash", "list"], repo) == ""
+    assert info.get("stashed") is not True
 
 
 def test_remove_card_worktree_unregistered_dir(repo, tmp_path):
@@ -449,16 +506,54 @@ def test_revert_plain_commit_uses_no_m1(repo):
     assert not gitops.is_dirty(repo)
 
 
-def test_revert_refuses_dirty_tree(repo, tmp_path):
-    """Uncommitted changes block the revert: git would refuse anyway, but the
-    error must be ours (clear, 409) and nothing may be touched."""
+def test_revert_dirty_tree_auto_stashes(repo, tmp_path):
+    """A dirty main worktree does NOT block the revert either: the changes
+    (tracked modification AND untracked file) are stashed with
+    `git stash push -u` — kept for manual recovery, never auto-popped —
+    recorded on the card's session git record when one is passed
+    (stashed=True), and the revert proceeds."""
+    wt = _wt(tmp_path, "abc123")
+    info = gitops.prepare_card_branch(repo, "harness/abc123", wt)
+    (wt / "hello.py").write_text("print('hi')\n")
+    gitops.commit_workspace(wt, "vibe-harness: test")
+    merged = gitops.merge_card_branch(info)
+    assert (repo / "hello.py").exists()
+    # The main worktree gets dirty after the accept.
+    (repo / "README.md").write_text("local edit\n")
+    (repo / "notes.txt").write_text("untracked\n")
+    assert gitops.is_dirty(repo)
+    result = gitops.revert_merge_commit(repo, merged["merge_commit"], git_info=info)
+    # The revert went through; the card's change is gone from tree and branch.
+    assert not (repo / "hello.py").exists()
+    assert "hello.py" not in git(["ls-tree", "--name-only", "main"], repo)
+    assert result["revert_commit"] == git(["rev-parse", "HEAD"], repo)
+    assert result["reverted_commit"] == merged["merge_commit"]
+    # The stash was recorded on the session git record; the tree is clean and
+    # no revert is left in progress.
+    assert info["stashed"] is True
+    assert not gitops.is_dirty(repo)
+    assert not gitops.revert_in_progress(repo)
+    # The stash is kept for manual recovery with the revert-time message; the
+    # user's work (tracked + untracked) is in it, not lost.
+    assert "vibe-harness: stashed before reverting" in git(["stash", "list"], repo)
+    stashed_files = git(["stash", "show", "--include-untracked", "--name-only"], repo)
+    assert "README.md" in stashed_files
+    assert "notes.txt" in stashed_files
+    assert not (repo / "notes.txt").exists()
+
+
+def test_revert_dirty_tree_without_git_record_still_stashes(repo, tmp_path):
+    """revert_merge_commit without a session git record (the old call shape)
+    still auto-stashes a dirty tree and reverts; there is just nothing to
+    record the stash on."""
     merged = _accepted_card(repo, tmp_path)
     (repo / "wip.txt").write_text("x\n")
-    with pytest.raises(GitError) as exc:
-        gitops.revert_merge_commit(repo, merged["merge_commit"])
-    assert "uncommitted" in str(exc.value)
-    assert (repo / "hello.py").exists()          # nothing reverted
-    assert (repo / "wip.txt").exists()           # the user's work is untouched
+    result = gitops.revert_merge_commit(repo, merged["merge_commit"])
+    assert not (repo / "hello.py").exists()
+    assert result["revert_commit"] == git(["rev-parse", "HEAD"], repo)
+    assert not gitops.is_dirty(repo)
+    assert "vibe-harness" in git(["stash", "list"], repo)
+    assert not (repo / "wip.txt").exists()
 
 
 def test_revert_refuses_merge_in_progress(repo, tmp_path):
